@@ -31,6 +31,7 @@
     "scripts/",
     "skills/",
     "src/",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],
@@ -41,7 +42,8 @@
     "install:codex": "node scripts/install-agent.mjs codex",
     "install:gemini": "node scripts/install-agent.mjs gemini",
     "install:claude": "node scripts/install-agent.mjs claude",
-    "pack:dry-run": "npm pack --dry-run"
+    "pack:dry-run": "npm pack --dry-run",
+    "prepublishOnly": "npm run test:coverage"
   },
   "engines": {
     "node": ">=18"
