@@ -2,6 +2,15 @@
 
 All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
+## Unreleased
+
+- Keep failed `tool-call` responses protocol-shaped, echoing `protocol` and
+  `requestId` alongside `ok: false`.
+- Rename the stray `agents/openai.yaml` skill descriptor to `agents/codex.yaml`
+  and correct its provider list; there is no OpenAI provider.
+- Document the package/bin name (`webmcp-ai`) vs. the `-cli` directory/skill
+  convention, and the provider list vs. agent-host list.
+
 ## 0.1.0 - 2026-07-13
 
 - Add the provider-neutral `webmcp-ai` CLI.

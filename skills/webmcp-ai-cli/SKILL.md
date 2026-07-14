@@ -5,6 +5,17 @@ description: Inspect and invoke locally installed AGY, Claude Code, and Codex CL
 
 # WebMCP AI CLI
 
+Names: the published npm package is `@gyga-browser/webmcp-ai` and the executable
+is `webmcp-ai`. The `-cli` suffix (this skill and the `webmcp-ai-cli/` directory)
+is a repository convention only; nothing you run is named `webmcp-ai-cli`.
+
+Providers vs. agent hosts are two different lists:
+
+- **Providers** (what `webmcp-ai` invokes): `agy`, `claude`, `codex`. AGY is a
+  provider but is not an install target.
+- **Agent hosts** (where `install:agent` copies this skill): `codex`, `gemini`,
+  `claude`. Gemini is an install host but is not a provider.
+
 Start with:
 
 ```bash
@@ -31,6 +42,15 @@ webmcp-ai generate \
 For structured output, pass a JSON Schema file with `--schema`. AGY 1.1.1 does
 not expose structured output; choose Claude or Codex for schema-constrained work.
 
+## Choose the response interface
+
+Use `generate` for one-shot generation. Use `tool-call` only when the caller
+needs the protocol request ID for correlation.
+
+- `generate --json`: require `ok: true`, then consume `response.text`.
+- `tool-call --json`: require `ok: true`, then consume `output.text`.
+- On failure, read `error.code`; do not parse diagnostics from stderr.
+
 ## Tool protocol
 
 Inspect the tool contract before integrating it:
@@ -46,8 +66,7 @@ printf '%s' '{"protocol":"webmcp-tool-v1","requestId":"run-1@compose","tool":"ai
   | webmcp-ai tool-call --json
 ```
 
-Treat stdout as machine-readable output and stderr as diagnostics. Check `ok`
-before consuming `output`.
+Treat stdout as machine-readable output and stderr as diagnostics.
 
 ## Safety
 

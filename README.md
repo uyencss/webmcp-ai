@@ -61,6 +61,9 @@ Successful JSON responses use `ok: true`. Errors use a stable shape:
 }
 ```
 
+A failed `tool-call` keeps the protocol envelope, echoing `protocol` and
+`requestId` alongside `ok: false` so callers can correlate the failure.
+
 Stdout contains only command output. Provider diagnostics are not copied into
 machine-readable errors, preventing accidental secret disclosure.
 

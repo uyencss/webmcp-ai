@@ -55,6 +55,9 @@ export const codexProvider = {
     } catch {
       // Plain text is a valid response when no schema was requested.
     }
+    // Codex `exec` does not echo a resumable session id. Resume is still
+    // supported via an explicitly supplied --session-id (obtained out of band),
+    // so this adapter never surfaces one to auto-continue.
     return { text, structured, sessionId: null };
   },
 };

@@ -156,10 +156,24 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     return 0;
   }
   if (command === 'tool-call') {
-    const request = readJsonInput('-');
-    const result = await handleToolCall(request, { env });
-    printValue(result, true);
-    return 0;
+    let request;
+    try {
+      request = readJsonInput('-');
+      const result = await handleToolCall(request, { env });
+      printValue(result, true);
+      return 0;
+    } catch (error) {
+      // A failed webmcp-tool-v1 call must still return a protocol-shaped
+      // envelope so callers can correlate the failure by requestId.
+      const typed = asAiCliError(error);
+      printValue({
+        protocol: TOOL_PROTOCOL,
+        requestId: typeof request?.requestId === 'string' ? request.requestId : null,
+        ok: false,
+        error: typed.toJSON(),
+      }, true);
+      return typed.exitCode;
+    }
   }
 
   throw new AiCliError('USAGE_ERROR', `Unknown command: ${argv.slice(0, 2).join(' ')}`, { exitCode: 2 });

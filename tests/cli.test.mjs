@@ -89,6 +89,23 @@ test('tool-call implements webmcp-tool-v1', () => {
   assert.equal(payload.output.text, 'reply:codex:tool-prompt');
 });
 
+test('tool-call failures stay protocol-shaped and echo the requestId', () => {
+  const result = run(['tool-call', '--json'], {
+    input: JSON.stringify({
+      protocol: 'webmcp-tool-v1',
+      requestId: 'run-9@compose',
+      tool: 'ai.generate',
+      input: { provider: 'nope', prompt: 'x' },
+    }),
+  });
+  assert.equal(result.status, 2);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.protocol, 'webmcp-tool-v1');
+  assert.equal(payload.requestId, 'run-9@compose');
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error.code, 'UNKNOWN_PROVIDER');
+});
+
 test('JSON errors are stable and exclude stack traces', () => {
   const result = run(['generate', '--provider', 'missing', '--prompt', 'hello', '--json']);
   assert.equal(result.status, 2);

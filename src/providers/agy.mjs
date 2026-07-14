@@ -40,6 +40,8 @@ export const agyProvider = {
     };
   },
   parseOutput({ stdout }) {
+    // AGY does not return a resumable conversation id; resume requires an
+    // explicit --conversation value supplied by the caller.
     return { text: stdout.trim(), structured: null, sessionId: null };
   },
   modelsInvocation: { args: ['models'], stdin: null },
