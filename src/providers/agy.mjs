@@ -49,6 +49,7 @@ export const agyProvider = {
         '--print-timeout', `${seconds}s`,
         ...(request.agent ? ['--agent', request.agent] : []),
         ...(request.model ? ['--model', request.model] : []),
+        ...(request.effort ? ['--effort', request.effort] : []),
         ...(request.sessionId ? ['--conversation', request.sessionId] : []),
       ],
       stdin: null,
