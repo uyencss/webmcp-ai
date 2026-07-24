@@ -38,8 +38,15 @@ webmcp-ai tools describe --json
 
 Prefer `--prompt-file` or `--input-json -` over `--prompt` so prompts do not
 appear in shell history. Claude and Codex prompts are forwarded over stdin. AGY
-1.1.1 only documents argument-based print mode, so the AGY adapter enforces a
+only documents argument-based print mode, so the AGY adapter enforces a
 bounded prompt size.
+
+AGY defaults to `agentMode: "plan"`. A supervised executor that owns its
+workspace, policy, cancellation, and output validation may explicitly opt into
+`agentMode: "accept-edits"` through JSON stdin or
+`--agent-mode accept-edits`. The value is enum-constrained, remains sandboxed,
+and never enables dangerous permission bypass. Claude and Codex reject this
+AGY-only option.
 
 ## Tool protocol
 
@@ -72,6 +79,8 @@ machine-readable errors, preventing accidental secret disclosure.
 - Claude: tools disabled, safe mode, Chrome disabled, non-persistent sessions.
 - Codex: read-only sandbox, ephemeral session, user config and rules ignored.
 - AGY: sandboxed plan mode; unsafe permission bypass is never enabled.
+- AGY `accept-edits` is opt-in for a supervised agent host; plan remains the
+  default.
 - Resume requires an explicit session ID. There is no implicit “last session”.
 
 Override provider binaries with `AGY_BIN`, `CLAUDE_BIN`, or `CODEX_BIN`.

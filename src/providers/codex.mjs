@@ -2,6 +2,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { AiCliError } from '../errors.mjs';
+
 export const codexProvider = {
   id: 'codex',
   name: 'Codex CLI',
@@ -14,6 +16,11 @@ export const codexProvider = {
     modelDiscovery: false,
   },
   buildInvocation(request) {
+    if (request.agentMode) {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'Codex does not support AGY agentMode', {
+        exitCode: 2,
+      });
+    }
     const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-codex-'));
     const outputFile = join(dir, 'last-message.txt');
     const schemaFile = request.schema ? join(dir, 'output-schema.json') : null;

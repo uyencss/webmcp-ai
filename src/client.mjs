@@ -24,6 +24,7 @@ function normalizeRequest(input) {
       effort: input.effort || null,
       schema: input.schema || null,
       sessionId: input.sessionId || null,
+      agentMode: input.agentMode || null,
       timeoutMs,
     },
   };

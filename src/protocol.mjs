@@ -21,6 +21,7 @@ export function describeTools() {
           timeoutMs: { type: 'number', exclusiveMinimum: 0 },
           schema: { type: ['object', 'null'] },
           sessionId: { type: ['string', 'null'] },
+          agentMode: { enum: ['plan', 'accept-edits', null] },
         },
       },
     }],

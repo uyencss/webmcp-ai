@@ -8,6 +8,9 @@ test('tool description declares the protocol, risk, and input schema', () => {
   assert.equal(description.protocol, TOOL_PROTOCOL);
   assert.equal(description.tools[0].risk, 'generate');
   assert.deepEqual(description.tools[0].inputSchema.required, ['provider', 'prompt']);
+  assert.deepEqual(description.tools[0].inputSchema.properties.agentMode, {
+    enum: ['plan', 'accept-edits', null],
+  });
 });
 
 for (const [name, request, code] of [

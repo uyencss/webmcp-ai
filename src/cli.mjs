@@ -31,6 +31,7 @@ Generate options:
   --effort <level>        Provider reasoning/effort override
   --schema <path>         JSON Schema for structured output
   --session-id <id>       Resume only this explicit provider session
+  --agent-mode <mode>     AGY only: plan (default) or accept-edits
   --timeout-ms <ms>       Process timeout (default: 600000)
   --workspace <path>      Trusted working directory for the provider
   --json                  Emit stable JSON on stdout
@@ -89,6 +90,7 @@ function generateInput(options) {
     effort: options.effort ?? fromJson.effort,
     schema,
     sessionId: options['session-id'] ?? fromJson.sessionId,
+    agentMode: options['agent-mode'] ?? fromJson.agentMode,
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
     workspace: options.workspace ?? fromJson.workspace,
   };

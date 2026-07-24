@@ -14,6 +14,12 @@ export const agyProvider = {
     modelDiscovery: true,
   },
   buildInvocation(request) {
+    const agentMode = request.agentMode ?? 'plan';
+    if (!['plan', 'accept-edits'].includes(agentMode)) {
+      throw new AiCliError('INVALID_INPUT', 'AGY agentMode must be plan or accept-edits', {
+        exitCode: 2,
+      });
+    }
     if (Buffer.byteLength(request.prompt, 'utf8') > MAX_PROMPT_ARG_BYTES) {
       throw new AiCliError(
         'PROMPT_TOO_LARGE',
@@ -31,7 +37,7 @@ export const agyProvider = {
       args: [
         '-p', request.prompt,
         '--sandbox',
-        '--mode', 'plan',
+        '--mode', agentMode,
         '--print-timeout', `${seconds}s`,
         ...(request.model ? ['--model', request.model] : []),
         ...(request.sessionId ? ['--conversation', request.sessionId] : []),

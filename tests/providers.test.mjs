@@ -52,6 +52,38 @@ test('AGY isolates its argument-only prompt limitation and stays sandboxed', () 
   assert.equal(invocation.args.includes('--dangerously-skip-permissions'), false);
 });
 
+test('AGY permits only an explicit supervised accept-edits mode', () => {
+  const invocation = getProvider('agy').buildInvocation({
+    prompt: 'agy prompt',
+    timeoutMs: 12_500,
+    agentMode: 'accept-edits',
+  });
+  assert.equal(invocation.args[invocation.args.indexOf('--mode') + 1], 'accept-edits');
+  assert.ok(invocation.args.includes('--sandbox'));
+  assert.equal(invocation.args.includes('--dangerously-skip-permissions'), false);
+  assert.throws(
+    () => getProvider('agy').buildInvocation({
+      prompt: 'x', timeoutMs: 1_000, agentMode: 'unsafe',
+    }),
+    (error) => error.code === 'INVALID_INPUT',
+  );
+});
+
+test('non-AGY providers reject Agy agent modes instead of silently ignoring them', () => {
+  assert.throws(
+    () => getProvider('claude').buildInvocation({
+      prompt: 'x', timeoutMs: 1_000, agentMode: 'accept-edits',
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY',
+  );
+  assert.throws(
+    () => getProvider('codex').buildInvocation({
+      prompt: 'x', timeoutMs: 1_000, agentMode: 'accept-edits',
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY',
+  );
+});
+
 test('provider parsers normalize native output', () => {
   assert.deepEqual(getProvider('agy').parseOutput({ stdout: 'hello' }), {
     text: 'hello', structured: null, sessionId: null,

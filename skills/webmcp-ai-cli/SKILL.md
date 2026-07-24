@@ -42,6 +42,12 @@ webmcp-ai generate \
 For structured output, pass a JSON Schema file with `--schema`. AGY 1.1.1 does
 not expose structured output; choose Claude or Codex for schema-constrained work.
 
+AGY defaults to `agentMode: "plan"`. Use `agentMode: "accept-edits"` only when
+the caller is a supervised executor with a pinned workspace, bounded timeout,
+cancellation, and strict output/evidence validation. Pass it through JSON stdin
+or `--agent-mode accept-edits`; never combine it with dangerous permission
+bypass. Claude and Codex reject this AGY-only option.
+
 ## Choose the response interface
 
 Use `generate` for one-shot generation. Use `tool-call` only when the caller

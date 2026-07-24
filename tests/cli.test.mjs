@@ -59,7 +59,7 @@ test('doctor, inspect, models, tools, and version commands are independently usa
 
   const version = run(['--version']);
   assert.equal(version.status, 0, version.stderr);
-  assert.match(version.stdout, /^0\.1\.0/);
+  assert.match(version.stdout, /^0\.2\.0/);
 });
 
 test('generate accepts JSON input over stdin', () => {

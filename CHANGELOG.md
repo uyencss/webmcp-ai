@@ -4,6 +4,8 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Add an explicit, enum-constrained AGY `agentMode` with safe `plan` default
+  and supervised `accept-edits` opt-in; Claude and Codex reject the option.
 - Keep failed `tool-call` responses protocol-shaped, echoing `protocol` and
   `requestId` alongside `ok: false`.
 - Rename the stray `agents/openai.yaml` skill descriptor to `agents/codex.yaml`

@@ -1,3 +1,5 @@
+import { AiCliError } from '../errors.mjs';
+
 export const claudeProvider = {
   id: 'claude',
   name: 'Claude Code',
@@ -10,6 +12,11 @@ export const claudeProvider = {
     modelDiscovery: false,
   },
   buildInvocation(request) {
+    if (request.agentMode) {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'Claude does not support AGY agentMode', {
+        exitCode: 2,
+      });
+    }
     const args = [
       '-p',
       '--tools', '',
