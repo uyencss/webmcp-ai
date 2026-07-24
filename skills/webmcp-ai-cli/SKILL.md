@@ -48,6 +48,10 @@ cancellation, and strict output/evidence validation. Pass it through JSON stdin
 or `--agent-mode accept-edits`; never combine it with dangerous permission
 bypass. Claude and Codex reject this AGY-only option.
 
+When the caller depends on a constrained AGY custom agent, pass its discovered
+name as `agent` in JSON input or via `--agent`. The AI CLI selects the agent but
+does not install it or change machine-level permissions.
+
 ## Choose the response interface
 
 Use `generate` for one-shot generation. Use `tool-call` only when the caller

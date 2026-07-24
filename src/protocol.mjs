@@ -22,6 +22,7 @@ export function describeTools() {
           schema: { type: ['object', 'null'] },
           sessionId: { type: ['string', 'null'] },
           agentMode: { enum: ['plan', 'accept-edits', null] },
+          agent: { type: ['string', 'null'] },
         },
       },
     }],

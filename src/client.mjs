@@ -25,6 +25,7 @@ function normalizeRequest(input) {
       schema: input.schema || null,
       sessionId: input.sessionId || null,
       agentMode: input.agentMode || null,
+      agent: input.agent || null,
       timeoutMs,
     },
   };
@@ -109,4 +110,24 @@ export async function listModels(providerId, { env = process.env } = {}) {
     maxOutputBytes: 1024 * 1024,
   });
   return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+export async function listAgents(providerId, { env = process.env } = {}) {
+  const provider = getProvider(providerId);
+  if (!provider.agentsInvocation) {
+    throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not expose agent discovery`, {
+      exitCode: 2,
+    });
+  }
+  const command = resolveProviderBin(provider, env);
+  const result = await runProcess(command, provider.agentsInvocation.args, {
+    stdin: provider.agentsInvocation.stdin,
+    env,
+    timeoutMs: 10_000,
+    maxOutputBytes: 1024 * 1024,
+  });
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && line.toLowerCase() !== 'available agents:');
 }

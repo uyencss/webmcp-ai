@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { generate, listModels, probeProviders } from './client.mjs';
+import {
+  generate, listAgents, listModels, probeProviders,
+} from './client.mjs';
 import { AiCliError, asAiCliError } from './errors.mjs';
 import { listProviders } from './providers/index.mjs';
 import { describeTools, handleToolCall, TOOL_PROTOCOL } from './protocol.mjs';
@@ -21,6 +23,7 @@ Usage:
   ${commandName} providers list [--json]
   ${commandName} providers inspect <provider> [--json]
   ${commandName} models list --provider <agy|claude|codex> [--json]
+  ${commandName} agents list --provider agy [--json]
   ${commandName} generate --provider <id> (--prompt <text> | --prompt-file <path>) [options]
   ${commandName} generate --input-json <path|-> [--json]
   ${commandName} tools describe [--json]
@@ -32,6 +35,7 @@ Generate options:
   --schema <path>         JSON Schema for structured output
   --session-id <id>       Resume only this explicit provider session
   --agent-mode <mode>     AGY only: plan (default) or accept-edits
+  --agent <name>          AGY only: select a discovered custom agent
   --timeout-ms <ms>       Process timeout (default: 600000)
   --workspace <path>      Trusted working directory for the provider
   --json                  Emit stable JSON on stdout
@@ -91,6 +95,7 @@ function generateInput(options) {
     schema,
     sessionId: options['session-id'] ?? fromJson.sessionId,
     agentMode: options['agent-mode'] ?? fromJson.agentMode,
+    agent: options.agent ?? fromJson.agent,
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
     workspace: options.workspace ?? fromJson.workspace,
   };
@@ -105,7 +110,7 @@ function printValue(value, json, textSelector = null) {
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
   const commandName = getCommandName(env);
   const [command, subcommand, ...rest] = argv;
-  const allArgs = argv.slice(command === 'providers' || command === 'models' || command === 'tools' ? 2 : 1);
+  const allArgs = argv.slice(['providers', 'models', 'agents', 'tools'].includes(command) ? 2 : 1);
   const { options, positional } = parseOptions(allArgs);
   const json = Boolean(options.json || argv.includes('--json'));
 
@@ -145,6 +150,12 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     const provider = options.provider;
     const models = await listModels(provider, { env });
     printValue({ ok: true, provider, models }, json, (value) => value.models.join('\n'));
+    return 0;
+  }
+  if (command === 'agents' && subcommand === 'list') {
+    const provider = options.provider;
+    const agents = await listAgents(provider, { env });
+    printValue({ ok: true, provider, agents }, json, (value) => value.agents.join('\n'));
     return 0;
   }
   if (command === 'tools' && subcommand === 'describe') {

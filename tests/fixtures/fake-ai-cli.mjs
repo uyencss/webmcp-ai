@@ -16,6 +16,11 @@ if (args[0] === 'models') {
   process.exit(0);
 }
 
+if (args[0] === 'agents' || args[0] === 'agent') {
+  process.stdout.write('Available agents:\n  webmcp-node-executor\n  code-reviewer\n');
+  process.exit(0);
+}
+
 if (process.env.FAKE_DELAY_MS) {
   await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_DELAY_MS)));
 }

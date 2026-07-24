@@ -17,6 +17,11 @@ export const claudeProvider = {
         exitCode: 2,
       });
     }
+    if (request.agent) {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'Claude does not support AGY custom agents', {
+        exitCode: 2,
+      });
+    }
     const args = [
       '-p',
       '--tools', '',

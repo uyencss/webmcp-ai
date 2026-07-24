@@ -57,8 +57,10 @@ test('AGY permits only an explicit supervised accept-edits mode', () => {
     prompt: 'agy prompt',
     timeoutMs: 12_500,
     agentMode: 'accept-edits',
+    agent: 'webmcp-node-executor',
   });
   assert.equal(invocation.args[invocation.args.indexOf('--mode') + 1], 'accept-edits');
+  assert.equal(invocation.args[invocation.args.indexOf('--agent') + 1], 'webmcp-node-executor');
   assert.ok(invocation.args.includes('--sandbox'));
   assert.equal(invocation.args.includes('--dangerously-skip-permissions'), false);
   assert.throws(
@@ -67,9 +69,15 @@ test('AGY permits only an explicit supervised accept-edits mode', () => {
     }),
     (error) => error.code === 'INVALID_INPUT',
   );
+  assert.throws(
+    () => getProvider('agy').buildInvocation({
+      prompt: 'x', timeoutMs: 1_000, agent: '../unsafe',
+    }),
+    (error) => error.code === 'INVALID_INPUT',
+  );
 });
 
-test('non-AGY providers reject Agy agent modes instead of silently ignoring them', () => {
+test('non-AGY providers reject Agy agent options instead of silently ignoring them', () => {
   assert.throws(
     () => getProvider('claude').buildInvocation({
       prompt: 'x', timeoutMs: 1_000, agentMode: 'accept-edits',
@@ -79,6 +87,18 @@ test('non-AGY providers reject Agy agent modes instead of silently ignoring them
   assert.throws(
     () => getProvider('codex').buildInvocation({
       prompt: 'x', timeoutMs: 1_000, agentMode: 'accept-edits',
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY',
+  );
+  assert.throws(
+    () => getProvider('claude').buildInvocation({
+      prompt: 'x', timeoutMs: 1_000, agent: 'webmcp-node-executor',
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY',
+  );
+  assert.throws(
+    () => getProvider('codex').buildInvocation({
+      prompt: 'x', timeoutMs: 1_000, agent: 'webmcp-node-executor',
     }),
     (error) => error.code === 'UNSUPPORTED_CAPABILITY',
   );

@@ -4,6 +4,14 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+## 0.2.1 - 2026-07-24
+
+- Add an enum-safe AGY custom-agent selector through JSON input and
+  `--agent`, while other providers reject the AGY-only option.
+- Add normalized AGY custom-agent discovery through `agents list`.
+
+## 0.2.0 - 2026-07-24
+
 - Add an explicit, enum-constrained AGY `agentMode` with safe `plan` default
   and supervised `accept-edits` opt-in; Claude and Codex reject the option.
 - Keep failed `tool-call` responses protocol-shaped, echoing `protocol` and

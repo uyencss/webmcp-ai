@@ -32,6 +32,7 @@ webmcp-ai doctor --json
 webmcp-ai providers list --json
 webmcp-ai providers inspect claude --json
 webmcp-ai models list --provider agy --json
+webmcp-ai agents list --provider agy --json
 webmcp-ai generate --provider claude --prompt-file ./prompt.md --json
 webmcp-ai tools describe --json
 ```
@@ -47,6 +48,11 @@ workspace, policy, cancellation, and output validation may explicitly opt into
 `--agent-mode accept-edits`. The value is enum-constrained, remains sandboxed,
 and never enables dangerous permission bypass. Claude and Codex reject this
 AGY-only option.
+
+Use `agent: "webmcp-node-executor"` in JSON input (or
+`--agent webmcp-node-executor`) to select a preinstalled AGY custom agent. The
+wrapper validates a simple agent name and only selects it; installation and
+machine permissions remain the caller's responsibility.
 
 ## Tool protocol
 

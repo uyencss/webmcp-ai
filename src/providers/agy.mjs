@@ -1,6 +1,7 @@
 import { AiCliError } from '../errors.mjs';
 
 const MAX_PROMPT_ARG_BYTES = 128 * 1024;
+const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export const agyProvider = {
   id: 'agy',
@@ -19,6 +20,13 @@ export const agyProvider = {
       throw new AiCliError('INVALID_INPUT', 'AGY agentMode must be plan or accept-edits', {
         exitCode: 2,
       });
+    }
+    if (request.agent && !AGENT_NAME_PATTERN.test(request.agent)) {
+      throw new AiCliError(
+        'INVALID_INPUT',
+        'AGY agent must be a simple discovered agent name (letters, numbers, dot, underscore, or hyphen)',
+        { exitCode: 2 },
+      );
     }
     if (Buffer.byteLength(request.prompt, 'utf8') > MAX_PROMPT_ARG_BYTES) {
       throw new AiCliError(
@@ -39,6 +47,7 @@ export const agyProvider = {
         '--sandbox',
         '--mode', agentMode,
         '--print-timeout', `${seconds}s`,
+        ...(request.agent ? ['--agent', request.agent] : []),
         ...(request.model ? ['--model', request.model] : []),
         ...(request.sessionId ? ['--conversation', request.sessionId] : []),
       ],
@@ -51,4 +60,5 @@ export const agyProvider = {
     return { text: stdout.trim(), structured: null, sessionId: null };
   },
   modelsInvocation: { args: ['models'], stdin: null },
+  agentsInvocation: { args: ['agents'], stdin: null },
 };

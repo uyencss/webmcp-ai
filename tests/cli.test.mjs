@@ -40,7 +40,7 @@ test('providers list emits stable JSON', () => {
   assert.deepEqual(payload.providers.map((provider) => provider.id), ['agy', 'claude', 'codex']);
 });
 
-test('doctor, inspect, models, tools, and version commands are independently usable', () => {
+test('doctor, inspect, models, agents, tools, and version commands are independently usable', () => {
   const doctor = run(['doctor', '--json'], { env: { FAKE_PROVIDER: 'doctor' } });
   assert.equal(doctor.status, 0, doctor.stderr);
   assert.equal(JSON.parse(doctor.stdout).readyProviders.length, 3);
@@ -53,23 +53,32 @@ test('doctor, inspect, models, tools, and version commands are independently usa
   assert.equal(models.status, 0, models.stderr);
   assert.deepEqual(JSON.parse(models.stdout).models, ['model-one', 'model-two']);
 
+  const agents = run(['agents', 'list', '--provider', 'agy', '--json'], { env: { FAKE_PROVIDER: 'agy' } });
+  assert.equal(agents.status, 0, agents.stderr);
+  assert.deepEqual(JSON.parse(agents.stdout).agents, ['webmcp-node-executor', 'code-reviewer']);
+
   const tools = run(['tools', 'describe', '--json']);
   assert.equal(tools.status, 0, tools.stderr);
   assert.equal(JSON.parse(tools.stdout).tools[0].id, 'ai.generate');
 
   const version = run(['--version']);
   assert.equal(version.status, 0, version.stderr);
-  assert.match(version.stdout, /^0\.2\.0/);
+  assert.match(version.stdout, /^0\.2\.1/);
 });
 
 test('generate accepts JSON input over stdin', () => {
   const result = run(['generate', '--input-json', '-', '--json'], {
-    input: JSON.stringify({ provider: 'claude', prompt: 'from-json', model: 'sonnet' }),
-    env: { FAKE_PROVIDER: 'claude' },
+    input: JSON.stringify({
+      provider: 'agy',
+      prompt: 'from-json',
+      model: 'sonnet',
+      agent: 'webmcp-node-executor',
+    }),
+    env: { FAKE_PROVIDER: 'agy' },
   });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.response.text, 'reply:claude:from-json');
+  assert.equal(payload.response.text, 'reply:agy:from-json');
 });
 
 test('tool-call implements webmcp-tool-v1', () => {
@@ -137,6 +146,10 @@ test('human-readable command output remains composable', () => {
   const models = run(['models', 'list', '--provider=agy'], { env: { FAKE_PROVIDER: 'agy' } });
   assert.equal(models.status, 0, models.stderr);
   assert.equal(models.stdout, 'model-one\nmodel-two\n');
+
+  const agents = run(['agents', 'list', '--provider=agy'], { env: { FAKE_PROVIDER: 'agy' } });
+  assert.equal(agents.status, 0, agents.stderr);
+  assert.equal(agents.stdout, 'webmcp-node-executor\ncode-reviewer\n');
 
   const generate = run(['generate', '--provider=agy', '--prompt', 'human-output'], {
     env: { FAKE_PROVIDER: 'agy' },

@@ -3,7 +3,9 @@ import { chmodSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { generate, listModels, probeProviders } from '../src/client.mjs';
+import {
+  generate, listAgents, listModels, probeProviders,
+} from '../src/client.mjs';
 
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
 chmodSync(fakeBin, 0o755);
@@ -54,6 +56,17 @@ test('generate returns typed provider failures with redacted stderr', async () =
   );
 });
 
+test('generate carries an Agy custom agent through the provider boundary', async () => {
+  const result = await generate({
+    provider: 'agy',
+    prompt: 'hello',
+    agent: 'webmcp-node-executor',
+    env: { ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy' },
+  });
+
+  assert.equal(result.response.text, 'reply:agy:hello');
+});
+
 test('generate enforces timeout and terminates the provider', async () => {
   await assert.rejects(
     generate({
@@ -93,6 +106,14 @@ test('model discovery is provider-scoped', async () => {
   });
   assert.deepEqual(models, ['model-one', 'model-two']);
   await assert.rejects(listModels('claude'), (error) => error.code === 'UNSUPPORTED_CAPABILITY');
+});
+
+test('agent discovery is provider-scoped', async () => {
+  const agents = await listAgents('agy', {
+    env: { ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy' },
+  });
+  assert.deepEqual(agents, ['webmcp-node-executor', 'code-reviewer']);
+  await assert.rejects(listAgents('claude'), (error) => error.code === 'UNSUPPORTED_CAPABILITY');
 });
 
 test('generate validates required input and timeout', async () => {

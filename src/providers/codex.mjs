@@ -21,6 +21,11 @@ export const codexProvider = {
         exitCode: 2,
       });
     }
+    if (request.agent) {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'Codex does not support AGY custom agents', {
+        exitCode: 2,
+      });
+    }
     const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-codex-'));
     const outputFile = join(dir, 'last-message.txt');
     const schemaFile = request.schema ? join(dir, 'output-schema.json') : null;
