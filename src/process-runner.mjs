@@ -3,6 +3,43 @@ import { spawn } from 'node:child_process';
 import { AiCliError } from './errors.mjs';
 
 const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const CLASSIFICATION_SAMPLE_BYTES = 16 * 1024;
+
+function boundedDiagnostics(stdout, stderr) {
+  return Buffer.concat([...stderr, ...stdout])
+    .toString('utf8')
+    .slice(-CLASSIFICATION_SAMPLE_BYTES);
+}
+
+function classifyProviderExit({ stdout, stderr, exitCode, exitSignal }) {
+  const text = boundedDiagnostics(stdout, stderr).toLowerCase();
+  const details = { exitCode, signal: exitSignal || null };
+
+  if (/\b(quota|credit|credits|usage limit|billing limit|insufficient credits|out of credits|resource exhausted)\b/.test(text)
+    || /\b429\b/.test(text) && /\b(quota|credit|usage)\b/.test(text)) {
+    return new AiCliError('PROVIDER_QUOTA_EXHAUSTED', 'Provider quota or credits are exhausted', {
+      retryable: false,
+      details,
+    });
+  }
+  if (/\b(auth|authentication|authorization|unauthorized|forbidden|token_invalidated|refresh_token_invalidated|invalid api key|login required)\b/.test(text)
+    || /\b(401|403)\b/.test(text)) {
+    return new AiCliError('PROVIDER_AUTH_FAILED', 'Provider authentication failed', {
+      retryable: false,
+      details,
+    });
+  }
+  if (/\b(rate limit|rate-limit|too many requests|temporarily rate limited)\b/.test(text) || /\b429\b/.test(text)) {
+    return new AiCliError('PROVIDER_RATE_LIMITED', 'Provider is rate limited', {
+      retryable: true,
+      details,
+    });
+  }
+  return new AiCliError('PROVIDER_EXIT_ERROR', `Provider exited with code ${exitCode ?? 'unknown'}`, {
+    retryable: true,
+    details,
+  });
+}
 
 function terminate(child) {
   if (!child.pid || child.killed) return;
@@ -103,10 +140,7 @@ export function runProcess(command, args, {
         return;
       }
       if (exitCode !== 0) {
-        reject(new AiCliError('PROVIDER_EXIT_ERROR', `Provider exited with code ${exitCode ?? 'unknown'}`, {
-          retryable: true,
-          details: { exitCode, signal: exitSignal || null },
-        }));
+        reject(classifyProviderExit({ stdout, stderr, exitCode, exitSignal }));
         return;
       }
 

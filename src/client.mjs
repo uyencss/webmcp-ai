@@ -1,10 +1,23 @@
-import { accessSync, constants } from 'node:fs';
+import {
+  accessSync, constants, mkdtempSync, rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { AiCliError } from './errors.mjs';
 import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 
 const DEFAULT_TIMEOUT_MS = 600_000;
+const TOOL_POLICIES = new Set(['provider-default', 'compose-only']);
+
+function normalizeToolPolicy(value) {
+  const policy = value ?? 'provider-default';
+  if (!TOOL_POLICIES.has(policy)) {
+    throw new AiCliError('INVALID_INPUT', 'toolPolicy must be provider-default or compose-only', { exitCode: 2 });
+  }
+  return policy;
+}
 
 function normalizeRequest(input) {
   const provider = getProvider(input.provider);
@@ -16,6 +29,13 @@ function normalizeRequest(input) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AiCliError('INVALID_INPUT', 'timeoutMs must be a positive number', { exitCode: 2 });
   }
+  const toolPolicy = normalizeToolPolicy(input.toolPolicy);
+  if (!provider.capabilities?.toolPolicies?.includes(toolPolicy)) {
+    throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not support toolPolicy ${toolPolicy}`, {
+      exitCode: 2,
+      details: { capability: 'toolPolicy', toolPolicy },
+    });
+  }
   return {
     provider,
     request: {
@@ -26,6 +46,7 @@ function normalizeRequest(input) {
       sessionId: input.sessionId || null,
       agentMode: input.agentMode || null,
       agent: input.agent || null,
+      toolPolicy,
       timeoutMs,
     },
   };
@@ -36,13 +57,17 @@ export async function generate(input) {
   const { provider, request } = normalizeRequest(input);
   const env = input.env || process.env;
   const command = resolveProviderBin(provider, env);
-  const invocation = provider.buildInvocation(request);
+  const policyWorkspace = request.toolPolicy === 'compose-only'
+    ? mkdtempSync(join(tmpdir(), `webmcp-ai-${provider.id}-compose-`))
+    : null;
+  const workspace = policyWorkspace || input.workspace || process.cwd();
+  const invocation = provider.buildInvocation({ ...request, workspace });
 
   try {
     const processResult = await runProcess(command, invocation.args, {
       stdin: invocation.stdin,
-      cwd: input.workspace || process.cwd(),
-      env,
+      cwd: workspace,
+      env: { ...env, ...(invocation.env || {}) },
       timeoutMs: request.timeoutMs,
       maxOutputBytes: input.maxOutputBytes,
       signal: input.signal,
@@ -63,6 +88,7 @@ export async function generate(input) {
     };
   } finally {
     invocation.cleanup?.();
+    if (policyWorkspace) rmSync(policyWorkspace, { recursive: true, force: true });
   }
 }
 

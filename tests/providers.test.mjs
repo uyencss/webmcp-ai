@@ -5,6 +5,9 @@ import { getProvider, listProviders } from '../src/providers/index.mjs';
 
 test('provider registry exposes agy, claude, and codex', () => {
   assert.deepEqual(listProviders().map((provider) => provider.id), ['agy', 'claude', 'codex']);
+  assert.deepEqual(listProviders().find((provider) => provider.id === 'agy').capabilities.toolPolicies, ['provider-default', 'compose-only']);
+  assert.deepEqual(listProviders().find((provider) => provider.id === 'codex').capabilities.toolPolicies, ['provider-default', 'compose-only']);
+  assert.deepEqual(listProviders().find((provider) => provider.id === 'claude').capabilities.toolPolicies, ['provider-default']);
   assert.throws(() => getProvider('missing'), /Unknown provider/);
 });
 

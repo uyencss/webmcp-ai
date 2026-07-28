@@ -42,6 +42,11 @@ webmcp-ai generate \
 For structured output, pass a JSON Schema file with `--schema`. AGY 1.1.1 does
 not expose structured output; choose Claude or Codex for schema-constrained work.
 
+For pure composition before browser/payment/publish actions, pass
+`toolPolicy: "compose-only"` in JSON input or `--tool-policy compose-only`.
+Compose-only uses a wrapper-owned empty workspace. Codex remains ephemeral and
+read-only there; AGY receives a workspace-local deny-all `PreToolUse` hook.
+
 AGY defaults to `agentMode: "plan"`. Use `agentMode: "accept-edits"` only when
 the caller is a supervised executor with a pinned workspace, bounded timeout,
 cancellation, and strict output/evidence validation. Pass it through JSON stdin
@@ -83,5 +88,7 @@ Treat stdout as machine-readable output and stderr as diagnostics.
 - Do not use implicit `--continue` or “last session” behavior.
 - Resume only an explicit session ID owned by the current task.
 - Do not enable unsafe provider permissions unless the user explicitly requires them.
+- Use `toolPolicy: "compose-only"` for pure composition stages that must not
+  inherit task MCP/browser bridges or writable project data.
 - Use `--json` for automation and branch on stable `error.code` values.
 - Override provider executables only with `AGY_BIN`, `CLAUDE_BIN`, or `CODEX_BIN`.

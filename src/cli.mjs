@@ -36,6 +36,7 @@ Generate options:
   --session-id <id>       Resume only this explicit provider session
   --agent-mode <mode>     AGY only: plan (default) or accept-edits
   --agent <name>          AGY only: select a discovered custom agent
+  --tool-policy <policy>  provider-default (default) or compose-only
   --timeout-ms <ms>       Process timeout (default: 600000)
   --workspace <path>      Trusted working directory for the provider
   --json                  Emit stable JSON on stdout
@@ -96,6 +97,7 @@ function generateInput(options) {
     sessionId: options['session-id'] ?? fromJson.sessionId,
     agentMode: options['agent-mode'] ?? fromJson.agentMode,
     agent: options.agent ?? fromJson.agent,
+    toolPolicy: options['tool-policy'] ?? fromJson.toolPolicy,
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
     workspace: options.workspace ?? fromJson.workspace,
   };

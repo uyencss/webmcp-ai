@@ -10,6 +10,7 @@ export const claudeProvider = {
     stdinPrompt: true,
     explicitResume: true,
     modelDiscovery: false,
+    toolPolicies: ['provider-default'],
   },
   buildInvocation(request) {
     if (request.agentMode) {

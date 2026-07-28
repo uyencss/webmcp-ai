@@ -34,10 +34,17 @@ if (process.env.FAKE_EMPTY === '1') {
   process.exit(0);
 }
 
+if (process.env.FAKE_EXPECT_HOOKS === '1') {
+  const hooks = readFileSync(`${process.cwd()}/.agents/hooks.json`, 'utf8');
+  if (!hooks.includes('webmcp-ai-compose-only')) process.exit(11);
+}
+
 const stdin = readFileSync(0, 'utf8');
 const promptIndex = args.indexOf('-p');
 const prompt = stdin || (promptIndex >= 0 ? args[promptIndex + 1] : '');
-const reply = `reply:${provider}:${prompt}`;
+const reply = process.env.FAKE_REPLY_CWD === '1'
+  ? `reply:${provider}:${prompt}:cwd=${process.cwd()}`
+  : `reply:${provider}:${prompt}`;
 const outputIndex = args.indexOf('--output-last-message');
 
 if (outputIndex >= 0) {

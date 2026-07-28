@@ -34,6 +34,7 @@ webmcp-ai providers inspect claude --json
 webmcp-ai models list --provider agy --json
 webmcp-ai agents list --provider agy --json
 webmcp-ai generate --provider claude --prompt-file ./prompt.md --json
+webmcp-ai generate --provider codex --prompt-file ./prompt.md --tool-policy compose-only --json
 webmcp-ai tools describe --json
 ```
 
@@ -53,6 +54,13 @@ Use `agent: "webmcp-node-executor"` in JSON input (or
 `--agent webmcp-node-executor`) to select a preinstalled AGY custom agent. The
 wrapper validates a simple agent name and only selects it; installation and
 machine permissions remain the caller's responsibility.
+
+Use `toolPolicy: "compose-only"` (or `--tool-policy compose-only`) only for
+pure text composition before any browser, publication, messaging, or paid
+action. Compose-only uses a wrapper-owned empty temporary workspace. Codex runs
+inside its existing read-only ephemeral sandbox there; AGY receives a
+workspace-local deny-all `PreToolUse` hook. The default
+`provider-default` policy preserves existing behavior.
 
 ## Tool protocol
 
@@ -80,6 +88,12 @@ A failed `tool-call` keeps the protocol envelope, echoing `protocol` and
 Stdout contains only command output. Provider diagnostics are not copied into
 machine-readable errors, preventing accidental secret disclosure.
 
+Non-zero provider exits are normalized into stable error codes where possible.
+Automation may branch on `error.code`, especially
+`PROVIDER_QUOTA_EXHAUSTED`; it must not parse stderr or provider prose.
+Authentication failures, rate limits, timeouts, aborts, output limits and
+generic exits remain distinct failure classes.
+
 ## Safe defaults
 
 - Claude: tools disabled, safe mode, Chrome disabled, non-persistent sessions.
@@ -87,6 +101,8 @@ machine-readable errors, preventing accidental secret disclosure.
 - AGY: sandboxed plan mode; unsafe permission bypass is never enabled.
 - AGY `accept-edits` is opt-in for a supervised agent host; plan remains the
   default.
+- `compose-only`: empty temporary workspace; no task MCP/browser bridge or
+  writable project data.
 - Resume requires an explicit session ID. There is no implicit “last session”.
 
 Override provider binaries with `AGY_BIN`, `CLAUDE_BIN`, or `CODEX_BIN`.

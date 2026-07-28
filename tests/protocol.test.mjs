@@ -14,6 +14,9 @@ test('tool description declares the protocol, risk, and input schema', () => {
   assert.deepEqual(description.tools[0].inputSchema.properties.agent, {
     type: ['string', 'null'],
   });
+  assert.deepEqual(description.tools[0].inputSchema.properties.toolPolicy, {
+    enum: ['provider-default', 'compose-only', null],
+  });
 });
 
 for (const [name, request, code] of [

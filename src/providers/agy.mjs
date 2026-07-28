@@ -1,7 +1,35 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { AiCliError } from '../errors.mjs';
 
 const MAX_PROMPT_ARG_BYTES = 128 * 1024;
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function installComposeOnlyGuard(workspace) {
+  const agentsDir = join(workspace, '.agents');
+  mkdirSync(agentsDir, { recursive: true, mode: 0o700 });
+  const guardPath = join(agentsDir, 'webmcp-ai-deny-all-pretooluse.mjs');
+  writeFileSync(guardPath, [
+    '#!/usr/bin/env node',
+    "process.stdout.write(JSON.stringify({ decision: 'deny', reason: 'webmcp-ai compose-only policy denies all Agy tool calls' }) + '\\n');",
+    '',
+  ].join('\n'), { mode: 0o700 });
+  const hooks = {
+    'webmcp-ai-compose-only': {
+      PreToolUse: [{
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `${process.execPath} ${guardPath}`,
+          timeout: 5,
+        }],
+      }],
+    },
+  };
+  writeFileSync(join(agentsDir, 'hooks.json'), `${JSON.stringify(hooks, null, 2)}\n`, { mode: 0o600 });
+  return () => rmSync(agentsDir, { recursive: true, force: true });
+}
 
 export const agyProvider = {
   id: 'agy',
@@ -13,6 +41,7 @@ export const agyProvider = {
     stdinPrompt: false,
     explicitResume: true,
     modelDiscovery: true,
+    toolPolicies: ['provider-default', 'compose-only'],
   },
   buildInvocation(request) {
     const agentMode = request.agentMode ?? 'plan';
@@ -38,9 +67,13 @@ export const agyProvider = {
     if (request.schema) {
       throw new AiCliError('UNSUPPORTED_CAPABILITY', 'AGY does not expose structured output in the installed CLI', {
         exitCode: 2,
+        details: { capability: 'structuredOutput' },
       });
     }
     const seconds = Math.max(1, Math.ceil(request.timeoutMs / 1000));
+    const cleanupGuard = request.toolPolicy === 'compose-only'
+      ? installComposeOnlyGuard(request.workspace)
+      : null;
     return {
       args: [
         '-p', request.prompt,
@@ -53,6 +86,9 @@ export const agyProvider = {
         ...(request.sessionId ? ['--conversation', request.sessionId] : []),
       ],
       stdin: null,
+      cleanup: () => {
+        cleanupGuard?.();
+      },
     };
   },
   parseOutput({ stdout }) {

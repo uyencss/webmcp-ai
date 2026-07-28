@@ -37,3 +37,33 @@ test('process runner reports missing executables', async () => {
     (error) => error.code === 'CLI_NOT_INSTALLED' && error.exitCode === 2,
   );
 });
+
+test('process runner classifies bounded provider failures without leaking raw output', async () => {
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', "process.stderr.write('insufficient credits for account'); process.exit(1)"], {
+      timeoutMs: 1000,
+    }),
+    (error) => error.code === 'PROVIDER_QUOTA_EXHAUSTED'
+      && error.retryable === false
+      && error.details.exitCode === 1
+      && JSON.stringify(error.details).includes('credits') === false,
+  );
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', "process.stderr.write('401 token_invalidated'); process.exit(1)"], {
+      timeoutMs: 1000,
+    }),
+    (error) => error.code === 'PROVIDER_AUTH_FAILED' && error.retryable === false,
+  );
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', "process.stderr.write('429 too many requests'); process.exit(1)"], {
+      timeoutMs: 1000,
+    }),
+    (error) => error.code === 'PROVIDER_RATE_LIMITED' && error.retryable === true,
+  );
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', "process.stderr.write('renderer crashed'); process.exit(1)"], {
+      timeoutMs: 1000,
+    }),
+    (error) => error.code === 'PROVIDER_EXIT_ERROR',
+  );
+});

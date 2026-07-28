@@ -14,6 +14,7 @@ export const codexProvider = {
     stdinPrompt: true,
     explicitResume: true,
     modelDiscovery: false,
+    toolPolicies: ['provider-default', 'compose-only'],
   },
   buildInvocation(request) {
     if (request.agentMode) {

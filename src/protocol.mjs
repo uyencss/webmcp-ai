@@ -23,6 +23,7 @@ export function describeTools() {
           sessionId: { type: ['string', 'null'] },
           agentMode: { enum: ['plan', 'accept-edits', null] },
           agent: { type: ['string', 'null'] },
+          toolPolicy: { enum: ['provider-default', 'compose-only', null] },
         },
       },
     }],

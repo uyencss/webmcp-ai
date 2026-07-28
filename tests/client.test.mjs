@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync } from 'node:fs';
+import { chmodSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -65,6 +65,48 @@ test('generate carries an Agy custom agent through the provider boundary', async
   });
 
   assert.equal(result.response.text, 'reply:agy:hello');
+});
+
+test('generate applies compose-only policy in an isolated provider workspace', async () => {
+  const result = await generate({
+    provider: 'agy',
+    prompt: 'hello',
+    toolPolicy: 'compose-only',
+    env: {
+      ...process.env,
+      AGY_BIN: fakeBin,
+      FAKE_PROVIDER: 'agy',
+      FAKE_EXPECT_HOOKS: '1',
+      FAKE_REPLY_CWD: '1',
+    },
+  });
+
+  const cwd = result.response.text.match(/cwd=(.*)$/)?.[1];
+  assert.match(cwd, /webmcp-ai-agy-compose-/);
+  assert.equal(existsSync(cwd), false);
+});
+
+test('generate rejects unsupported tool policies instead of silently downgrading', async () => {
+  await assert.rejects(
+    generate({
+      provider: 'claude',
+      prompt: 'hello',
+      toolPolicy: 'compose-only',
+      env: { ...process.env, CLAUDE_BIN: fakeBin, FAKE_PROVIDER: 'claude' },
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY'
+      && error.details.capability === 'toolPolicy'
+      && error.details.toolPolicy === 'compose-only',
+  );
+  await assert.rejects(
+    generate({
+      provider: 'agy',
+      prompt: 'hello',
+      toolPolicy: 'unsafe',
+      env: { ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy' },
+    }),
+    (error) => error.code === 'INVALID_INPUT',
+  );
 });
 
 test('generate enforces timeout and terminates the provider', async () => {
