@@ -1,7 +1,7 @@
 # webmcp-ai
 
 `webmcp-ai` provides one safe, provider-neutral command for invoking locally
-installed AGY, Claude Code, and Codex CLIs. It is independent from
+installed AGY, Claude Code, Codex, and opencode CLIs. It is independent from
 `webmcp-workflow-cli`; workflows integrate through the versioned
 `webmcp-tool-v1` JSON-over-stdio protocol.
 
@@ -35,6 +35,7 @@ webmcp-ai models list --provider agy --json
 webmcp-ai agents list --provider agy --json
 webmcp-ai generate --provider claude --prompt-file ./prompt.md --json
 webmcp-ai generate --provider codex --prompt-file ./prompt.md --tool-policy compose-only --json
+webmcp-ai generate --provider opencode --prompt-file ./prompt.md --json
 webmcp-ai tools describe --json
 ```
 
@@ -47,8 +48,9 @@ AGY defaults to `agentMode: "plan"`. A supervised executor that owns its
 workspace, policy, cancellation, and output validation may explicitly opt into
 `agentMode: "accept-edits"` through JSON stdin or
 `--agent-mode accept-edits`. The value is enum-constrained, remains sandboxed,
-and never enables dangerous permission bypass. Claude and Codex reject this
-AGY-only option.
+and never enables dangerous permission bypass. opencode honors the same option
+(default `plan`; `accept-edits` adds `--auto` and a bash deny-list); Claude and
+Codex reject it.
 
 Use `agent: "webmcp-node-executor"` in JSON input (or
 `--agent webmcp-node-executor`) to select a preinstalled AGY custom agent. The
@@ -101,8 +103,11 @@ generic exits remain distinct failure classes.
 - AGY: sandboxed plan mode; unsafe permission bypass is never enabled.
 - AGY `accept-edits` is opt-in for a supervised agent host; plan remains the
   default.
+- opencode: read-only `plan` agent with an injected deny-by-default permission
+  sandbox; `accept-edits` is opt-in supervised writes with a bash deny-list.
 - `compose-only`: empty temporary workspace; no task MCP/browser bridge or
   writable project data.
 - Resume requires an explicit session ID. There is no implicit “last session”.
 
-Override provider binaries with `AGY_BIN`, `CLAUDE_BIN`, or `CODEX_BIN`.
+Override provider binaries with `AGY_BIN`, `CLAUDE_BIN`, `CODEX_BIN`, or
+`OPENCODE_BIN`.

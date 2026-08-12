@@ -22,7 +22,7 @@ Usage:
   ${commandName} doctor [--json]
   ${commandName} providers list [--json]
   ${commandName} providers inspect <provider> [--json]
-  ${commandName} models list --provider <agy|claude|codex> [--json]
+  ${commandName} models list --provider <agy|claude|codex|opencode> [--json]
   ${commandName} agents list --provider agy [--json]
   ${commandName} generate --provider <id> (--prompt <text> | --prompt-file <path>) [options]
   ${commandName} generate --input-json <path|-> [--json]
@@ -34,15 +34,15 @@ Generate options:
   --effort <level>        Provider reasoning/effort override
   --schema <path>         JSON Schema for structured output
   --session-id <id>       Resume only this explicit provider session
-  --agent-mode <mode>     AGY only: plan (default) or accept-edits
-  --agent <name>          AGY only: select a discovered custom agent
+  --agent-mode <mode>     AGY/opencode only: plan (default) or accept-edits
+  --agent <name>          AGY/opencode only: select a discovered custom agent
   --tool-policy <policy>  provider-default (default) or compose-only
   --timeout-ms <ms>       Process timeout (default: 600000)
   --workspace <path>      Trusted working directory for the provider
   --json                  Emit stable JSON on stdout
 
 Environment:
-  AGY_BIN, CLAUDE_BIN, CODEX_BIN   Override provider executables
+  AGY_BIN, CLAUDE_BIN, CODEX_BIN, OPENCODE_BIN   Override provider executables
 `;
 }
 

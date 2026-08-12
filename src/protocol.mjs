@@ -14,7 +14,7 @@ export function describeTools() {
         additionalProperties: false,
         required: ['provider', 'prompt'],
         properties: {
-          provider: { enum: ['agy', 'claude', 'codex'] },
+          provider: { enum: ['agy', 'claude', 'codex', 'opencode'] },
           prompt: { type: 'string', minLength: 1 },
           model: { type: ['string', 'null'] },
           effort: { type: ['string', 'null'] },

@@ -2,8 +2,9 @@ import { AiCliError } from '../errors.mjs';
 import { agyProvider } from './agy.mjs';
 import { claudeProvider } from './claude.mjs';
 import { codexProvider } from './codex.mjs';
+import { opencodeProvider } from './opencode.mjs';
 
-const providers = [agyProvider, claudeProvider, codexProvider];
+const providers = [agyProvider, claudeProvider, codexProvider, opencodeProvider];
 const byId = new Map(providers.map((provider) => [provider.id, provider]));
 
 export function listProviders() {

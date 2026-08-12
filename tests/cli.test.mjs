@@ -18,6 +18,7 @@ function run(args, { input, env = {} } = {}) {
       AGY_BIN: fakeBin,
       CLAUDE_BIN: fakeBin,
       CODEX_BIN: fakeBin,
+      OPENCODE_BIN: fakeBin,
       ...env,
     },
   });
@@ -37,13 +38,13 @@ test('providers list emits stable JSON', () => {
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.ok, true);
-  assert.deepEqual(payload.providers.map((provider) => provider.id), ['agy', 'claude', 'codex']);
+  assert.deepEqual(payload.providers.map((provider) => provider.id), ['agy', 'claude', 'codex', 'opencode']);
 });
 
 test('doctor, inspect, models, agents, tools, and version commands are independently usable', () => {
   const doctor = run(['doctor', '--json'], { env: { FAKE_PROVIDER: 'doctor' } });
   assert.equal(doctor.status, 0, doctor.stderr);
-  assert.equal(JSON.parse(doctor.stdout).readyProviders.length, 3);
+  assert.equal(JSON.parse(doctor.stdout).readyProviders.length, 4);
 
   const inspect = run(['providers', 'inspect', 'codex', '--json']);
   assert.equal(inspect.status, 0, inspect.stderr);

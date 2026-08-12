@@ -1,6 +1,6 @@
 ---
 name: webmcp-ai-cli
-description: Inspect and invoke locally installed AGY, Claude Code, and Codex CLIs through the provider-neutral webmcp-ai command. Use when Codex needs to check provider availability, discover AGY models, generate text or schema-constrained output, invoke ai.generate through the webmcp-tool-v1 JSON protocol, or diagnose provider execution failures.
+description: Inspect and invoke locally installed AGY, Claude Code, Codex, and opencode CLIs through the provider-neutral webmcp-ai command. Use when Codex needs to check provider availability, discover AGY models, generate text or schema-constrained output, invoke ai.generate through the webmcp-tool-v1 JSON protocol, or diagnose provider execution failures.
 ---
 
 # WebMCP AI CLI
@@ -11,8 +11,8 @@ is a repository convention only; nothing you run is named `webmcp-ai-cli`.
 
 Providers vs. agent hosts are two different lists:
 
-- **Providers** (what `webmcp-ai` invokes): `agy`, `claude`, `codex`. AGY is a
-  provider but is not an install target.
+- **Providers** (what `webmcp-ai` invokes): `agy`, `claude`, `codex`,
+  `opencode`. AGY and opencode are providers but are not install targets.
 - **Agent hosts** (where `install:agent` copies this skill): `codex`, `gemini`,
   `claude`. Gemini is an install host but is not a provider.
 
@@ -39,8 +39,9 @@ webmcp-ai generate \
   --json
 ```
 
-For structured output, pass a JSON Schema file with `--schema`. AGY 1.1.1 does
-not expose structured output; choose Claude or Codex for schema-constrained work.
+For structured output, pass a JSON Schema file with `--schema`. AGY 1.1.1 and
+opencode do not expose structured output; choose Claude or Codex for
+schema-constrained work.
 
 For pure composition before browser/payment/publish actions, pass
 `toolPolicy: "compose-only"` in JSON input or `--tool-policy compose-only`.
@@ -51,7 +52,8 @@ AGY defaults to `agentMode: "plan"`. Use `agentMode: "accept-edits"` only when
 the caller is a supervised executor with a pinned workspace, bounded timeout,
 cancellation, and strict output/evidence validation. Pass it through JSON stdin
 or `--agent-mode accept-edits`; never combine it with dangerous permission
-bypass. Claude and Codex reject this AGY-only option.
+bypass. opencode honors the same `plan`/`accept-edits` option (accept-edits adds
+`--auto` plus a bash deny-list); Claude and Codex reject it.
 
 When the caller depends on a constrained AGY custom agent, pass its discovered
 name as `agent` in JSON input or via `--agent`. The AI CLI selects the agent but
@@ -91,4 +93,5 @@ Treat stdout as machine-readable output and stderr as diagnostics.
 - Use `toolPolicy: "compose-only"` for pure composition stages that must not
   inherit task MCP/browser bridges or writable project data.
 - Use `--json` for automation and branch on stable `error.code` values.
-- Override provider executables only with `AGY_BIN`, `CLAUDE_BIN`, or `CODEX_BIN`.
+- Override provider executables only with `AGY_BIN`, `CLAUDE_BIN`, `CODEX_BIN`,
+  or `OPENCODE_BIN`.
