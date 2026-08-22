@@ -1,4 +1,4 @@
 interface:
   display_name: "WebMCP AI CLI"
-  short_description: "Run local AGY, Claude, and Codex providers through one safe CLI"
-  default_prompt: "Use $webmcp-ai-cli to inspect providers and run a structured AI generation safely."
+  short_description: "Run and supervise AGY, Claude, Codex, or OpenCode CLIs"
+  default_prompt: "Use $webmcp-ai-cli to discover an installed provider and coordinate a bounded CLI-agent task safely."

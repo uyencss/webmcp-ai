@@ -1,6 +1,6 @@
 ---
 name: webmcp-ai-cli
-description: Inspect and invoke locally installed AGY, Claude Code, Codex, and opencode CLIs through the provider-neutral webmcp-ai command. Use when Codex needs to check provider availability, discover AGY models, generate text or schema-constrained output, invoke ai.generate through the webmcp-tool-v1 JSON protocol, or diagnose provider execution failures.
+description: Inspect and invoke locally installed AGY, Claude Code, Codex, and OpenCode CLIs through the provider-neutral webmcp-ai command. Use when an agent needs to check provider availability, discover models, generate text or schema-constrained output, invoke ai.generate through the webmcp-tool-v1 JSON protocol, diagnose provider failures, or coordinate bounded CLI-agent work with machine-readable progress and independent acceptance.
 ---
 
 # WebMCP AI CLI
@@ -26,6 +26,26 @@ webmcp-ai providers list --json
 
 Use the standalone `webmcp-ai` command for workflow and pipeline integration.
 The optional `webmcp ai` umbrella bridge is intended for interactive use.
+
+## CLI-agent orchestration
+
+A Coordinator is a portable role held by the agent that owns task assignment,
+worker lifecycle, decisions, and acceptance; it is not tied to Codex or any
+other provider. Choose a native subagent or CLI worker by the capability and
+visibility the task needs.
+
+For spawning, delegating to, or supervising an AI CLI worker, read
+[references/cli-subagent-orchestration.md](references/cli-subagent-orchestration.md)
+before dispatch. It defines full handoff vs. supervision, exact executable and
+model discovery, the task packet, bounded monitoring and intervention, worker
+cleanup, and independent verification.
+
+`webmcp-ai` remains the safe discovery and one-shot invocation surface. It
+buffers provider output until process exit and does not expose a live
+supervision/control stream. When supervision needs provider-native events or
+controls, the Coordinator must own the selected installed CLI/server process
+and use only its documented interface. Do not silently switch executable,
+provider, model, or session after failure.
 
 ## Generate
 
@@ -89,6 +109,10 @@ Treat stdout as machine-readable output and stderr as diagnostics.
 
 - Do not use implicit `--continue` or “last session” behavior.
 - Resume only an explicit session ID owned by the current task.
+- Treat provider streams as telemetry, not as control channels; steer, gate, or
+  interrupt only through a documented provider seam.
+- A worker completion claim is not acceptance. Verify the exact write-set,
+  diff, tests, and output contract independently.
 - Do not enable unsafe provider permissions unless the user explicitly requires them.
 - Use `toolPolicy: "compose-only"` for pure composition stages that must not
   inherit task MCP/browser bridges or writable project data.
