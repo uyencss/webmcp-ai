@@ -316,3 +316,70 @@ test('capabilities report protocol, limits, maturity honesty and the kill switch
   });
   assert.equal(disabled.enabled, false);
 });
+
+test('coordinator portability: host labels are opaque metadata across cold reattach', async (t) => {
+  // A Codex-labelled coordinator creates the Coordination and its work.
+  const { client: codexClient, stateDir } = makeClient(t, 'portable-codex');
+  const created = await codexClient.create({
+    protocol: 'webmcp.ai-orchestration/v0',
+    requestId: 'req_port_create',
+    owner: { host: 'codex', instanceId: 'codex-a' },
+  });
+  const coordinationId = created.coordinationId;
+
+  await codexClient.call(coordinationId, {
+    protocol: 'webmcp.ai-orchestration/v0',
+    requestId: 'req_port_task',
+    operation: 'task.create',
+    input: { packet: { objective: 'Portable work item', workspace: '/tmp/ws' } },
+  });
+  await codexClient.killSupervisor(coordinationId);
+
+  // A Claude-labelled coordinator reattaches with the SAME explicit id and
+  // observes identical state; no provider-name special case exists anywhere.
+  const { client: claudeClient } = makeClient(t, 'portable-claude', stateDir);
+  const reattached = await claudeClient.call(coordinationId, {
+    protocol: 'webmcp.ai-orchestration/v0',
+    requestId: 'req_port_reattach',
+    operation: 'coordination.inspect',
+    input: {},
+  });
+  assert.equal(reattached.ok, true, JSON.stringify(reattached));
+  assert.equal(reattached.result.processGeneration, 2);
+  assert.equal(Object.keys(reattached.result.tasks).length, 1);
+
+  // Ordered Delivery resumes from the durable journal without duplication.
+  const waited = await claudeClient.call(coordinationId, {
+    protocol: 'webmcp.ai-orchestration/v0',
+    requestId: 'req_port_wait',
+    operation: 'delivery.wait',
+    input: { afterSequence: 0, timeoutMs: 2000 },
+  });
+  const sequences = waited.result.deliveries.map((entry) => entry.sequence);
+  assert.deepEqual([...sequences].sort((a, b) => a - b), sequences);
+  assert.equal(new Set(sequences).size, sequences.length, 'at-least-once replay stays duplicate-free per sequence');
+
+  await claudeClient.call(coordinationId, {
+    protocol: 'webmcp.ai-orchestration/v0',
+    requestId: 'req_port_ack',
+    operation: 'delivery.ack',
+    input: { throughSequence: waited.result.lastSequence },
+  });
+
+  // Planned transfer increments the epoch; the old coordinator is fenced.
+  await claudeClient.call(coordinationId, {
+    protocol: 'webmcp.ai-orchestration/v0',
+    requestId: 'req_port_transfer',
+    operation: 'coordination.transfer',
+    input: { owner: { host: 'claude', instanceId: 'claude-b' } },
+  });
+  const stale = await codexClient.__callRawEnvelope(coordinationId, {
+    requestId: 'req_port_stale',
+    operation: 'task.create',
+    input: { packet: { objective: 'x', workspace: '/tmp/ws' } },
+    fenceEpochOverride: 1,
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error.code, 'STALE_COORDINATOR_EPOCH');
+  await claudeClient.dispose();
+});

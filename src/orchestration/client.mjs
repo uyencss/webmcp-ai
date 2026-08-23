@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -181,7 +181,7 @@ export function createOrchestrationClient({ env = {}, spawnImpl } = {}) {
   }
 
   function isConnectivityError(error) {
-    return ['ECONNREFUSED', 'ENOENT', 'EACCES', 'ECONNRESET', 'EPIPE'].includes(error?.code);
+    return ['ECONNREFUSED', 'ENOENT', 'EACCES', 'ECONNRESET', 'EPIPE', 'EINVAL'].includes(error?.code);
   }
 
   const client = {
@@ -288,6 +288,14 @@ export function createOrchestrationClient({ env = {}, spawnImpl } = {}) {
       child.kill('SIGKILL');
       await new Promise((resolveExit) => child.once('exit', resolveExit));
       children.delete(coordinationId);
+      // A SIGKILLed supervisor leaves its socket inode behind; remove it so
+      // the next connection surfaces as a clean connectivity failure.
+      const endpoint = this.__endpointFor(coordinationId);
+      try {
+        if (existsSync(endpoint)) unlinkSync(endpoint);
+      } catch {
+        // Best-effort only; recovery also unlinks under lock proof.
+      }
       return true;
     },
     async dispose() {

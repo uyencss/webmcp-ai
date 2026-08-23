@@ -22,7 +22,9 @@ function capabilitiesMatch(presented, expected) {
  * named-pipe equivalent on Windows. Never a TCP host/port.
  */
 export function deriveEndpoint({ ipcRoot, coordinationId, platform = process.platform }) {
-  const prefix = createHash('sha256').update(coordinationId).digest('hex').slice(0, 12);
+  // Eight hex chars keep the full socket path inside the 104-byte sun_path
+  // limit on macOS even under deep temporary test state roots.
+  const prefix = createHash('sha256').update(coordinationId).digest('hex').slice(0, 8);
   if (platform === 'win32') {
     return `\\\\.\\pipe\\webmcp-ai-${prefix}`;
   }
