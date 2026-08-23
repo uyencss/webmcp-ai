@@ -193,6 +193,17 @@ export async function createSupervisor(options = {}) {
     const requested = Number.isInteger(input.timeoutMs) ? input.timeoutMs : 30_000;
     const timeoutMs = Math.max(1, Math.min(requested, ORCHESTRATION_LIMITS.maxWaitMs));
     const afterSequence = Number.isInteger(input.afterSequence) ? input.afterSequence : 0;
+    if (afterSequence < 0) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'delivery.wait afterSequence must be a non-negative integer');
+    }
+    if (afterSequence < store.state.acknowledgedThrough) {
+      // v0 retains no pre-watermark history for this consumer: the cursor has
+      // fallen behind the durable ack and is expired by definition.
+      throw new AiCliError(
+        'ORCHESTRATION_CURSOR_EXPIRED',
+        `cursor ${afterSequence} precedes the durable acknowledgement watermark ${store.state.acknowledgedThrough}`,
+      );
+    }
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const pending = journal.filter((entry) => entry.sequence > afterSequence);

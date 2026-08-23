@@ -388,8 +388,10 @@ function requireId(value, prefix, label) {
 
 export function acknowledgeThrough(state, sequence) {
   requireInteger(sequence, 'acknowledged sequence', { min: 0 });
-  if (sequence < state.acknowledgedThrough) {
-    throw invalid('delivery acknowledgement must be monotonic');
+  if (sequence <= state.acknowledgedThrough) {
+    // Re-acking an older watermark is an idempotent no-op: acknowledgedThrough
+    // simply remains at the high-water mark.
+    return deepFreeze({ ...state, acknowledgedThrough: state.acknowledgedThrough });
   }
   if (sequence > state.lastSequence) {
     throw invalid('cannot acknowledge beyond the last journaled sequence');

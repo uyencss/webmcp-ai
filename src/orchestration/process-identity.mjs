@@ -12,7 +12,9 @@ async function darwinProbes(pid) {
   const { stdout } = await execBounded('ps', ['-o', 'lstart=', '-o', 'pgid=', '-p', String(pid)]);
   const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const startIdentity = lines.length > 0 ? `darwin:${lines[0]}` : null;
-  const pgidCandidate = [...lines].reverse().find((line) => /^\d+$/.test(line));
+  // lstart and pgid share one output line; the group id is the trailing int.
+  const pgidCandidate = [...lines].reverse().find((line) => /^\d+$/.test(line))
+    ?? lines.map((line) => line.match(/(\d+)$/)?.[1]).find(Boolean);
   return {
     startIdentity,
     processGroupId: pgidCandidate ? Number.parseInt(pgidCandidate, 10) : null,

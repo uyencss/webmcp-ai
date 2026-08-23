@@ -315,7 +315,8 @@ test('acknowledgeThrough is monotonic and bounded by the journal end', () => {
   assert.equal(acked.acknowledgedThrough, 2);
   assert.equal(acknowledgeThrough(acked, 2).acknowledgedThrough, 2);
 
-  assert.throws(() => acknowledgeThrough(acked, 1), (error) => error.code === 'ORCHESTRATION_INVALID_INPUT');
+  // A stale re-ack is an idempotent no-op, not an error.
+  assert.equal(acknowledgeThrough(acked, 1).acknowledgedThrough, 2);
   assert.throws(() => acknowledgeThrough(acked, 3), (error) => error.code === 'ORCHESTRATION_INVALID_INPUT');
   assert.throws(() => acknowledgeThrough(acked, 2.5), (error) => error.code === 'ORCHESTRATION_INVALID_INPUT');
 });

@@ -34,8 +34,9 @@ export function evaluateRetention(state, nowMs, context = {}) {
   if (context.supervisorAlive === true) {
     return decision({ eligible: false, action: 'retain', reason: 'supervisor-live' });
   }
-  if (context.ownedWorkerLive === true) {
-    return decision({ eligible: false, action: 'retain', reason: 'owned-worker-live' });
+  if (context.ownedWorkerLive !== false && context.ownedWorkerLive !== undefined) {
+    // true or explicit null (indeterminate): abandonment stays blocked.
+    return decision({ eligible: false, action: 'retain', reason: 'owned-worker-live-or-indeterminate' });
   }
   if (context.hasUnacknowledgedCriticalDelivery === true) {
     return decision({

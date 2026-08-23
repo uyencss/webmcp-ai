@@ -339,7 +339,9 @@ test('ack persistence is monotonic and touches only the snapshot', (t) => {
   const before = statSync(layout.journalPath);
   persistAck(store, 2);
   assert.equal(store.state.acknowledgedThrough, 2);
-  assert.throws(() => persistAck(store, 1), (error) => error.code === 'ORCHESTRATION_INVALID_INPUT');
+  // A stale re-ack is an idempotent no-op; beyond-the-end still fails closed.
+  persistAck(store, 1);
+  assert.equal(store.state.acknowledgedThrough, 2, 'watermark never moves backwards');
   assert.throws(() => persistAck(store, 5), (error) => error.code === 'ORCHESTRATION_INVALID_INPUT');
   const after = statSync(layout.journalPath);
   assert.equal(after.size, before.size, 'ack never appends to the journal');

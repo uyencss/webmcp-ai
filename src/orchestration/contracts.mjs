@@ -107,7 +107,7 @@ export function validateCreateRequest(value) {
     protocol: ORCHESTRATION_PROTOCOL,
     requestId: requireId(request.requestId, ID_PREFIXES.request, 'create requestId'),
   };
-  if (request.owner !== undefined) {
+  if (request.owner !== undefined && request.owner !== null) {
     const owner = requirePlainObject(request.owner, 'create owner');
     checkUnknownFields(owner, OWNER_FIELDS, 'create owner');
     normalized.owner = {
