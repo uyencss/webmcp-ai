@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "webmcp.ai-orchestration-snapshot/v0",
+  "title": "Derived coordination snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "coordinationId",
+    "lastSequence",
+    "acknowledgedThrough",
+    "fenceEpoch",
+    "processGeneration",
+    "coordinationState",
+    "tasks",
+    "dispatches",
+    "workers",
+    "gates",
+    "escalations",
+    "interruptEffects",
+    "updatedAt"
+  ],
+  "properties": {
+    "schema": { "const": "webmcp.ai-orchestration-snapshot/v0" },
+    "coordinationId": { "type": "string", "pattern": "^coord_" },
+    "lastSequence": { "type": "integer", "minimum": 0 },
+    "acknowledgedThrough": { "type": "integer", "minimum": 0 },
+    "fenceEpoch": { "type": "integer", "minimum": 1 },
+    "processGeneration": { "type": "integer", "minimum": 1 },
+    "coordinationState": { "enum": ["open", "closing", "closed", "abandoned"] },
+    "owner": { "type": ["object", "null"] },
+    "tasks": { "type": "object", "additionalProperties": { "type": "object" } },
+    "dispatches": { "type": "object", "additionalProperties": { "type": "object" } },
+    "workers": { "type": "object", "additionalProperties": { "type": "object" } },
+    "gates": { "type": "object", "additionalProperties": { "type": "object" } },
+    "escalations": { "type": "array", "maxItems": 256, "items": { "type": "object" } },
+    "interruptEffects": { "type": "array", "maxItems": 256, "items": { "type": "object" } },
+    "updatedAt": { "type": "string" }
+  }
+}

@@ -5,3 +5,6 @@ coverage/
 
 # Local Claude Code config
 .claude/
+
+# Local execution/review evidence (never staged or packaged)
+.superpowers/
