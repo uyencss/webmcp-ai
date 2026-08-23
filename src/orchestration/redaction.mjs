@@ -61,9 +61,13 @@ export function sanitizeValue(value, policy = {}) {
         // Reasoning content is dropped, not masked.
         continue;
       }
-      output[key] = SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(key))
-        ? REDACTED
-        : sanitizeValue(entry, policy);
+      if (SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(key))) {
+        // Only textual values can carry credential material; numbers/booleans
+        // such as token counts pass through untouched.
+        output[key] = typeof entry === 'string' ? REDACTED : entry;
+        continue;
+      }
+      output[key] = sanitizeValue(entry, policy);
     }
     return output;
   }
