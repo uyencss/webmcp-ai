@@ -55,11 +55,14 @@ test('wrong capability, oversized frames and multi-request connections fail clos
   const goodToken = client.__capabilityFor(coordinationId);
 
   // A same-length wrong token is rejected by constant-time comparison.
+  // Flip the final hex digit unconditionally: substituting a fixed character
+  // collides with the real token one time in sixteen.
+  const flippedToken = `${goodToken.slice(0, -1)}${goodToken.slice(-1) === '0' ? '1' : '0'}`;
   const wrong = await client.__callRawEnvelope(coordinationId, {
     requestId: 'req_wrong',
     operation: 'coordination.inspect',
     input: {},
-    capability: `${goodToken.slice(0, -1)}0`,
+    capability: flippedToken,
   });
   assert.equal(wrong.ok, false);
   assert.equal(wrong.error.code, 'WORKER_IDENTITY_UNPROVEN');
