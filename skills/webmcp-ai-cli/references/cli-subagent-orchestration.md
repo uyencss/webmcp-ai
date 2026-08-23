@@ -313,20 +313,28 @@ surface is documented separately in the [V2 SDK](https://opencode.ai/v2/docs/bui
 OpenCode v1 stores sessions in a single global SQLite database
 (`~/.local/share/opencode/opencode.db`). SQLite enforces single-writer access;
 when an IDE extension or another long-running OpenCode process holds the write
-lock, a concurrent `opencode run` will fail with `SQLITE_BUSY` or
-`SQLiteError: locking protocol`.
+lock on that shared database, a concurrent write from `opencode run` can
+contend and fail with `SQLITE_BUSY` or `SQLiteError: locking protocol`.
+Contention is timing-dependent: not every concurrent run fails, which is why
+the wrapper isolates instead of relying on timing.
 
-`webmcp-ai` mitigates this by injecting `OPENCODE_DB` pointing to
-`opencode-cli.db` in the same data directory. This keeps CLI invocations
-isolated from the default database while sharing the same configuration
-(`~/.config/opencode/`). Session histories are independent, which is expected:
-each dispatch is a separate task with its own session identity.
+At OpenCode `1.18.21` this isolation is a version-pinned, source-verified
+capability. `webmcp-ai` resolves the CLI database in a fixed precedence:
 
-If the calling environment already sets `OPENCODE_DB`, the provider adapter
-overrides it with the CLI-specific path. To use a fully custom path, set it in
-the invocation env after the adapter.
+1. an explicit `OPENCODE_DB` in the calling environment — an operator override,
+   respected verbatim;
+2. otherwise `<effective XDG_DATA_HOME>/opencode/opencode-cli.db`;
+3. otherwise `~/.local/share/opencode/opencode-cli.db`.
 
-V2 (beta, installed as `opencode2`) resolves this architecturally with a
+The resolver reads the effective environment handed to the child process, so a
+caller-supplied invocation env decides the location and `process.env` is never
+consulted behind it. `opencode-cli.db` separates the CLI namespace from the
+default database while configuration (`~/.config/opencode/`) stays shared.
+Sessions created in `opencode.db` do not appear in `opencode-cli.db`, and the
+wrapper does not search for or migrate sessions across databases. Task JSON
+and model prompts cannot supply the database path.
+
+V2 (beta, installed as `opencode2`) resolves contention architecturally with a
 persistent background server that serializes all database writes through a
 single process, eliminating lock contention by design.
 

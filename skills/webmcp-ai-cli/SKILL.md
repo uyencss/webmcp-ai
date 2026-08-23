@@ -105,20 +105,28 @@ printf '%s' '{"protocol":"webmcp-tool-v1","requestId":"run-1@compose","tool":"ai
 
 Treat stdout as machine-readable output and stderr as diagnostics.
 
-## SQLite database isolation
+## SQLite database isolation and selection
 
-OpenCode v1 uses a single global SQLite database (`opencode.db`) that enforces
-single-writer access. When an IDE extension or another terminal already holds
-the write lock, a concurrent `opencode run` will fail with `SQLITE_BUSY`.
+OpenCode v1 keeps sessions in a single SQLite database (`opencode.db`) that
+enforces single-writer access. A shared database can contend when another
+OpenCode instance holds the write lock during a concurrent write; contention is
+timing-dependent, so not every concurrent run fails with `SQLITE_BUSY`, but a
+shared database leaves CLI runs exposed to it.
 
-`webmcp-ai` automatically sets `OPENCODE_DB` to `opencode-cli.db` in the same
-data directory (`~/.local/share/opencode/`), so CLI invocations never contend
-with the default database. Both instances share the same configuration
-(`~/.config/opencode/`) but maintain independent session histories.
+At OpenCode `1.18.21`, the wrapper's isolated-database behavior is a
+version-pinned, source-verified capability: `webmcp-ai` sets `OPENCODE_DB` to
+`opencode-cli.db` inside the effective data directory
+(`$XDG_DATA_HOME/opencode/`, falling back to `~/.local/share/opencode/`),
+separating the CLI namespace from the IDE/default database. Configuration
+(`~/.config/opencode/`) stays shared while session histories stay independent.
+Sessions created in `opencode.db` do not appear in `opencode-cli.db`, and the
+wrapper never searches or migrates sessions across databases automatically.
 
-If you override `OPENCODE_DB` in the calling environment, the provider adapter
-respects the explicit value. V2 (beta) resolves this architecturally through a
-background server that serializes all writes.
+An explicit `OPENCODE_DB` value in the calling environment is respected as an
+operator override. Task JSON and model prompts cannot select the database path.
+
+V2 (beta) resolves contention architecturally through a background server that
+serializes all writes.
 
 ## Safety
 

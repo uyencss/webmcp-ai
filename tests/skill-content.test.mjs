@@ -120,3 +120,31 @@ test('skill picker metadata advertises portable CLI-agent orchestration', () => 
   assert.match(content, /orchestrat|supervis|delegat/i);
   assert.match(content, /\$webmcp-ai-cli/);
 });
+
+test('skill and reference document the OpenCode database-selection contract', () => {
+  const skillContent = readFileSync(skill, 'utf8');
+  // Version-pinned/source-verified capability statement.
+  assert.match(skillContent, /version-pinned/);
+  assert.match(skillContent, /source-verified/);
+  assert.match(skillContent, /1\.18\.21/);
+  // Contention is possible under concurrent writes but not every concurrent run fails.
+  assert.match(skillContent, /can contend/i);
+  assert.doesNotMatch(skillContent, /always fails? with `?SQLITE_BUSY/i);
+  assert.doesNotMatch(skillContent, /every concurrent .{0,40} will fail/i);
+  // CLI namespace separation and explicit operator override.
+  assert.match(skillContent, /separat\w* the CLI namespace from the IDE\/default/i);
+  assert.match(skillContent, /respected as an\s+operator override/i);
+  // Old default-db sessions never surface in the CLI database and no auto-migration.
+  assert.match(skillContent, /do not appear in `opencode-cli\.db`/i);
+  assert.match(skillContent, /never searches? or migrates? sessions across databases/i);
+  // Task JSON and prompts cannot pick the DB.
+  assert.match(skillContent, /Task JSON and model prompts cannot select the database path\./i);
+
+  const refContent = readFileSync(orchestrationReference, 'utf8');
+  assert.match(refContent, /fixed precedence/i);
+  assert.match(refContent, /effective environment handed to the child process/i);
+  assert.match(refContent, /respected verbatim/i);
+  assert.match(refContent, /do not appear in `opencode-cli\.db`/i);
+  assert.match(refContent, /does not search for or migrate sessions across databases/i);
+  assert.match(refContent, /cannot supply the database path/i);
+});

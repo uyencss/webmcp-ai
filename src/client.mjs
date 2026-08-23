@@ -61,7 +61,10 @@ export async function generate(input) {
     ? mkdtempSync(join(tmpdir(), `webmcp-ai-${provider.id}-compose-`))
     : null;
   const workspace = policyWorkspace || input.workspace || process.cwd();
-  const invocation = provider.buildInvocation({ ...request, workspace });
+  // The effective environment is handed to the provider adapter so env-derived
+  // settings (e.g. the isolated OpenCode database) resolve from what actually
+  // reaches the child process, never from process.env behind the caller.
+  const invocation = provider.buildInvocation({ ...request, workspace, env });
 
   try {
     const processResult = await runProcess(command, invocation.args, {
@@ -131,7 +134,7 @@ export async function listModels(providerId, { env = process.env } = {}) {
   const command = resolveProviderBin(provider, env);
   const result = await runProcess(command, provider.modelsInvocation.args, {
     stdin: provider.modelsInvocation.stdin,
-    env,
+    env: { ...env, ...(provider.invocationEnv?.(env) ?? {}) },
     timeoutMs: 10_000,
     maxOutputBytes: 1024 * 1024,
   });
@@ -148,7 +151,7 @@ export async function listAgents(providerId, { env = process.env } = {}) {
   const command = resolveProviderBin(provider, env);
   const result = await runProcess(command, provider.agentsInvocation.args, {
     stdin: provider.agentsInvocation.stdin,
-    env,
+    env: { ...env, ...(provider.invocationEnv?.(env) ?? {}) },
     timeoutMs: 10_000,
     maxOutputBytes: 1024 * 1024,
   });

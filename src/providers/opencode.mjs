@@ -5,14 +5,39 @@ import { AiCliError } from '../errors.mjs';
 
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+function trimTrailingSeparators(value) {
+  return value.replace(/[\\/]+$/, '');
+}
+
+function firstNonEmptyString(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 /**
- * Return an isolated DB path for CLI invocations so they never contend with
- * the default opencode.db used by IDE extensions or other long-running
- * instances.  Respects XDG_DATA_HOME when set.
+ * Resolve the isolated DB path used by CLI invocations so they never contend
+ * with the default opencode.db held by IDE extensions or other long-running
+ * instances. Precedence:
+ *
+ *   1. explicit operator OPENCODE_DB (respected verbatim);
+ *   2. <effective XDG_DATA_HOME>/opencode/opencode-cli.db;
+ *   3. <homedir>/.local/share/opencode/opencode-cli.db.
+ *
+ * The environment must be passed explicitly: callers hand this resolver the
+ * exact effective environment that reaches the child process, so it never
+ * reads process.env behind the caller's back. Task JSON and model prompts
+ * have no way to influence the result.
  */
-function cliDbPath() {
-  const dataHome = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
-  return join(dataHome, 'opencode', 'opencode-cli.db');
+export function resolveOpencodeCliDb(env, { homeDir = homedir() } = {}) {
+  const effectiveEnv = env ?? {};
+  const explicit = firstNonEmptyString(effectiveEnv.OPENCODE_DB);
+  if (explicit) return explicit;
+  const xdgDataHome = firstNonEmptyString(effectiveEnv.XDG_DATA_HOME);
+  if (xdgDataHome) {
+    return join(trimTrailingSeparators(xdgDataHome), 'opencode', 'opencode-cli.db');
+  }
+  return join(homeDir, '.local', 'share', 'opencode', 'opencode-cli.db');
 }
 
 export const opencodeProvider = {
@@ -93,13 +118,13 @@ export const opencodeProvider = {
     return {
       args,
       stdin: request.prompt,
-      // The client spreads invocation.env into the process env. Injecting the
-      // sandbox config here keeps it off disk and never emits an "ask" value.
+      // The client spreads invocation.env into the effective process
+      // environment. Injecting the isolated DB path and sandbox config here
+      // keeps them off disk; the DB resolver reads the same effective env the
+      // client passes in, so an explicit operator OPENCODE_DB is honored and
+      // prompts/Task JSON can never select the database.
       env: {
-        // Isolate CLI invocations to opencode-cli.db so they do not contend
-        // with the default opencode.db held by IDE extensions or other
-        // long-running OpenCode processes (SQLite single-writer limitation).
-        OPENCODE_DB: cliDbPath(),
+        OPENCODE_DB: resolveOpencodeCliDb(request.env),
         OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission, share: 'disabled', autoupdate: false }),
         OPENCODE_DISABLE_AUTOUPDATE: '1',
       },
@@ -130,4 +155,10 @@ export const opencodeProvider = {
   },
   modelsInvocation: { args: ['models'], stdin: null },
   agentsInvocation: { args: ['agent', 'list'], stdin: null },
+  // Model and agent discovery open the provider too, so they must observe the
+  // exact same isolated database as generate. The client merges this into the
+  // effective environment for those commands.
+  invocationEnv(env) {
+    return { OPENCODE_DB: resolveOpencodeCliDb(env) };
+  },
 };

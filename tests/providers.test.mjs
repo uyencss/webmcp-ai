@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { resolveOpencodeCliDb } from '../src/providers/opencode.mjs';
 import { getProvider, listProviders } from '../src/providers/index.mjs';
 
 test('provider registry exposes agy, claude, codex, and opencode', () => {
@@ -213,6 +214,60 @@ test('provider-specific capabilities fail closed', () => {
     () => getProvider('agy').buildInvocation({ prompt: 'x'.repeat(129 * 1024), timeoutMs: 1000 }),
     (error) => error.code === 'PROMPT_TOO_LARGE',
   );
+});
+
+test('opencode resolves the CLI database from the effective environment, never process.env', () => {
+  // Explicit operator override wins verbatim, including platform-specific
+  // separators such as Windows-style backslashes.
+  assert.equal(
+    resolveOpencodeCliDb({ OPENCODE_DB: 'C:\\custom\\operator.db' }),
+    'C:\\custom\\operator.db',
+  );
+  assert.equal(
+    resolveOpencodeCliDb({ OPENCODE_DB: '/custom/operator.db', XDG_DATA_HOME: '/xdg' }),
+    '/custom/operator.db',
+  );
+
+  // Effective caller XDG_DATA_HOME wins over homedir; trailing separators of
+  // both flavors are trimmed so the joined path stays canonical.
+  assert.equal(
+    resolveOpencodeCliDb({ XDG_DATA_HOME: '/state/data/' }, { homeDir: '/home/tester' }),
+    '/state/data/opencode/opencode-cli.db',
+  );
+  assert.equal(
+    resolveOpencodeCliDb({ XDG_DATA_HOME: '\\state\\data\\' }, { homeDir: '/home/tester' }),
+    '\\state\\data/opencode/opencode-cli.db',
+  );
+
+  // Homedir fallback applies when neither value is present. An explicitly
+  // provided environment object must be used instead of process.env.
+  assert.equal(
+    resolveOpencodeCliDb({}, { homeDir: '/home/tester' }),
+    '/home/tester/.local/share/opencode/opencode-cli.db',
+  );
+  assert.equal(
+    resolveOpencodeCliDb({ OPENCODE_DB: '   ', XDG_DATA_HOME: '  ' }, { homeDir: '/home/tester' }),
+    '/home/tester/.local/share/opencode/opencode-cli.db',
+  );
+});
+
+test('opencode buildInvocation honors an explicit OPENCODE_DB operator override', () => {
+  const overridden = getProvider('opencode').buildInvocation({
+    prompt: 'x',
+    timeoutMs: 1000,
+    workspace: '/ws',
+    env: { OPENCODE_DB: '/custom/operator.db', XDG_DATA_HOME: '/xdg' },
+  });
+  assert.equal(overridden.env.OPENCODE_DB, '/custom/operator.db');
+
+  const defaulted = getProvider('opencode').buildInvocation({
+    prompt: 'x',
+    timeoutMs: 1000,
+    workspace: '/ws',
+    env: { XDG_DATA_HOME: '/state/data/' },
+  });
+  assert.ok(defaulted.env.OPENCODE_DB.endsWith('opencode-cli.db'));
+  assert.match(defaulted.env.OPENCODE_DB, /^\/state\/data\//);
 });
 
 test('Claude and Codex include optional structured-output and resume flags', () => {
