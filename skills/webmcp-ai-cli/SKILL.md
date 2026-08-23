@@ -34,6 +34,25 @@ worker lifecycle, decisions, and acceptance; it is not tied to Codex or any
 other provider. Choose a native subagent or CLI worker by the capability and
 visibility the task needs.
 
+Two packaged coordination surfaces exist — use exactly one per task:
+
+- **Brief fallback** — [references/cli-subagent-orchestration.md](references/cli-subagent-orchestration.md).
+  An instruction contract (full handoff vs supervision, task packet, bounded
+  monitoring, cleanup, independent verification). It needs no runtime state
+  and stays the correct choice for one-shot handoffs or whenever the runtime
+  is absent or disabled.
+- **Runtime routing** — [references/orchestration-runtime.md](references/orchestration-runtime.md).
+  The opt-in machine-local coordination runtime (`webmcp-ai orchestration …`):
+  single-writer supervisor, append-only journal, fenced epochs, worker
+  callbacks, and an independent verifier. Use it for multi-step supervised
+  lanes that must survive restarts.
+
+Read the brief before any dispatch; read the runtime guide before creating a
+Coordination. Adapter maturity is honest and evidence-derived: alpha adapters
+are `fixture-only`, which is **not** supported; `capabilities --json` under
+`webmcp-ai orchestration` reports the current truth. Fixture GREEN never
+promotes itself.
+
 For spawning, delegating to, or supervising an AI CLI worker, read
 [references/cli-subagent-orchestration.md](references/cli-subagent-orchestration.md)
 before dispatch. It defines full handoff vs. supervision, exact executable and
@@ -43,9 +62,9 @@ cleanup, and independent verification.
 `webmcp-ai` remains the safe discovery and one-shot invocation surface. It
 buffers provider output until process exit and does not expose a live
 supervision/control stream. When supervision needs provider-native events or
-controls, the Coordinator must own the selected installed CLI/server process
-and use only its documented interface. Do not silently switch executable,
-provider, model, or session after failure.
+controls, either own the selected installed CLI/server process directly and
+use only its documented interface, or create a Coordination in the runtime.
+Do not silently switch executable, provider, model, or session after failure.
 
 ## Generate
 

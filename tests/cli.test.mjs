@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmodSync } from 'node:fs';
+import { chmodSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -64,7 +66,28 @@ test('doctor, inspect, models, agents, tools, and version commands are independe
 
   const version = run(['--version']);
   assert.equal(version.status, 0, version.stderr);
-  assert.match(version.stdout, /^0\.2\.1/);
+  assert.match(version.stdout, /^0\.3\.0-alpha\.0/);
+});
+
+test('the kill switch keeps read-only orchestration and one-shots stable', () => {
+  const stateDir = join(tmpdir(), `webmcp-ai-cli-disabled-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  const capabilities = run(['orchestration', 'capabilities', '--json'], {
+    env: {
+      WEBMCP_AI_ORCHESTRATION_DISABLED: '1',
+      WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir,
+    },
+  });
+  assert.equal(capabilities.status, 0, capabilities.stderr);
+  const payload = JSON.parse(capabilities.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.enabled, false);
+  assert.equal(existsSync(stateDir), false, 'disabled mode never creates state');
+
+  const providers = run(['providers', 'list', '--json'], {
+    env: { WEBMCP_AI_ORCHESTRATION_DISABLED: '1' },
+  });
+  assert.equal(providers.status, 0, providers.stderr);
+  assert.equal(JSON.parse(providers.stdout).ok, true);
 });
 
 test('generate accepts JSON input over stdin', () => {

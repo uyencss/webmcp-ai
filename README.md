@@ -25,6 +25,31 @@ Install the companion skill for all supported local agents:
 npm run install:agent
 ```
 
+## Orchestration runtime (alpha)
+
+Beyond one-shot generation, `webmcp-ai` ships an opt-in, machine-local
+coordination runtime for supervised CLI-agent lanes: an explicit Coordination
+lifecycle, a single-writer supervisor with fenced epochs, an append-only
+journal for durable recovery, worker callbacks, and independent acceptance
+through `dispatch.verify`.
+
+```bash
+webmcp-ai orchestration capabilities --json
+webmcp-ai orchestration guide --format markdown
+```
+
+The runtime is disabled by default in spirit — nothing runs unless you create
+a Coordination. Set `WEBMCP_AI_ORCHESTRATION_DISABLED=1` to hard-disable all
+mutations while one-shot commands stay stable. Adapter maturity is honest:
+alpha adapters (`owned-process`, `opencode-server`, `claude-stream`,
+`codex-exec`) are `fixture-only`, which is not supported; promotion requires
+separately authorized live canary receipts.
+
+See [skills/webmcp-ai-cli/references/orchestration-runtime.md](skills/webmcp-ai-cli/references/orchestration-runtime.md)
+for the operator guide and
+[skills/webmcp-ai-cli/references/cli-subagent-orchestration.md](skills/webmcp-ai-cli/references/cli-subagent-orchestration.md)
+for the no-runtime coordination brief.
+
 ## Commands
 
 ```bash

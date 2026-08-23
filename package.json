@@ -1,6 +1,6 @@
 {
   "name": "@gyga-browser/webmcp-ai",
-  "version": "0.2.1",
+  "version": "0.3.0-alpha.0",
   "description": "Provider-neutral CLI and JSON-stdio tool protocol for invoking local AI CLIs.",
   "license": "MIT",
   "author": "uyencss",
@@ -44,7 +44,8 @@
     "install:gemini": "node scripts/install-agent.mjs gemini",
     "install:claude": "node scripts/install-agent.mjs claude",
     "pack:dry-run": "npm pack --dry-run",
-    "prepublishOnly": "npm run test:coverage"
+    "prepublishOnly": "npm run test:coverage",
+    "test:package-closure": "node scripts/orchestration-package-closure.mjs"
   },
   "engines": {
     "node": ">=18"

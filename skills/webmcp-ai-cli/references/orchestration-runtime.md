@@ -6,6 +6,17 @@ This is the opt-in, machine-local coordination runtime for `@gyga-browser/webmcp
 The stable one-shot commands (`generate`, `tool-call`, `providers`, `doctor`)
 remain unchanged and remain valid when the runtime is absent or disabled.
 
+## 0. Two coordination surfaces — pick exactly one per task
+
+| Surface | What it is | When to use it |
+| --- | --- | --- |
+| **Brief fallback** — [cli-subagent-orchestration.md](cli-subagent-orchestration.md) | An instruction contract for the agent itself: modes, packets, evidence gates. No processes, no state, works with zero installs | The runtime is absent, disabled, or the task is a one-shot handoff |
+| **Runtime routing** — this guide | Machine-local supervisor, journal, IPC, adapters, verifier | Multi-step supervised lanes that need durable recovery, fences, and independent acceptance |
+
+The brief is never wrong to follow; the runtime adds durability on top of the
+same rules. Do not mix them mid-task: once a Coordination exists, lifecycle
+decisions go through its operations, not ad-hoc process spawns.
+
 ## 1. CLI surface (alpha)
 
 ```bash
@@ -114,8 +125,20 @@ older epochs are fenced with `STALE_COORDINATOR_EPOCH`.
 
 ## 5. Provider adapters and maturity honesty
 
-Adapters land in later tasks of this initiative; until then every
-adapter-backed operation returns `UNSUPPORTED_CAPABILITY`.
+Alpha ships four validated adapters, all `fixture-only`:
+
+| Adapter id | Surface | Guarantees in alpha |
+| --- | --- | --- |
+| `owned-process` | argv-array child in a owned process group | SIGINT→SIGTERM→SIGKILL ladder, group sweep, bounded output refs; no live events |
+| `opencode-server` | Runtime-owned OpenCode `serve` (pinned `1.18.21`) | Per-binding isolated SQLite db, Basic Auth, SSE events, explicit resume, observer-only attach |
+| `claude-stream` | Claude Code stream-json | Bounded event mapping, permission gate passthrough |
+| `codex-exec` | Codex exec protocol | Terminal evidence mapping, bounded digests |
+
+`dispatch.verify` is the only path to `acceptance_recorded`; it runs
+independent workspace/write-set/test evidence through the verifier seam and
+never trusts worker claims. Adapter-backed dispatch beyond these adapters —
+and every operation on an empty registry — fails closed with
+`UNSUPPORTED_CAPABILITY`.
 
 Adapter maturity labels follow evidence, not aspiration:
 
@@ -128,6 +151,8 @@ Adapter maturity labels follow evidence, not aspiration:
 
 Fixture GREEN is only ever `fixture-only`. OpenCode/Claude/Codex guarantees
 follow reported maturity and capabilities output for the installed versions.
+Promotion to `canary-proven` requires a separately authorized live canary
+receipt; nothing in this package self-promotes.
 
 ## 6. Retention and cleanup
 

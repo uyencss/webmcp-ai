@@ -1,4 +1,4 @@
 interface:
   display_name: "WebMCP AI CLI"
-  short_description: "Run and supervise AGY, Claude, Codex, or OpenCode CLIs"
+  short_description: "Run and supervise AGY, Claude, Codex, or OpenCode CLIs; opt-in durable coordination runtime"
   default_prompt: "Use $webmcp-ai-cli to discover an installed provider and coordinate a bounded CLI-agent task safely."

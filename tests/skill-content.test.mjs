@@ -11,6 +11,9 @@ const orchestrationReference = fileURLToPath(
 const openaiMetadata = fileURLToPath(
   new URL('../skills/webmcp-ai-cli/agents/openai.yaml', import.meta.url),
 );
+const runtimeGuide = fileURLToPath(
+  new URL('../skills/webmcp-ai-cli/references/orchestration-runtime.md', import.meta.url),
+);
 
 test('skill distinguishes the generate and tool-call JSON response envelopes', () => {
   const content = readFileSync(skill, 'utf8');
@@ -119,6 +122,43 @@ test('skill picker metadata advertises portable CLI-agent orchestration', () => 
   assert.match(content, /OpenCode/);
   assert.match(content, /orchestrat|supervis|delegat/i);
   assert.match(content, /\$webmcp-ai-cli/);
+});
+
+test('skill distinguishes the brief fallback from runtime routing', () => {
+  const content = readFileSync(skill, 'utf8');
+
+  assert.match(content, /use exactly one per task/i);
+  assert.match(content, /\*\*Brief fallback\*\*/);
+  assert.match(content, /\*\*Runtime routing\*\*/);
+  assert.match(content, /references\/cli-subagent-orchestration\.md/);
+  assert.match(content, /references\/orchestration-runtime\.md/);
+  assert.match(content, /needs no runtime state/i);
+  assert.match(content, /must survive restarts/i);
+  // Maturity honesty travels with the routing decision.
+  assert.match(content, /`fixture-only`/);
+  assert.match(content, /which is \*\*not\*\* supported/i);
+  assert.match(content, /`webmcp-ai orchestration`/);
+  assert.match(content, /capabilities --json/i);
+
+  // Both local links resolve on disk (generic loop below re-checks all links).
+  assert.equal(existsSync(runtimeGuide), true);
+});
+
+test('the packaged runtime guide is version-matched and adapter-honest', () => {
+  const guide = readFileSync(runtimeGuide, 'utf8');
+
+  assert.match(guide, /\{\{PACKAGE_VERSION\}\}/, 'guide keeps its version substitution seam');
+  assert.match(guide, /Two coordination surfaces/i);
+  assert.match(guide, /Brief fallback/i);
+  assert.match(guide, /Runtime routing/i);
+  for (const adapterId of ['owned-process', 'opencode-server', 'claude-stream', 'codex-exec']) {
+    assert.match(guide, new RegExp(`\\b${adapterId}\\b`), `guide lists adapter ${adapterId}`);
+  }
+  assert.match(guide, /all `fixture-only`/i);
+  assert.match(guide, /never trusts worker claims/i);
+  assert.match(guide, /fails closed with\s+`UNSUPPORTED_CAPABILITY`/i);
+  assert.match(guide, /nothing in this package self-promotes/i);
+  assert.match(guide, /Kill switch: set `WEBMCP_AI_ORCHESTRATION_DISABLED=1`/);
 });
 
 test('skill and reference document the OpenCode database-selection contract', () => {

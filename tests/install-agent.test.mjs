@@ -44,6 +44,20 @@ test('installs the companion skill into Codex, Gemini, and Claude homes', (t) =>
         'utf8',
       ),
     );
+    const installedRuntimeGuide = join(home, skillRoot, 'references/orchestration-runtime.md');
+    assert.equal(existsSync(installedRuntimeGuide), true, `${skillRoot} is missing the runtime guide`);
+    assert.equal(
+      readFileSync(installedRuntimeGuide, 'utf8'),
+      readFileSync(
+        join(root, 'skills/webmcp-ai-cli/references/orchestration-runtime.md'),
+        'utf8',
+      ),
+    );
+    assert.equal(
+      existsSync(join(home, skillRoot, 'agents/openai.yaml')),
+      true,
+      `${skillRoot} is missing picker metadata`,
+    );
     assert.equal(
       readFileSync(installedMetadata, 'utf8'),
       readFileSync(join(root, 'skills/webmcp-ai-cli/agents/openai.yaml'), 'utf8'),

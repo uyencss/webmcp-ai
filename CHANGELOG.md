@@ -4,6 +4,29 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+## 0.3.0-alpha.0 - 2026-08-23
+
+- Add the opt-in portable CLI-agent orchestration runtime (alpha): explicit
+  Coordination lifecycle, single-writer supervisor with fenced epochs, an
+  append-only machine-local journal, worker callbacks, and independent
+  acceptance through `dispatch.verify`.
+- Ship four validated adapters — `owned-process`, `opencode-server` (pinned
+  OpenCode 1.18.21 with a per-binding isolated SQLite database),
+  `claude-stream`, and `codex-exec`. Every adapter reports honest
+  evidence-derived maturity; alpha maturity is always `fixture-only`, which is
+  not supported.
+- Add `webmcp-ai orchestration capabilities|guide|create|call|prune` plus a
+  kill switch: `WEBMCP_AI_ORCHESTRATION_DISABLED=1` blocks all mutations while
+  read-only verbs and every one-shot command stay stable.
+- Harden runtime teardown: bootstrap failures never orphan a server process,
+  stops sweep the whole detached process group, and worker close escalates
+  SIGTERM to SIGKILL at group level.
+- Publish the version-matched orchestration runtime guide alongside the CLI
+  subagent brief, with explicit brief-fallback vs. runtime-routing guidance.
+- Add `npm run test:package-closure`: a hermetic package-closure verifier that
+  audits the packed tarball surface, version consistency, and kill-switch
+  stability without ambient npm configuration.
+
 ## 0.2.1 - 2026-07-24
 
 - Add an enum-safe AGY custom-agent selector through JSON input and
