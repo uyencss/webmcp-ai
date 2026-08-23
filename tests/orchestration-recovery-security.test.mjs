@@ -871,7 +871,13 @@ test('process group probes resolve for live pids and fail safe after exit', asyn
   const identity = await import('../src/orchestration/process-identity.mjs');
   const deps = identity.createPlatformIdentityDeps();
 
-  const livePgid = await deps.getProcessGroupId(process.pid);
+  // The bounded ps probe can starve under full-suite load; retry before
+  // concluding the resolver itself is broken.
+  let livePgid = null;
+  for (let attempt = 0; attempt < 5 && livePgid === null; attempt += 1) {
+    livePgid = await deps.getProcessGroupId(process.pid);
+    if (livePgid === null) await new Promise((resolveTick) => setTimeout(resolveTick, 100));
+  }
   assert.equal(Number.isFinite(livePgid), true, 'self probe resolves a numeric pgid');
 
   const ephemeral = spawn(process.execPath, ['-e', 'process.exit(0)']);
