@@ -17,6 +17,7 @@ import {
   ORCHESTRATION_PROTOCOL,
 } from './constants.mjs';
 import { validateTaskPacket } from './contracts.mjs';
+import { createAdapterRegistry } from './adapters/index.mjs';
 import { replayJournal } from './journal.mjs';
 import { createIpcServer, deriveEndpoint } from './ipc.mjs';
 import {
@@ -97,8 +98,13 @@ export async function createSupervisor(options = {}) {
     env = {},
     coordinationId = `coord_${randomUUID()}`,
     manifest = {},
+    adapters = [],
   } = options;
   const freshCreate = options.mode ? options.mode === 'create' : true;
+  // The registry stays empty by default: adapter-backed dispatch fails closed
+  // at the UNSUPPORTED_CAPABILITY boundary until a validated adapter is
+  // explicitly provided to this supervisor.
+  const registry = createAdapterRegistry(adapters);
 
   const roots = resolveOrchestrationRoots({ env });
   ensureOrchestrationRoots(roots);
@@ -286,8 +292,13 @@ export async function createSupervisor(options = {}) {
           throw new AiCliError('DECISION_GATE_BLOCKING', `unresolved dependency ${dependencyId} blocks this task`);
         }
       }
-      // Adapter registry lands in Task 5; until then every mutable dispatch
-      // fails closed at exactly this seam.
+      // Task JSON may choose an adapter id but never command/path/argv; the
+      // registry only contains validated adapters with honest maturity.
+      const adapterId = input.adapterId ?? packet?.adapterId ?? null;
+      const adapter = adapterId ? registry.get(adapterId) : null;
+      if (!adapter || adapter.maturity === 'unavailable') {
+        throw unsupportedAdapterBoundary('dispatch.start');
+      }
       throw unsupportedAdapterBoundary('dispatch.start');
     },
     'dispatch.reply': async () => { throw unsupportedAdapterBoundary('dispatch.reply'); },
