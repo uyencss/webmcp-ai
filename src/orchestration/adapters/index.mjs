@@ -156,3 +156,14 @@ export function assertModeTierCompatible(mode, guaranteeTier, { mutable = true }
 export function maxAcceptanceCommands() {
   return ORCHESTRATION_LIMITS.maxAcceptanceCommands;
 }
+
+/**
+ * Build the default validated registry for a supervisor. Callers decide which
+ * adapters to include; nothing is auto-registered, so adapter-backed dispatch
+ * keeps failing closed until an explicit, validated adapter exists.
+ */
+export function createDefaultOrchestrationAdapters({ ownedProcess = null } = {}) {
+  const adapters = [];
+  if (ownedProcess) adapters.push(ownedProcess);
+  return createAdapterRegistry(adapters);
+}

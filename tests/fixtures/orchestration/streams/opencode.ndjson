@@ -1,0 +1,15 @@
+{"type":"server.connected","sessionID":"ses_fixture","part":{"id":"prt_conn","type":"other"}}
+{"type":"session.status","sessionID":"ses_fixture","properties":{"status":{"type":"busy"}}}
+{"type":"message.part.updated","sessionID":"ses_fixture","properties":{"part":{"id":"prt_1","messageID":"msg_1","sessionID":"ses_fixture","type":"text","text":"Working on the change","time":{"created":100}}}}
+{"type":"message.part.updated","sessionID":"ses_fixture","properties":{"part":{"id":"prt_2","messageID":"msg_1","sessionID":"ses_fixture","type":"reasoning","text":"private chain of thought","time":{"created":101}}}}
+{"type":"message.part.updated","sessionID":"ses_fixture","properties":{"part":{"id":"prt_3","messageID":"msg_1","sessionID":"ses_fixture","type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"/ws/src/a.ts"},"output":"huge tool payload that must not persist verbatim"},"time":{"created":102}}}}
+{"type":"file.edited","sessionID":"ses_fixture","properties":{"file":"/ws/src/a.ts"}}
+{"type":"todo.updated","sessionID":"ses_fixture","properties":{"todos":[{"id":"1","content":"implement","status":"in_progress"}]}}
+{"type":"permission.updated","sessionID":"ses_fixture","properties":{"permission":{"id":"perm_1","type":"edit","title":"Allow edit?"}}}
+{"type":"permission.replied","sessionID":"ses_fixture","properties":{"permissionID":"perm_1","response":"allow"}}
+{"type":"message.part.updated","sessionID":"ses_fixture","properties":{"part":{"id":"prt_4","messageID":"msg_1","sessionID":"ses_fixture","type":"step-finish","tokens":{"total":120},"time":{"created":103}}}}
+{"type":"session.diff","sessionID":"ses_fixture","properties":{"diff":{"files":[{"path":"/ws/src/a.ts","additions":12,"deletions":3}]}}}
+{"type":"message.part.updated","sessionID":"ses_fixture","properties":{"part":{"id":"prt_5","messageID":"msg_2","sessionID":"ses_fixture","type":"retry","attempt":2,"time":{"created":104}}}}
+{"type":"session.status","sessionID":"ses_fixture","properties":{"status":{"type":"idle"}}}
+{"type":"session.error","sessionID":"ses_fixture","properties":{"error":{"name":"ProviderError","message":"upstream failed"}}}
+{"type":"message.part.updated","sessionID":"ses_other","properties":{"part":{"id":"prt_x","messageID":"msg_x","sessionID":"ses_other","type":"text","text":"belongs to another session","time":{"created":105}}}}
