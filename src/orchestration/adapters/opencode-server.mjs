@@ -145,6 +145,34 @@ function requestBasic(endpoint, method, path, authToken, body = null) {
   }));
 }
 
+/**
+ * Signal the whole detached process group so no grandchild outlives the
+ * server, falling back to pid-only signalling once the group is gone.
+ */
+function sweepProcessGroup(child, signal) {
+  if (process.platform === 'win32') {
+    try {
+      child.kill(signal);
+    } catch {
+      // Already gone.
+    }
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+function isChildLive(child) {
+  return Boolean(child) && child.exitCode === null && child.signalCode === null;
+}
+
 function runBounded(binPath, binArgs, env, timeoutMs = 15_000) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(binPath, binArgs, { env, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -242,23 +270,38 @@ export function createOpenCodeServerAdapter(options = {}) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // Every bootstrap failure path must tear the child down — a rejected
+    // promise alone would orphan a live server holding its isolated env.
     const endpoint = await new Promise((resolveEndpoint, rejectEndpoint) => {
+      let settled = false;
       let buffered = '';
+      const finish = (settle, error, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(bootstrapTimer);
+        serverChild.stdout.off('data', onData);
+        if (!settle) sweepProcessGroup(serverChild, 'SIGKILL');
+        settle ? resolveEndpoint(value) : rejectEndpoint(error);
+      };
       const onData = (chunk) => {
+        if (settled) return;
         buffered += chunk.toString('utf8');
         const newlineIndex = buffered.indexOf('\n');
         if (newlineIndex === -1) return;
         try {
           const ready = JSON.parse(buffered.slice(0, newlineIndex));
-          resolveEndpoint(`http://127.0.0.1:${ready.port}`);
+          finish(true, null, `http://127.0.0.1:${ready.port}`);
         } catch {
-          rejectEndpoint(new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server produced no valid ready line'));
+          finish(false, new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server produced no valid ready line'));
         }
-        serverChild.stdout.off('data', onData);
       };
+      const bootstrapTimer = setTimeout(
+        () => finish(false, new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server bootstrap timed out')),
+        options.bootstrapTimeoutMs ?? 15_000,
+      );
+      bootstrapTimer.unref?.();
       serverChild.stdout.on('data', onData);
-      serverChild.once('exit', (code) => rejectEndpoint(new AiCliError('WORKER_PROCESS_LOST', `server exited during bootstrap (${code})`)));
-      setTimeout(() => rejectEndpoint(new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server bootstrap timed out')), 15_000).unref?.();
+      serverChild.once('exit', (code) => finish(false, new AiCliError('WORKER_PROCESS_LOST', `server exited during bootstrap (${code})`)));
     });
 
     // Prove the effective database matches the intended path; mismatch fails
@@ -266,7 +309,7 @@ export function createOpenCodeServerAdapter(options = {}) {
     const intendedDbPath = options.forceIntendedDbPathForTest ?? prepared.dbPath;
     const dbProbe = await runBounded(openCodeBin, [...extraArgs, 'db', 'path', '--pure'], env);
     if (dbProbe.code !== 0 || dbProbe.stdout.trim() !== intendedDbPath) {
-      serverChild.kill('SIGKILL');
+      sweepProcessGroup(serverChild, 'SIGKILL');
       throw new AiCliError(
         'POLICY_DENIED',
         `runtime database identity mismatch: resolved '${dbProbe.stdout.trim()}' != intended '${intendedDbPath}'`,
@@ -275,7 +318,7 @@ export function createOpenCodeServerAdapter(options = {}) {
 
     const health = await requestBasic(endpoint, 'GET', '/global/health', password);
     if (!health.ok || health.json?.status !== 'ok') {
-      serverChild.kill('SIGKILL');
+      sweepProcessGroup(serverChild, 'SIGKILL');
       throw new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server health check failed');
     }
 
@@ -467,13 +510,13 @@ export function createOpenCodeServerAdapter(options = {}) {
     async stopServer(runtime, { release = false, settled = false } = {}) {
       const child = runtime.__serverChild;
       let stopped = false;
-      if (child && child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGTERM');
+      if (isChildLive(child)) {
+        sweepProcessGroup(child, 'SIGTERM');
         await Promise.race([
           new Promise((resolveExit) => child.once('exit', resolveExit)),
           new Promise((resolveTick) => setTimeout(resolveTick, 1500).unref?.()),
         ]);
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        if (isChildLive(child)) sweepProcessGroup(child, 'SIGKILL');
         stopped = true;
       }
       let released = false;

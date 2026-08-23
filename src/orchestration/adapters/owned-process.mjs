@@ -91,16 +91,48 @@ export function createOwnedProcessAdapter(options = {}) {
     resolvePermission() {
       throw new AiCliError('UNSUPPORTED_CAPABILITY', 'generic workers expose no permission channel');
     },
-    close({ binding }) {
-      try {
-        if (binding?.processIdentity?.pid && process.platform !== 'win32') {
-          process.kill(-binding.processIdentity.processGroupId, 'SIGTERM');
-          return { ok: true, disposition: 'group-signalled' };
-        }
-      } catch {
-        return { ok: true, disposition: 'already-exited' };
+    async close({ binding }) {
+      const child = binding?.__child;
+      const groupId = binding?.processIdentity?.processGroupId;
+      if (!groupId || groupId <= 1 || process.platform === 'win32') {
+        return { ok: true, disposition: 'no-op' };
       }
-      return { ok: true, disposition: 'no-op' };
+      const hasExited = () => Boolean(child && (child.exitCode !== null || child.signalCode !== null));
+      if (hasExited()) {
+        return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
+      }
+      const signalsAttempted = [];
+      const signalGroup = (signal) => {
+        try {
+          process.kill(-groupId, signal);
+        } catch {
+          try {
+            child?.kill(signal);
+          } catch {
+            // Already gone.
+          }
+        }
+        signalsAttempted.push(signal);
+      };
+      const waitForExit = () =>
+        child
+          ? Promise.race([
+              new Promise((resolveExit) => child.once('exit', () => resolveExit(true))),
+              new Promise((resolveTick) => setTimeout(() => resolveTick(false), signalGraceMs).unref?.()),
+            ])
+          : Promise.resolve(false);
+      // Group-level interrupt ladder: no grandchild may outlive a closed worker.
+      signalGroup('SIGTERM');
+      let stopped = await waitForExit();
+      if (!stopped) {
+        signalGroup('SIGKILL');
+        stopped = await waitForExit();
+      }
+      return {
+        ok: true,
+        disposition: stopped ? 'group-stopped' : 'group-signalled',
+        signalsAttempted: [...signalsAttempted],
+      };
     },
     async interrupt({ binding, reason }) {
       if (!binding?.__child) {
