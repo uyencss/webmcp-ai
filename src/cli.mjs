@@ -7,6 +7,7 @@ import {
 import { AiCliError, asAiCliError } from './errors.mjs';
 import { listProviders } from './providers/index.mjs';
 import { describeTools, handleToolCall, TOOL_PROTOCOL } from './protocol.mjs';
+import { createOrchestrationClient } from './orchestration/client.mjs';
 
 const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
 
@@ -28,6 +29,11 @@ Usage:
   ${commandName} generate --input-json <path|-> [--json]
   ${commandName} tools describe [--json]
   ${commandName} tool-call --json
+  ${commandName} orchestration capabilities --json
+  ${commandName} orchestration guide --format markdown
+  ${commandName} orchestration create --input-json <path|-> [--json]
+  ${commandName} orchestration call --coordination <coord-id> --input-json <path|-> [--json]
+  ${commandName} orchestration prune [--json]
 
 Generate options:
   --model <model>          Provider model override
@@ -189,6 +195,42 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       }, true);
       return typed.exitCode;
     }
+  }
+
+  if (command === 'orchestration') {
+    const orchestration = createOrchestrationClient({ env });
+    if (subcommand === 'capabilities') {
+      printValue(orchestration.capabilities(), json);
+      return 0;
+    }
+    if (subcommand === 'guide') {
+      const format = options.format === 'json' ? 'json' : 'markdown';
+      const guide = orchestration.guide({ format });
+      if (format === 'json') printValue({ ok: true, ...guide }, true);
+      else process.stdout.write(`${guide}\n`);
+      return 0;
+    }
+    if (subcommand === 'create' || subcommand === 'call') {
+      const inputPath = options['input-json'];
+      if (!inputPath) throw new AiCliError('USAGE_ERROR', '--input-json <path|-> is required', { exitCode: 2 });
+      const coordinationId = options.coordination;
+      if (subcommand === 'call' && !coordinationId) {
+        throw new AiCliError('USAGE_ERROR', '--coordination <coord-id> is required for orchestration call', { exitCode: 2 });
+      }
+      const request = readJsonInput(inputPath);
+      const response = subcommand === 'create'
+        ? await orchestration.create(request)
+        : await orchestration.call(coordinationId, request);
+      printValue(response, true);
+      if (response.ok) return 0;
+      return ['ORCHESTRATION_INVALID_INPUT', 'ORCHESTRATION_UNSUPPORTED_VERSION', 'USAGE_ERROR']
+        .includes(response.error?.code) ? 2 : 1;
+    }
+    if (subcommand === 'prune') {
+      printValue(await orchestration.prune(), json);
+      return 0;
+    }
+    throw new AiCliError('USAGE_ERROR', `Unknown orchestration subcommand: ${String(subcommand)}`, { exitCode: 2 });
   }
 
   throw new AiCliError('USAGE_ERROR', `Unknown command: ${argv.slice(0, 2).join(' ')}`, { exitCode: 2 });
