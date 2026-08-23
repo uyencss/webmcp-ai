@@ -28,6 +28,7 @@ import {
 import { acquireSupervisorLock, releaseSupervisorLock } from './lock.mjs';
 import { createPlatformIdentityDeps } from './process-identity.mjs';
 import { commitDelivery, openCoordinationStore, persistAck } from './store.mjs';
+import { verifyDispatch as defaultVerifyDispatch } from './verifier.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
 
@@ -99,6 +100,7 @@ export async function createSupervisor(options = {}) {
     coordinationId = `coord_${randomUUID()}`,
     manifest = {},
     adapters = [],
+    verifyDispatch = null,
   } = options;
   const freshCreate = options.mode ? options.mode === 'create' : true;
   // The registry stays empty by default: adapter-backed dispatch fails closed
@@ -305,7 +307,46 @@ export async function createSupervisor(options = {}) {
     'dispatch.guidance': async () => { throw unsupportedAdapterBoundary('dispatch.guidance'); },
     'dispatch.permission.resolve': async () => { throw unsupportedAdapterBoundary('dispatch.permission.resolve'); },
     'dispatch.interrupt': async () => { throw unsupportedAdapterBoundary('dispatch.interrupt'); },
-    'dispatch.verify': async () => { throw unsupportedAdapterBoundary('dispatch.verify'); },
+    'dispatch.verify': async (input) => {
+      const verify = verifyDispatch ?? defaultVerifyDispatch;
+      if (!verify) throw unsupportedAdapterBoundary('dispatch.verify');
+      const taskId = input.taskId;
+      const dispatchId = input.dispatchId ?? input.taskId;
+      const task = store.state.tasks[taskId];
+      if (!task) throw new AiCliError('TASK_NOT_FOUND', `no task ${taskId}`);
+      const packet = taskPackets.get(taskId);
+      const baseline = input.baseline ?? packet?.baseline ?? null;
+      if (!baseline) {
+        throw new AiCliError(
+          'ORCHESTRATION_INDETERMINATE',
+          'no pre-dispatch workspace baseline is available for independent verification',
+        );
+      }
+      const receipt = await verify({
+        coordinationId,
+        taskId,
+        dispatchId,
+        fenceEpoch: store.state.fenceEpoch,
+        task: { ...packet, taskId, workspace: packet?.workspace ?? input.workspace },
+        baseline,
+        workerOutcome: input.workerOutcome ?? null,
+        commands: input.commands ?? packet?.acceptanceCommands ?? [],
+        stateDir: layout.coordinationDir,
+        now: Date.now(),
+      });
+      commit({
+        type: 'acceptance_recorded',
+        taskId,
+        payload: {
+          taskId,
+          dispatchId,
+          verdict: receipt.verdict,
+          workerClaimMatched: receipt.workerClaimMatched,
+          testsRun: receipt.tests.length,
+        },
+      });
+      return { receipt, verdict: receipt.verdict };
+    },
     'decision-gate.create': async (input) => {
       const gateId = `gate_${randomUUID().slice(0, 8)}`;
       commit({
