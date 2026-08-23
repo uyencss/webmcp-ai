@@ -308,14 +308,38 @@ Official sources: [server](https://opencode.ai/docs/server/),
 [V2 plugins](https://opencode.ai/v2/docs/build/plugins). The beta in-process
 surface is documented separately in the [V2 SDK](https://opencode.ai/v2/docs/build/sdk).
 
+### OpenCode SQLite database isolation
+
+OpenCode v1 stores sessions in a single global SQLite database
+(`~/.local/share/opencode/opencode.db`). SQLite enforces single-writer access;
+when an IDE extension or another long-running OpenCode process holds the write
+lock, a concurrent `opencode run` will fail with `SQLITE_BUSY` or
+`SQLiteError: locking protocol`.
+
+`webmcp-ai` mitigates this by injecting `OPENCODE_DB` pointing to
+`opencode-cli.db` in the same data directory. This keeps CLI invocations
+isolated from the default database while sharing the same configuration
+(`~/.config/opencode/`). Session histories are independent, which is expected:
+each dispatch is a separate task with its own session identity.
+
+If the calling environment already sets `OPENCODE_DB`, the provider adapter
+overrides it with the CLI-specific path. To use a fully custom path, set it in
+the invocation env after the adapter.
+
+V2 (beta, installed as `opencode2`) resolves this architecturally with a
+persistent background server that serializes all database writes through a
+single process, eliminating lock contention by design.
+
 ### OpenCode session-store diagnostic fallback
 
 Prefer the stable CLI/server/SSE surfaces. If they cannot expose a needed live
 event, a version-gated diagnostic may open the local OpenCode session database
-read-only and consume new `part` events by cursor/timestamp. Treat heartbeat as
-liveness only. Do not modify the database or WAL, infer completion from a
-materialized diff snapshot, or open provider authentication files. Cross-check
-file-write and test claims against the actual workspace.
+read-only and consume new `part` events by cursor/timestamp. When the dispatch
+was started through `webmcp-ai`, the CLI database is `opencode-cli.db`, not the
+default `opencode.db`. Treat heartbeat as liveness only. Do not modify the
+database or WAL, infer completion from a materialized diff snapshot, or open
+provider authentication files. Cross-check file-write and test claims against
+the actual workspace.
 
 This fallback is OpenCode-specific and must never become the portable contract
 for other providers.

@@ -105,9 +105,24 @@ printf '%s' '{"protocol":"webmcp-tool-v1","requestId":"run-1@compose","tool":"ai
 
 Treat stdout as machine-readable output and stderr as diagnostics.
 
+## SQLite database isolation
+
+OpenCode v1 uses a single global SQLite database (`opencode.db`) that enforces
+single-writer access. When an IDE extension or another terminal already holds
+the write lock, a concurrent `opencode run` will fail with `SQLITE_BUSY`.
+
+`webmcp-ai` automatically sets `OPENCODE_DB` to `opencode-cli.db` in the same
+data directory (`~/.local/share/opencode/`), so CLI invocations never contend
+with the default database. Both instances share the same configuration
+(`~/.config/opencode/`) but maintain independent session histories.
+
+If you override `OPENCODE_DB` in the calling environment, the provider adapter
+respects the explicit value. V2 (beta) resolves this architecturally through a
+background server that serializes all writes.
+
 ## Safety
 
-- Do not use implicit `--continue` or “last session” behavior.
+- Do not use implicit `--continue` or "last session" behavior.
 - Resume only an explicit session ID owned by the current task.
 - Treat provider streams as telemetry, not as control channels; steer, gate, or
   interrupt only through a documented provider seam.
@@ -119,3 +134,5 @@ Treat stdout as machine-readable output and stderr as diagnostics.
 - Use `--json` for automation and branch on stable `error.code` values.
 - Override provider executables only with `AGY_BIN`, `CLAUDE_BIN`, `CODEX_BIN`,
   or `OPENCODE_BIN`.
+- Override the OpenCode database only with `OPENCODE_DB`; the default
+  `opencode-cli.db` isolation is intentional.

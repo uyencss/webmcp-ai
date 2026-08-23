@@ -88,6 +88,19 @@ test('orchestration reference defines portable supervision and evidence gates', 
   assert.match(content, /Never open or copy provider credential stores/i);
 });
 
+test('skill and reference document SQLite database isolation for OpenCode', () => {
+  const skillContent = readFileSync(skill, 'utf8');
+  assert.match(skillContent, /SQLite database isolation/i);
+  assert.match(skillContent, /opencode-cli\.db/);
+  assert.match(skillContent, /OPENCODE_DB/);
+
+  const refContent = readFileSync(orchestrationReference, 'utf8');
+  assert.match(refContent, /OpenCode SQLite database isolation/);
+  assert.match(refContent, /opencode-cli\.db/);
+  assert.match(refContent, /SQLITE_BUSY/);
+  assert.match(refContent, /single-writer/i);
+});
+
 test('orchestration reference preserves capability and enforcement boundaries', () => {
   const content = readFileSync(orchestrationReference, 'utf8');
 

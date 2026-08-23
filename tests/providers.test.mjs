@@ -96,6 +96,10 @@ test('opencode uses stdin, JSON NDJSON output, and a read-only plan agent by def
   // The injected sandbox must never carry an "ask" value or headless runs hang.
   assert.equal(invocation.env.OPENCODE_CONFIG_CONTENT.includes('"ask"'), false);
   assert.equal(JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT).permission.read, 'allow');
+  // CLI invocations use an isolated DB to avoid SQLite lock contention.
+  assert.ok(invocation.env.OPENCODE_DB, 'OPENCODE_DB must be set');
+  assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode-cli.db'), 'must use opencode-cli.db');
+  assert.ok(invocation.env.OPENCODE_DB.includes('/opencode/'), 'must stay in the opencode data directory');
 });
 
 test('opencode accept-edits opts into supervised writes with --auto and the build agent', () => {

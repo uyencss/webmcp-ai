@@ -1,6 +1,19 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 import { AiCliError } from '../errors.mjs';
 
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * Return an isolated DB path for CLI invocations so they never contend with
+ * the default opencode.db used by IDE extensions or other long-running
+ * instances.  Respects XDG_DATA_HOME when set.
+ */
+function cliDbPath() {
+  const dataHome = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+  return join(dataHome, 'opencode', 'opencode-cli.db');
+}
 
 export const opencodeProvider = {
   id: 'opencode',
@@ -83,6 +96,10 @@ export const opencodeProvider = {
       // The client spreads invocation.env into the process env. Injecting the
       // sandbox config here keeps it off disk and never emits an "ask" value.
       env: {
+        // Isolate CLI invocations to opencode-cli.db so they do not contend
+        // with the default opencode.db held by IDE extensions or other
+        // long-running OpenCode processes (SQLite single-writer limitation).
+        OPENCODE_DB: cliDbPath(),
         OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission, share: 'disabled', autoupdate: false }),
         OPENCODE_DISABLE_AUTOUPDATE: '1',
       },
