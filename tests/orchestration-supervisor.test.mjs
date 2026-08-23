@@ -308,11 +308,20 @@ test('stale epochs cannot mutate after a planned transfer', async (t) => {
 });
 
 test('capabilities report protocol, limits, maturity honesty and the kill switch', async (t) => {
-  const enabled = await getOrchestrationCapabilities({ env: {} });
+  // An isolated state root proves the no-receipt baseline; the operator's
+  // real receipts must never leak into this assertion.
+  const enabled = await getOrchestrationCapabilities({
+    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: tempStateDir(t, 'caps-baseline') },
+  });
   assert.equal(enabled.protocol, 'webmcp.ai-orchestration/v0');
   assert.equal(enabled.enabled, true);
   assert.equal(enabled.limits.maxWaitMs, 60_000);
-  assert.equal(enabled.adapters.length, 0, 'no adapter is advertised before Task 5');
+  assert.equal(enabled.adapters.length, 4, 'the four alpha adapters are advertised');
+  assert.deepEqual(
+    [...new Set(enabled.adapters.map((entry) => entry.maturity))],
+    ['fixture-only'],
+    'without receipts every adapter stays honestly fixture-only',
+  );
 
   const disabled = await getOrchestrationCapabilities({
     env: { WEBMCP_AI_ORCHESTRATION_DISABLED: '1' },

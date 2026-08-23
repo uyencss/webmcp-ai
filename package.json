@@ -45,7 +45,8 @@
     "install:claude": "node scripts/install-agent.mjs claude",
     "pack:dry-run": "npm pack --dry-run",
     "prepublishOnly": "npm run test:coverage",
-    "test:package-closure": "node scripts/orchestration-package-closure.mjs"
+    "test:package-closure": "node scripts/orchestration-package-closure.mjs",
+    "canary": "node scripts/orchestration-live-canary.mjs"
   },
   "engines": {
     "node": ">=18"

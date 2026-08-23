@@ -96,7 +96,7 @@ function broadcastStream(sessionId) {
 function startHttpServer() {
   const server = createServer((req, res) => {
   const auth = req.headers.authorization ?? '';
-  if (auth !== `Basic ${Buffer.from(`webmcp:${PASSWORD}`).toString('base64')}`) {
+  if (auth !== `Basic ${Buffer.from(`opencode:${PASSWORD}`).toString('base64')}`) {
     res.writeHead(401, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'unauthorized' }));
     return;

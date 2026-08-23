@@ -217,13 +217,17 @@ export function createClaudeStreamAdapter(options = {}) {
       taskPolicy = {},
       followUpTexts = [],
     }) {
-      const sessionId = resumeSessionId ?? randomUUID();
+      // New sessions MUST use --session-id with a runtime-generated UUID;
+      // --resume is only valid for an adapter-recorded prior session.
+      // Passing a fresh UUID as "resume" makes real CLIs fail with
+      // "No conversation found".
       const invocation = buildClaudeInvocation({
-        sessionId,
+        sessionId: resumeSessionId,
         hookMode: taskPolicy.claudeHooks === true,
         settingsPath: taskPolicy.hookSettingsPath ?? null,
         mcpConfigPath: taskPolicy.hookMcpConfigPath ?? null,
       });
+      const sessionId = invocation.sessionId;
 
       emit('worker_started', { dispatchId: dispatch.dispatchId });
       const child = spawn(options.claudeBin ?? process.env.CLAUDE_BIN ?? process.execPath,

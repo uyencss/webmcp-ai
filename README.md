@@ -45,6 +45,10 @@ alpha adapters (`owned-process`, `opencode-server`, `claude-stream`,
 `codex-exec`) are `fixture-only`, which is not supported; promotion requires
 separately authorized live canary receipts.
 
+After separate operator authorization (`WEBMCP_AI_LIVE_CANARY=1` plus a
+per-adapter flag), `npm run canary -- <adapter-id>` records a machine-local
+receipt that promotes exactly that adapter to `canary-proven` on this machine.
+
 See [skills/webmcp-ai-cli/references/orchestration-runtime.md](skills/webmcp-ai-cli/references/orchestration-runtime.md)
 for the operator guide and
 [skills/webmcp-ai-cli/references/cli-subagent-orchestration.md](skills/webmcp-ai-cli/references/cli-subagent-orchestration.md)

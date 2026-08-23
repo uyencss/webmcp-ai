@@ -154,6 +154,29 @@ follow reported maturity and capabilities output for the installed versions.
 Promotion to `canary-proven` requires a separately authorized live canary
 receipt; nothing in this package self-promotes.
 
+### Authorized live canaries
+
+```bash
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_OWNED=1 npm run canary -- owned-process
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_OPENCODE=1 npm run canary -- opencode-server
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_CLAUDE=1 npm run canary -- claude-stream
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_CODEX=1 npm run canary -- codex-exec
+```
+
+Each run needs BOTH the global flag and the per-adapter flag; without them it
+fails closed before touching any executable (`CANARY_GATE_CLOSED`). Scenarios
+are time-bounded and auth-free by default: `owned-process` proves process
+identity plus the terminal ladder on a trivial worker; `opencode-server`
+proves bootstrap, health, session lifecycle, isolated-database topology and
+clean group stop against the pinned real binary (add `--prompt` for exactly
+one bounded model round trip); `claude-stream` / `codex-exec` drive one tiny
+stdin prompt through the owned process. A passing run writes a mode-`0600`
+receipt under `<stateRoot>/canary/<adapter>.json` binding the adapter digest,
+resolved executable path digest and node runtime version; `capabilities --json`
+then reports that single adapter as `canary-proven` on this machine only, and
+dispatch time re-verifies strictly. Upgrading or moving a provider binary
+invalidates its receipt until the canary is re-run.
+
 ## 6. Retention and cleanup
 
 Active Coordinations are retained until closed. Abandonment becomes eligible

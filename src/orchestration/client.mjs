@@ -13,6 +13,7 @@ import {
   ORCHESTRATION_PROTOCOL,
 } from './constants.mjs';
 import { validateCallRequest, validateCreateRequest } from './contracts.mjs';
+import { evaluateAdapterMaturities } from './canary.mjs';
 import { readOrchestrationGuide } from './guide.mjs';
 import { deriveEndpoint, requestIpc } from './ipc.mjs';
 import { resolveOrchestrationRoots } from './paths.mjs';
@@ -70,7 +71,7 @@ export function getOrchestrationCapabilities(options = {}) {
     modes: ORCHESTRATION_MODES,
     guaranteeTiers: GUARANTEE_TIERS,
     operations: OPERATIONS,
-    adapters: [],
+    adapters: evaluateAdapterMaturities({ stateRoot: roots.stateRoot, env }),
     maturityNotice: 'adapter maturity is fixture-only until separately authorized live canary receipts exist',
   };
 }

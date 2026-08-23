@@ -26,6 +26,12 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 - Add `npm run test:package-closure`: a hermetic package-closure verifier that
   audits the packed tarball surface, version consistency, and kill-switch
   stability without ambient npm configuration.
+- Add the authorized live canary lane (`npm run canary -- <adapter-id>`):
+  dual-opt-in bounded scenarios that record machine-local mode-`0600` receipts
+  binding adapter digest, executable path digest and runtime version, letting
+  `orchestration capabilities` report evidence-derived `canary-proven` for a
+  single adapter on one machine. The runner never logs in and fails closed
+  without explicit authorization.
 
 ## 0.2.1 - 2026-07-24
 

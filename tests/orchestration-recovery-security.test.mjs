@@ -657,15 +657,19 @@ test('bootstrap ready-line failure kills the runtime server instead of orphaning
       `setInterval(() => {}, 1000);\n`,
   );
 
+  // Garbage output never matches either ready dialect, so the bounded
+  // bootstrap gives up; the invariant under test is the teardown, not the
+  // exact error text.
   const adapter = serverMod.createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [badLineFixture],
     stateDir,
+    bootstrapTimeoutMs: 700,
   });
 
   await assert.rejects(
     () => adapter.startRuntimeServer({ workspace, bindingId: 'worker_boot1', fenceEpoch: 1 }),
-    (error) => error.code === 'PROVIDER_PROTOCOL_ERROR' && /ready line/.test(error.message),
+    (error) => error.code === 'PROVIDER_PROTOCOL_ERROR' && /timed out/.test(error.message),
   );
   await assertPidDies(t, pidFile, 'bad-ready-line server');
 });
@@ -721,14 +725,15 @@ test('stopServer sweeps the whole detached group including grandchildren', { tim
     `  writeFileSync(${JSON.stringify(kidFile)}, String(kid.pid));`,
     `  const pass = process.env.WEBMCP_FAKE_SERVER_PASSWORD ?? '';`,
     `  const http = createServer((req, res) => {`,
-    `    if ((req.headers.authorization ?? '') !== ('Basic ' + Buffer.from('webmcp:' + pass).toString('base64'))) {`,
+    `    if ((req.headers.authorization ?? '') !== ('Basic ' + Buffer.from('opencode:' + pass).toString('base64'))) {`,
     `      res.writeHead(401); res.end(); return;`,
     `    }`,
     `    res.writeHead(200, { 'content-type': 'application/json' });`,
     `    res.end(JSON.stringify({ status: 'ok' }));`,
     `  });`,
     `  http.listen(0, '127.0.0.1', () => {`,
-    `    process.stdout.write(JSON.stringify({ port: http.address().port }) + '\\n');`,
+    `    // Real-binary ready dialect; exercises the plaintext parser branch.`,
+    `    process.stdout.write('opencode server listening on http://127.0.0.1:' + http.address().port + '\\n');`,
     `  });`,
     `}`,
     '',

@@ -130,7 +130,7 @@ async function freeLoopbackPort() {
 
 function requestBasic(endpoint, method, path, authToken, body = null) {
   const headers = {
-    authorization: `Basic ${Buffer.from(`webmcp:${authToken}`).toString('base64')}`,
+    authorization: `Basic ${Buffer.from(`opencode:${authToken}`).toString('base64')}`,
   };
   if (body !== null) headers['content-type'] = 'application/json';
   return fetch(`${endpoint}${path}`, {
@@ -262,7 +262,9 @@ export function createOpenCodeServerAdapter(options = {}) {
       throw new AiCliError('POLICY_DENIED', `opencode config preflight failed: ${preflight.stderr.slice(0, 300)}`);
     }
 
-    const serverChild = spawn(openCodeBin, [...extraArgs, 'serve'], {
+    // Explicit port/hostname flags: the real binary ignores env-port hints and
+    // otherwise binds its default 4096, colliding with ambient servers.
+    const serverChild = spawn(openCodeBin, [...extraArgs, 'serve', '--port', String(port), '--hostname', '127.0.0.1'], {
       cwd: workspace,
       env,
       detached: process.platform !== 'win32',
@@ -272,6 +274,8 @@ export function createOpenCodeServerAdapter(options = {}) {
 
     // Every bootstrap failure path must tear the child down — a rejected
     // promise alone would orphan a live server holding its isolated env.
+    // Ready lines come in two dialects: the fixture emits JSON `{port}`, the
+    // real pinned binary emits `opencode server listening on http://host:port`.
     const endpoint = await new Promise((resolveEndpoint, rejectEndpoint) => {
       let settled = false;
       let buffered = '';
@@ -283,17 +287,34 @@ export function createOpenCodeServerAdapter(options = {}) {
         if (!settle) sweepProcessGroup(serverChild, 'SIGKILL');
         settle ? resolveEndpoint(value) : rejectEndpoint(error);
       };
+      const consumeLines = () => {
+        let newlineIndex = buffered.indexOf('\n');
+        while (newlineIndex !== -1 && !settled) {
+          const line = buffered.slice(0, newlineIndex).trim();
+          buffered = buffered.slice(newlineIndex + 1);
+          let parsedPort = null;
+          try {
+            const ready = JSON.parse(line);
+            if (Number.isInteger(ready?.port)) parsedPort = ready.port;
+          } catch {
+            const listening = line.match(/listening on\s+https?:\/\/[^\s]*:(\d{2,5})/i);
+            if (listening) parsedPort = Number.parseInt(listening[1], 10);
+          }
+          if (parsedPort !== null) {
+            finish(true, null, `http://127.0.0.1:${parsedPort}`);
+            return;
+          }
+          newlineIndex = buffered.indexOf('\n');
+        }
+      };
       const onData = (chunk) => {
         if (settled) return;
         buffered += chunk.toString('utf8');
-        const newlineIndex = buffered.indexOf('\n');
-        if (newlineIndex === -1) return;
-        try {
-          const ready = JSON.parse(buffered.slice(0, newlineIndex));
-          finish(true, null, `http://127.0.0.1:${ready.port}`);
-        } catch {
+        if (buffered.length > 64 * 1024) {
           finish(false, new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server produced no valid ready line'));
+          return;
         }
+        consumeLines();
       };
       const bootstrapTimer = setTimeout(
         () => finish(false, new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server bootstrap timed out')),
@@ -317,7 +338,10 @@ export function createOpenCodeServerAdapter(options = {}) {
     }
 
     const health = await requestBasic(endpoint, 'GET', '/global/health', password);
-    if (!health.ok || health.json?.status !== 'ok') {
+    // Health dialects: the pinned real binary reports `{ healthy: true }`,
+    // the packaged fixture reports `{ status: 'ok' }`; accept either.
+    const healthOk = health.ok && (health.json?.status === 'ok' || health.json?.healthy === true);
+    if (!healthOk) {
       sweepProcessGroup(serverChild, 'SIGKILL');
       throw new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server health check failed');
     }
@@ -404,7 +428,7 @@ export function createOpenCodeServerAdapter(options = {}) {
       const deduper = createEventDeduper();
       const controller = new AbortController();
       const ssePromise = fetch(`${runtime.endpoint}/event`, {
-        headers: { authorization: `Basic ${Buffer.from(`webmcp:${runtime.authToken}`).toString('base64')}` },
+        headers: { authorization: `Basic ${Buffer.from(`opencode:${runtime.authToken}`).toString('base64')}` },
         signal: controller.signal,
       }).then(async (response) => {
         if (!response.ok || !response.body) throw new AiCliError('PROVIDER_PROTOCOL_ERROR', 'SSE subscription rejected');
