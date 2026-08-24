@@ -1,17 +1,20 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
+import { writeAtomicFile } from './atomic-file.mjs';
 
-const TERMINAL_OUTCOME_MAP = Object.freeze({
-  done: { deliveryType: 'worker_done', outcome: 'completed' },
-  failed: { deliveryType: 'worker_failed', outcome: 'failed' },
-  cancelled: { deliveryType: 'worker_cancelled', outcome: 'cancelled' },
-});
+export const DISPATCH_CAPABILITY_SCHEMA = 'webmcp.ai-dispatch-capability/v1';
+export const DISPATCH_CAPABILITY_DIRNAME = 'dispatch-capabilities';
 
 function digest(value) {
   return createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex');
+}
+
+/** Stable digest of a dispatch capability token (the ONLY durable trace). */
+export function capabilityDigestOf(token) {
+  return createHash('sha256').update(String(token)).digest('hex');
 }
 
 /**
@@ -48,16 +51,133 @@ export function buildWorkerPacket(task, dispatch) {
   };
 }
 
+const WORKER_PREAMBLE_MAX_BYTES = 8192;
+
 /**
- * Persist the per-Dispatch worker capability file. Mode-0600, machine-local;
- * its path may be passed via environment, its content may not.
+ * Render the bounded, NON-SECRET Worker ABI preamble line handed to a worker's
+ * stdin ahead of its objective. Never contains endpoint or capability token;
+ * oversized list payloads degrade to digests-only instead of growing.
  */
-export function writeDispatchCapability(layout, dispatch, capabilityToken) {
-  const capabilityDir = join(layout.coordinationDir, 'dispatch-capabilities');
-  const file = join(capabilityDir, `${dispatch.dispatchId}.cap`);
-  writeFileSync(file, `${JSON.stringify({ schema: 'webmcp.ai-dispatch-capability/v0', ...dispatch, capabilityToken })}\n`, { mode: 0o600 });
+export function renderWorkerPreamble(packet) {
+  if (!packet || typeof packet !== 'object') return null;
+  const wrap = (value) => JSON.stringify({ webmcpAiWorkerPacket: value });
+  let rendered = wrap(packet);
+  if (Buffer.byteLength(rendered) <= WORKER_PREAMBLE_MAX_BYTES) return rendered;
+  const slimmed = { ...packet, allowedReadRoots: [], allowedWriteRoots: [], protectedPaths: [], acceptanceCommands: [] };
+  rendered = wrap(slimmed);
+  if (Buffer.byteLength(rendered) <= WORKER_PREAMBLE_MAX_BYTES) return rendered;
+  const minimal = {
+    schema: packet.schema,
+    coordinationId: packet.coordinationId,
+    taskId: packet.taskId,
+    dispatchId: packet.dispatchId,
+    bindingId: packet.bindingId,
+    mode: packet.mode,
+    guaranteeTier: packet.guaranteeTier,
+    fenceEpoch: packet.fenceEpoch,
+    objectiveDigest: packet.objectiveDigest,
+    policyDigest: packet.policyDigest,
+  };
+  return wrap(minimal);
+}
+
+function assertPosixMode(targetPath, expectedMode, kind) {
+  if (process.platform === 'win32') return;
+  const actual = statSync(targetPath).mode & 0o777;
+  if (actual !== expectedMode) {
+    throw new AiCliError(
+      'POLICY_DENIED',
+      `${kind} permissions could not be enforced (${actual.toString(8)} != ${expectedMode.toString(8)})`,
+    );
+  }
+}
+
+/**
+ * Persist the per-Dispatch worker capability file under the coordination's
+ * PRIVATE dispatch-capabilities directory (mode 0700). The file lands
+ * atomically at mode 0600 and is the ONLY place the capability token exists
+ * in plaintext; journals, snapshots and public responses never carry it.
+ * Returns the absolute file path — the single value a worker may receive.
+ */
+export function writeDispatchCapability({
+  coordinationDir,
+  endpoint,
+  coordinationId,
+  taskId,
+  dispatchId,
+  bindingId,
+  fenceEpoch,
+  capabilityToken,
+}) {
+  if (!isAbsolute(coordinationDir)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'capability coordination dir must be absolute', { exitCode: 2 });
+  }
+  for (const [label, value, prefix] of [
+    ['coordinationId', coordinationId, 'coord_'],
+    ['taskId', taskId, 'task_'],
+    ['dispatchId', dispatchId, 'disp_'],
+    ['bindingId', bindingId, 'worker_'],
+  ]) {
+    if (typeof value !== 'string' || !value.startsWith(prefix)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `capability ${label} must use the ${prefix} prefix`, { exitCode: 2 });
+    }
+  }
+  if (!Number.isInteger(fenceEpoch) || fenceEpoch < 0) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'capability fenceEpoch must be a non-negative integer', { exitCode: 2 });
+  }
+  if (typeof capabilityToken !== 'string' || capabilityToken.length < 16) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'capability token missing or too short', { exitCode: 2 });
+  }
+  const capabilityDir = join(coordinationDir, DISPATCH_CAPABILITY_DIRNAME);
+  mkdirSync(capabilityDir, { recursive: true, mode: 0o700 });
+  assertPosixMode(capabilityDir, 0o700, 'dispatch-capabilities directory');
+  const file = join(capabilityDir, `${dispatchId}.cap`);
+  const payload = {
+    schema: DISPATCH_CAPABILITY_SCHEMA,
+    endpoint: String(endpoint ?? ''),
+    coordinationId,
+    taskId,
+    dispatchId,
+    bindingId,
+    fenceEpoch,
+    issuedAt: new Date().toISOString(),
+    capabilityToken,
+  };
+  writeAtomicFile(file, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+  assertPosixMode(file, 0o600, 'dispatch capability file');
   return file;
 }
+
+/**
+ * Read a capability file back under supervisor ownership. Missing or corrupt
+ * files throw typed errors so callers fail closed instead of guessing.
+ */
+export function readDispatchCapabilityFile(filePath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', `dispatch capability unreadable: ${error?.code ?? 'ERROR'}`);
+  }
+  if (parsed?.schema !== DISPATCH_CAPABILITY_SCHEMA) {
+    throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', 'dispatch capability schema mismatch');
+  }
+  for (const field of ['endpoint', 'coordinationId', 'taskId', 'dispatchId', 'bindingId', 'capabilityToken']) {
+    if (typeof parsed[field] !== 'string' || parsed[field].length === 0) {
+      throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', `dispatch capability missing ${field}`);
+    }
+  }
+  if (!Number.isInteger(parsed.fenceEpoch)) {
+    throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', 'dispatch capability missing fenceEpoch');
+  }
+  return parsed;
+}
+
+const TERMINAL_OUTCOME_MAP = Object.freeze({
+  done: { deliveryType: 'worker_done', outcome: 'completed' },
+  failed: { deliveryType: 'worker_failed', outcome: 'failed' },
+  cancelled: { deliveryType: 'worker_cancelled', outcome: 'cancelled' },
+});
 
 export function generateDispatchCapabilityToken() {
   return randomBytes(24).toString('hex');

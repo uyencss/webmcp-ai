@@ -173,7 +173,7 @@ export function createOwnedProcessAdapter(options = {}) {
      * Spawn one shell-disabled worker. Returns a binding with proven process
      * identity plus a `done` promise settling at terminal evidence.
      */
-    async spawn({ task, dispatch, emit, command, args, env }) {
+    async spawn({ task, dispatch, emit, command, args, env, preamble }) {
       if (typeof command !== 'string' || (args !== undefined && (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string')))) {
         throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'spawn requires a command string and an argv array, never a shell string', { exitCode: 2 });
       }
@@ -194,11 +194,15 @@ export function createOwnedProcessAdapter(options = {}) {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      // The Task objective is the worker's initial input contract: workers
-      // that read stdin receive it as the first (and only) line, then the
-      // pipe closes so EOF-driven CLIs settle deterministically.
-      if (typeof task?.objective === 'string' && task.objective.length > 0) {
-        child.stdin.end(`${task.objective}\n`);
+      // The worker's initial input contract: the bounded NON-SECRET Worker
+      // ABI preamble line (when provided) precedes the objective; workers that
+      // read stdin receive both lines, then the pipe closes so EOF-driven CLIs
+      // settle deterministically.
+      const stdinLines = [];
+      if (typeof preamble === 'string' && preamble.length > 0) stdinLines.push(preamble);
+      if (typeof task?.objective === 'string' && task.objective.length > 0) stdinLines.push(task.objective);
+      if (stdinLines.length > 0) {
+        child.stdin.end(`${stdinLines.join('\n')}\n`);
       }
 
       const identityDeps = createPlatformIdentityDeps();

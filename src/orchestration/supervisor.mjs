@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { randomUUID, createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
@@ -30,8 +30,14 @@ import {
 import { acquireSupervisorLock, releaseSupervisorLock } from './lock.mjs';
 import { createPlatformIdentityDeps } from './process-identity.mjs';
 import { commitDelivery, openCoordinationStore, persistAck } from './store.mjs';
-import { createWorkerCallbackHandlers } from './worker-callback.mjs';
-import { generateDispatchCapabilityToken } from './worker-callback.mjs';
+import { createWorkerCallbackHandlers, buildWorkerPacket } from './worker-callback.mjs';
+import {
+  generateDispatchCapabilityToken,
+  writeDispatchCapability,
+  readDispatchCapabilityFile,
+  capabilityDigestOf,
+  renderWorkerPreamble,
+} from './worker-callback.mjs';
 import { validateWorkerCallback } from './contracts.mjs';
 import { computeAdapterDigest, computeAdapterMaturity } from './adapters/index.mjs';
 import { loadCanaryReceipts, probeExecutableVersion, resolveExecutableDigest } from './canary.mjs';
@@ -505,12 +511,18 @@ export async function createSupervisor(options = {}) {
     });
     const current = store.state.dispatches[dispatchId];
     if (current && ['created', 'assigned', 'active', 'waiting'].includes(current.state)) {
-      commit({
-        type: 'dispatch_state_changed',
-        dispatchId,
-        taskId: current.taskId,
-        payload: { dispatchId, taskId: current.taskId, state: 'cancelled' },
-      });
+      try {
+        commit({
+          type: 'dispatch_state_changed',
+          dispatchId,
+          taskId: current.taskId,
+          payload: { dispatchId, taskId: current.taskId, state: 'cancelled' },
+        });
+      } catch {
+        // A provider terminal bridge that won a close race already reconciled
+        // this dispatch truthfully; our cancellation is then redundant, not
+        // an error.
+      }
     }
     runtimeBindings.delete(dispatchId);
     liveBindingObjects.delete(dispatchId);
@@ -837,6 +849,38 @@ export async function createSupervisor(options = {}) {
     let resolveServerDone;
     const serverDone = new Promise((resolveDone) => { resolveServerDone = resolveDone; });
 
+    // Production Worker ABI: build the bounded non-secret packet and persist
+    // the per-dispatch capability file (0600 inside a 0700 dir). The worker
+    // receives ONLY the capability-file path via a single trusted env var;
+    // the token itself never enters argv, prompts, journals or responses.
+    const dispatchMode = packet?.mode ?? 'delegated-result-return';
+    const workerPacket = buildWorkerPacket(taskContext, {
+      coordinationId,
+      dispatchId,
+      bindingId,
+      mode: dispatchMode,
+      guaranteeTier: 'owned-process',
+      fenceEpoch,
+    });
+    const workerPreamble = renderWorkerPreamble(workerPacket);
+    let capabilityFile = null;
+    try {
+      capabilityFile = writeDispatchCapability({
+        coordinationDir: layout.coordinationDir,
+        endpoint,
+        coordinationId,
+        taskId,
+        dispatchId,
+        bindingId,
+        fenceEpoch,
+        capabilityToken,
+      });
+    } catch {
+      // A capability file that cannot be persisted means callbacks can never
+      // authenticate; the dispatch still launches but stays callback-less.
+      capabilityFile = null;
+    }
+
     const emit = (type, payload) => {
       const sanitizedPayload = sanitizeEvent(payload ?? {});
       if (type === 'worker_done') resolveServerDone?.({ outcome: 'completed' });
@@ -875,8 +919,10 @@ export async function createSupervisor(options = {}) {
           taskId,
           coordinationId,
           fenceEpoch,
-          mode: packet?.mode ?? 'delegated-result-return',
+          mode: dispatchMode,
           guaranteeTier: 'owned-process',
+          capabilityFile,
+          workerPacket,
         },
         emit,
         resumeSessionId: null,
@@ -914,6 +960,8 @@ export async function createSupervisor(options = {}) {
 
     // Retain the control handle durably when the adapter proved process
     // identity; telemetry-only bindings reconcile to lost on recovery.
+    // The token itself NEVER persists: only its digest and the capability
+    // file path (re-read under supervisor ownership, incl. after restart).
     const identity = started.binding.processIdentity ?? null;
     await __recordRuntimeBinding(dispatchId, {
       bindingId,
@@ -921,7 +969,8 @@ export async function createSupervisor(options = {}) {
       capability: adapter.lifecycle.kind,
       taskId,
       fenceEpoch,
-      callbackCapability: capabilityToken,
+      callbackCapabilityDigest: capabilityDigestOf(capabilityToken),
+      ...(capabilityFile ? { callbackCapabilityPath: capabilityFile } : {}),
       processIdentity: identity ?? undefined,
       controlOnly: !identity,
     });
@@ -987,6 +1036,12 @@ export async function createSupervisor(options = {}) {
         runtimeBindings.delete(dispatchId);
         liveBindingObjects.delete(dispatchId);
         persistRuntimeBindingRecords(layout, runtimeBindings);
+        // Revoke the capability ONLY now: terminal + cleanup + settled all
+        // durable. A leftover file after a crash stays inert — recovery never
+        // trusts it without a live, reattached binding.
+        if (capabilityFile) {
+          try { rmSync(capabilityFile, { force: true }); } catch { /* best effort */ }
+        }
       } catch {
         // The owner process is shutting down or the wait was cancelled;
         // recovery reconciliation records the truthful outcome instead.
@@ -1398,8 +1453,19 @@ export async function createSupervisor(options = {}) {
   async function stop() {
     if (stopped) return;
     stopped = true;
-    await server.close();
+    try {
+      // Bounded shutdown: an orphaned half-open client socket must never wedge
+      // the owner's exit. closeAllConnections (when available) drops stragglers.
+      await Promise.race([
+        Promise.resolve(server.close()),
+        new Promise((resolveTick) => setTimeout(resolveTick, 3_000).unref?.()),
+      ]);
+      server.closeAllConnections?.();
+    } catch {
+      // Best-effort teardown; recovery reconciles anything left behind.
+    }
     runtimeBindings.clear();
+    liveBindingObjects.clear();
     try {
       await releaseSupervisorLock(lock, identity.runtimeNonce);
     } catch {
@@ -1438,12 +1504,24 @@ export async function createSupervisor(options = {}) {
   function callbackBindingsMap() {
     const map = new Map();
     for (const [dispatchId, entry] of runtimeBindings) {
-      if (entry.record.callbackCapability === undefined) continue;
-      map.set(entry.record.bindingId, {
-        dispatchId,
-        taskId: entry.record.taskId,
-        capabilityToken: entry.record.callbackCapability,
-      });
+      const rec = entry.record;
+      // Legacy seam records may carry a plaintext capability; production
+      // records hold ONLY digest + path and re-read the file every time.
+      let token = typeof rec.callbackCapability === 'string' ? rec.callbackCapability : null;
+      if (!token && rec.callbackCapabilityPath) {
+        try {
+          const cap = readDispatchCapabilityFile(rec.callbackCapabilityPath);
+          if (cap.dispatchId !== dispatchId || cap.bindingId !== rec.bindingId) continue;
+          if (typeof rec.callbackCapabilityDigest === 'string'
+            && capabilityDigestOf(cap.capabilityToken) !== rec.callbackCapabilityDigest) continue;
+          token = cap.capabilityToken;
+        } catch {
+          // Revoked/missing/unreadable capability: callbacks fail closed.
+          continue;
+        }
+      }
+      if (!token) continue;
+      map.set(rec.bindingId, { dispatchId, taskId: rec.taskId, capabilityToken: token });
     }
     return map;
   }

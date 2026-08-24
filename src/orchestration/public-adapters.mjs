@@ -6,6 +6,7 @@ import { createOwnedProcessAdapter } from './adapters/owned-process.mjs';
 import { createOpenCodeServerAdapter } from './adapters/opencode-server.mjs';
 import { createClaudeStreamAdapter } from './adapters/claude-stream.mjs';
 import { createCodexExecAdapter } from './adapters/codex-exec.mjs';
+import { renderWorkerPreamble } from './worker-callback.mjs';
 
 export const PUBLIC_ADAPTER_KINDS = Object.freeze([
   'owned-process',
@@ -65,13 +66,21 @@ export function createPublicLifecycle(kind, adapter, config) {
           requireTrusted(config, 'ownedProcessCommand',
             'owned-process dispatch requires a coordinator-owned launch command');
           const { command, args = [], env = {} } = config.ownedProcessCommand;
+          // The worker learns its callback route through EXACTLY one trusted
+          // environment variable naming the capability file; the token itself
+          // never enters argv, env values, prompts or logs.
+          const childEnv = { ...env };
+          if (context.dispatch?.capabilityFile) {
+            childEnv.WEBMCP_AI_WORKER_CAPABILITY_FILE = String(context.dispatch.capabilityFile);
+          }
           return adapter.spawn({
             task: context.task,
             dispatch: context.dispatch,
             emit: context.emit,
             command,
             args,
-            env,
+            env: childEnv,
+            preamble: context.dispatch?.workerPacket ? renderWorkerPreamble(context.dispatch.workerPacket) : null,
           });
         },
         // Interrupt control routes through the adapter's own graceful ladder
