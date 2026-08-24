@@ -266,6 +266,7 @@ export async function createSupervisor(options = {}) {
   let server = null;
   let endpoint = null;
   const runtimeBindings = new Map(); // dispatchId -> { record }
+  const liveBindingObjects = new Map(); // dispatchId -> live adapter binding object
   let journal = [];
   const taskPackets = new Map();
   let commit = () => {
@@ -388,7 +389,11 @@ export async function createSupervisor(options = {}) {
         'orchestration is disabled by WEBMCP_AI_ORCHESTRATION_DISABLED',
       );
     }
-    if (!['open'].includes(store.state.coordinationState)) {
+    const state = store.state.coordinationState;
+    if (!['open'].includes(state)) {
+      // A deferred close must stay retryable while the coordination drains:
+      // close is the ONLY mutation allowed from the closing state.
+      if (operation === 'coordination.close' && state === 'closing') return;
       throw new AiCliError('COORDINATION_CLOSED', 'this coordination no longer accepts mutations');
     }
   }
@@ -401,57 +406,13 @@ export async function createSupervisor(options = {}) {
   }
 
   /**
-   * Restored-control interrupt ladder for a reattached owned worker. The
-   * durable binding's proven process/group identity is the only authority to
-   * signal: the live pid's start identity is re-proven BEFORE any signal so a
-   * recycled PID can never be swept, and bindings without proven identity are
-   * refused with a typed failure instead of a fabricated success.
+   * Raw restored-control signal ladder for an owned worker whose live adapter
+   * handle no longer exists (post-restart reattach). The durable binding's
+   * proven process/group identity is the only authority to signal, and the
+   * ladder is SIGINT -> SIGTERM -> SIGKILL with exit proof between steps.
    */
-  async function interruptRuntimeBinding(dispatchId, record, reason = '') {
-    const pid = record?.processIdentity?.pid;
-    const startIdentity = record?.processIdentity?.startIdentity;
-    if (
-      record?.controlOnly === true
-      || !Number.isInteger(pid)
-      || pid <= 0
-      || typeof startIdentity !== 'string'
-      || startIdentity.length === 0
-    ) {
-      return {
-        ok: false,
-        interrupted: false,
-        stopped: false,
-        error: { code: 'WORKER_IDENTITY_UNPROVEN', message: 'no proven process identity for this binding' },
-        reason,
-      };
-    }
-
-    // PID-reuse guard: the running process must still carry the recorded
-    // start identity before it may be signalled.
-    const identityDeps = createPlatformIdentityDeps();
-    let identityProven = false;
-    try {
-      process.kill(pid, 0);
-      const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
-      identityProven = nowIdentity === startIdentity;
-    } catch {
-      identityProven = false;
-    }
-    if (!identityProven) {
-      return {
-        ok: false,
-        interrupted: false,
-        stopped: false,
-        error: {
-          code: 'WORKER_IDENTITY_UNPROVEN',
-          message: 'process identity could not be reproven (exited or PID reused)',
-        },
-        reason,
-      };
-    }
-
+  async function restoredSignalLadder(pid, processGroupId) {
     const signalsAttempted = [];
-    const processGroupId = record.processIdentity?.processGroupId;
     const isAlive = (targetPid) => {
       try {
         process.kill(targetPid, 0);
@@ -468,7 +429,7 @@ export async function createSupervisor(options = {}) {
       }
     };
     if (process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1) {
-      for (const signal of ['SIGTERM', 'SIGKILL']) {
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
         if (!isAlive(pid)) break;
         try {
           process.kill(-processGroupId, signal);
@@ -482,7 +443,7 @@ export async function createSupervisor(options = {}) {
         await awaitExit();
       }
     } else {
-      for (const signal of ['SIGTERM', 'SIGKILL']) {
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
         if (!isAlive(pid)) break;
         try {
           process.kill(pid, signal);
@@ -491,18 +452,59 @@ export async function createSupervisor(options = {}) {
         await awaitExit();
       }
     }
-    const stopped = !isAlive(pid);
+    return { signalsAttempted, disposition: isAlive(pid) ? 'group-signalled' : 'group-stopped' };
+  }
+
+  function pidIsAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function awaitExitProof(pid, graceMs = 2_000) {
+    const deadline = Date.now() + graceMs;
+    while (Date.now() < deadline && pidIsAlive(pid)) {
+      await new Promise((resolveTick) => setTimeout(resolveTick, 25));
+    }
+    return !pidIsAlive(pid);
+  }
+
+  function dispatchReconciled(dispatch) {
+    if (!dispatch) return true;
+    return ['settled', 'lost', 'failed'].includes(dispatch.state)
+      || Boolean(dispatch.terminalOutcome)
+      || dispatch.state === 'cancelled';
+  }
+
+  /** Bounded wait for the provider/bridge to reach a truthful terminal state. */
+  async function awaitDispatchReconciliation(dispatchId, windowMs = 3_000) {
+    const deadline = Date.now() + windowMs;
+    for (;;) {
+      if (dispatchReconciled(store.state.dispatches[dispatchId])) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolveTick) => setTimeout(resolveTick, 25));
+    }
+  }
+
+  /**
+   * Release a binding ONLY after its stop is proven: commit cleanup evidence,
+   * reconcile the dispatch truthfully and drop both live maps.
+   */
+  async function releaseBindingAfterProvenStop(dispatchId, record, disposition, extraPayload = {}) {
     commit({
       type: 'cleanup_recorded',
       payload: {
         dispatchId,
-        disposition: stopped ? 'group-stopped' : 'group-signalled',
-        signalsAttempted: [...signalsAttempted],
-        processIdentity: { ...(record.processIdentity ?? {}) },
+        taskId: record.taskId,
+        disposition,
+        ...extraPayload,
       },
     });
     const current = store.state.dispatches[dispatchId];
-    if (current && ['assigned', 'active', 'waiting'].includes(current.state)) {
+    if (current && ['created', 'assigned', 'active', 'waiting'].includes(current.state)) {
       commit({
         type: 'dispatch_state_changed',
         dispatchId,
@@ -511,13 +513,210 @@ export async function createSupervisor(options = {}) {
       });
     }
     runtimeBindings.delete(dispatchId);
+    liveBindingObjects.delete(dispatchId);
     persistRuntimeBindingRecords(layout, runtimeBindings);
+  }
+
+  /**
+   * Proof-driven binding control. Every path either PROVES the worker stop
+   * (exit or truthful reconciliation) before any state/binding mutation, or
+   * retains the binding and returns a typed WORKER_STOP_UNPROVEN refusal so
+   * retries keep control. PID reuse never authorizes signalling; session-kind
+   * adapters are aborted through their own control surface, never killed.
+   */
+  async function controlRuntimeBinding(dispatchId, reason = '') {
+    const entry = runtimeBindings.get(dispatchId);
+    const record = entry?.record ?? null;
+    if (!record || typeof record !== 'object') {
+      return {
+        ok: false,
+        interrupted: false,
+        stopped: false,
+        resolved: false,
+        error: { code: 'DISPATCH_NOT_FOUND', message: `no live runtime binding for ${dispatchId}` },
+        reason,
+      };
+    }
+    // Fence epoch guard: bindings issued under another epoch never control.
+    if (Number.isInteger(record.fenceEpoch) && record.fenceEpoch !== store.state.fenceEpoch) {
+      return {
+        ok: false,
+        interrupted: false,
+        stopped: false,
+        resolved: false,
+        error: { code: 'STALE_COORDINATOR_EPOCH', message: 'binding was issued under a different fence epoch' },
+        reason,
+      };
+    }
+
+    const liveBinding = liveBindingObjects.get(dispatchId) ?? null;
+    const adapter = registry.get(record.adapterId);
+    const adapterControl = adapter?.lifecycle?.control ?? null;
+
+    const pid = record.processIdentity?.pid;
+    const startIdentity = record.processIdentity?.startIdentity;
+    const hasProvenIdentityFields = Number.isInteger(pid) && pid > 0
+      && typeof startIdentity === 'string'
+      && startIdentity.length > 0;
+
+    // Session-style adapters: the abort IS the control; provider terminal
+    // events settle the dispatch later. The server process stays alive.
+    if (record.capability === 'opencode-server') {
+      if (!liveBinding || typeof adapterControl !== 'function') {
+        return {
+          ok: false,
+          interrupted: false,
+          stopped: false,
+          resolved: false,
+          error: { code: 'WORKER_IDENTITY_UNPROVEN', message: 'no live session control available after restart' },
+          reason,
+        };
+      }
+      let aborted;
+      try {
+        aborted = await adapterControl({ binding: liveBinding, record, reason });
+      } catch (error) {
+        return {
+          ok: false,
+          interrupted: false,
+          stopped: false,
+          resolved: false,
+          error: { code: error.code ?? 'WORKER_STOP_UNPROVEN', message: String(error.message ?? 'session abort failed').slice(0, 300) },
+          reason,
+        };
+      }
+      if (!aborted || aborted.ok !== true) {
+        return {
+          ok: false,
+          interrupted: false,
+          stopped: false,
+          resolved: false,
+          error: aborted?.error ?? { code: 'WORKER_STOP_UNPROVEN', message: 'session abort refused' },
+          reason,
+        };
+      }
+      commit({
+        type: 'cleanup_recorded',
+        payload: {
+          dispatchId,
+          taskId: record.taskId,
+          disposition: 'session-abort-requested',
+          mode: 'session-abort',
+        },
+      });
+      return { ok: true, interrupted: true, stopped: false, resolved: false, mode: 'session-abort' };
+    }
+
+    if (!hasProvenIdentityFields) {
+      return {
+        ok: false,
+        interrupted: false,
+        stopped: false,
+        resolved: false,
+        error: { code: 'WORKER_IDENTITY_UNPROVEN', message: 'no proven process identity for this binding' },
+        reason,
+      };
+    }
+
+    // Presence + identity proof BEFORE anything else.
+    let presenceAlive = false;
+    let identityMatches = false;
+    const identityDeps = createPlatformIdentityDeps();
+    try {
+      process.kill(pid, 0);
+      presenceAlive = true;
+      const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+      identityMatches = nowIdentity === startIdentity;
+    } catch {
+      presenceAlive = false;
+    }
+    if (!presenceAlive) {
+      // Exit is PROVEN by absence: release truthfully without signalling.
+      await releaseBindingAfterProvenStop(dispatchId, record, 'already-exited');
+      return { ok: true, interrupted: false, stopped: true, resolved: true, disposition: 'already-exited' };
+    }
+    if (!identityMatches) {
+      // PID recycled: the original worker is provably gone and the newcomer
+      // is NEVER signalled. Release our binding without touching that pid.
+      await releaseBindingAfterProvenStop(dispatchId, record, 'pid-recycled-original-exited');
+      return { ok: true, interrupted: false, stopped: true, resolved: true, disposition: 'pid-recycled' };
+    }
+
+    let controlled = null;
+    if (liveBinding && typeof adapterControl === 'function') {
+      try {
+        controlled = await adapter.lifecycle.control({ binding: liveBinding, record, reason });
+      } catch (error) {
+        return {
+          ok: false,
+          interrupted: true,
+          stopped: false,
+          resolved: false,
+          error: { code: error.code ?? 'WORKER_STOP_UNPROVEN', message: String(error.message ?? 'adapter control failed').slice(0, 300) },
+          reason,
+        };
+      }
+      if (!controlled || controlled.ok !== true) {
+        return {
+          ok: false,
+          interrupted: true,
+          stopped: false,
+          resolved: false,
+          error: controlled?.error ?? { code: 'WORKER_STOP_UNPROVEN', message: 'adapter control refused the stop' },
+          reason,
+        };
+      }
+    } else {
+      // Restored-control fallback: only owned-process capability may take the
+      // raw signal ladder; everything else fails closed.
+      if (record.capability !== 'owned-process' && record.adapterId !== 'owned-process') {
+        return {
+          ok: false,
+          interrupted: false,
+          stopped: false,
+          resolved: false,
+          error: { code: 'UNSUPPORTED_CAPABILITY', message: `adapter ${record.adapterId} exposes no interrupt control for this binding` },
+          reason,
+        };
+      }
+      controlled = await restoredSignalLadder(pid, record.processIdentity?.processGroupId);
+    }
+
+    const stopped = await awaitExitProof(pid, (controlled.signalsAttempted?.length ?? 0) === 0 ? 300 : 2_000);
+    const signalsAttempted = controlled.signalsAttempted ?? liveBinding?.__signalsAttempted ?? [];
+    if (!stopped) {
+      // The worker SURVIVED the full control attempt. Keep the binding so a
+      // retry keeps control, and record the honest evidence.
+      commit({
+        type: 'cleanup_recorded',
+        payload: {
+          dispatchId,
+          taskId: record.taskId,
+          disposition: 'signalled-stop-unproven',
+          signalsAttempted: [...signalsAttempted],
+          processIdentity: { ...(record.processIdentity ?? {}) },
+        },
+      });
+      return {
+        ok: false,
+        interrupted: true,
+        stopped: false,
+        resolved: false,
+        signalsAttempted: [...signalsAttempted],
+        error: { code: 'WORKER_STOP_UNPROVEN', message: 'worker survived the stop control; binding retained for retry' },
+        reason,
+      };
+    }
+    await releaseBindingAfterProvenStop(dispatchId, record, controlled.disposition ?? 'group-stopped', {
+      signalsAttempted: [...signalsAttempted],
+    });
     return {
       ok: true,
       interrupted: true,
-      reason: String(reason ?? ''),
-      signalsAttempted,
-      stopped,
+      stopped: true,
+      resolved: true,
+      disposition: controlled.disposition ?? 'group-stopped',
+      signalsAttempted: [...signalsAttempted],
     };
   }
 
@@ -721,10 +920,14 @@ export async function createSupervisor(options = {}) {
       adapterId: adapter.id,
       capability: adapter.lifecycle.kind,
       taskId,
+      fenceEpoch,
       callbackCapability: capabilityToken,
       processIdentity: identity ?? undefined,
       controlOnly: !identity,
     });
+    // Keep the LIVE adapter handle so interrupt/close route through the
+    // adapter's own control surface (session abort, graceful ladder, ...).
+    liveBindingObjects.set(dispatchId, started.binding);
 
     // Finalization belongs to the OWNER lifetime, not to the start call:
     // after provider terminal state AND resource reconciliation the dispatch
@@ -782,6 +985,7 @@ export async function createSupervisor(options = {}) {
           });
         }
         runtimeBindings.delete(dispatchId);
+        liveBindingObjects.delete(dispatchId);
         persistRuntimeBindingRecords(layout, runtimeBindings);
       } catch {
         // The owner process is shutting down or the wait was cancelled;
@@ -868,17 +1072,34 @@ export async function createSupervisor(options = {}) {
       };
     },
     'coordination.close': async () => {
-      commit({ type: 'coordination_state_changed', payload: { state: 'closing' } });
+      if (store.state.coordinationState === 'open') {
+        commit({ type: 'coordination_state_changed', payload: { state: 'closing' } });
+      }
       // Closing is not just a state change: every live owned worker is
-      // interrupted through its proven binding identity first.
+      // interrupted through its proven binding identity first, and closure
+      // commits ONLY after every stop is proven or truthfully reconciled.
       const stoppedDispatches = [];
-      for (const [dispatchId, entry] of [...runtimeBindings.entries()]) {
+      const pending = [];
+      for (const [dispatchId] of [...runtimeBindings.entries()]) {
         const state = store.state.dispatches[dispatchId]?.state;
         if (!state || !NONTERMINAL_DISPATCH_STATES.has(state)) continue;
-        const stop = await interruptRuntimeBinding(dispatchId, entry.record, 'coordination-close');
-        stoppedDispatches.push({ dispatchId, ok: stop.ok, stopped: stop.stopped === true });
+        const stop = await controlRuntimeBinding(dispatchId, 'coordination-close');
+        stoppedDispatches.push({ dispatchId, ok: stop.ok === true, stopped: stop.stopped === true });
+        if (stop.resolved !== true) {
+          const reconciled = await awaitDispatchReconciliation(dispatchId);
+          if (!reconciled) pending.push({ dispatchId, code: stop.error?.code ?? 'WORKER_STOP_UNPROVEN' });
+        }
       }
-      commit({ type: 'coordination_state_changed', payload: { state: 'closed' } });
+      if (pending.length > 0) {
+        throw new AiCliError(
+          'WORKER_STOP_UNPROVEN',
+          'coordination close deferred; live workers remain unproven',
+          { details: { pending } },
+        );
+      }
+      if (store.state.coordinationState !== 'closed') {
+        commit({ type: 'coordination_state_changed', payload: { state: 'closed' } });
+      }
       return { closed: true, stoppedDispatches };
     },
     'task.create': async (input, envelope) => {
@@ -895,21 +1116,41 @@ export async function createSupervisor(options = {}) {
       if (!store.state.tasks[taskId]) {
         throw new AiCliError('TASK_NOT_FOUND', `no task ${taskId}`);
       }
-      commit({
-        type: 'task_state_changed',
-        taskId,
-        payload: { taskId, state: 'cancelled', reason: String(input.reason ?? ''), actor: envelope.requestId },
-      });
       // Cancelling is executable, not just an intent record: every live
       // runtime binding for this task is interrupted through its proven
-      // process identity before the caller learns the task is cancelled.
+      // process identity, and the durable task state commits CANCELLED only
+      // after every matching live dispatch is terminal or truthfully
+      // reconciled. Unproven stops defer the cancellation and keep control.
       const stops = [];
-      for (const [dispatchId, entry] of [...runtimeBindings.entries()]) {
-        if (entry.record.taskId !== taskId) continue;
+      const pending = [];
+      for (const [dispatchId] of [...runtimeBindings.entries()]) {
+        if (runtimeBindings.get(dispatchId)?.record.taskId !== taskId) continue;
         const state = store.state.dispatches[dispatchId]?.state;
         if (!state || !NONTERMINAL_DISPATCH_STATES.has(state)) continue;
-        const stop = await interruptRuntimeBinding(dispatchId, entry.record, String(input.reason ?? 'task-cancelled'));
-        stops.push({ dispatchId, ok: stop.ok, stopped: stop.stopped === true });
+        const stop = await controlRuntimeBinding(dispatchId, String(input.reason ?? 'task-cancelled'));
+        stops.push({ dispatchId, ok: stop.ok === true, stopped: stop.stopped === true });
+        if (stop.resolved !== true) {
+          const reconciled = await awaitDispatchReconciliation(dispatchId);
+          if (!reconciled) pending.push({ dispatchId, code: stop.error?.code ?? 'WORKER_STOP_UNPROVEN' });
+        }
+      }
+      if (pending.length > 0) {
+        throw new AiCliError(
+          'WORKER_STOP_UNPROVEN',
+          'task cancellation deferred; matching live workers are not yet provably terminal',
+          { details: { pending } },
+        );
+      }
+      const taskNow = store.state.tasks[taskId].state;
+      // A worker that already reported its own terminal state moves the task
+      // to awaiting_acceptance through the bridge; cancelling then is a no-op
+      // over an already-post-terminal task, never a state regression.
+      if (taskNow !== 'cancelled' && taskNow !== 'awaiting_acceptance') {
+        commit({
+          type: 'task_state_changed',
+          taskId,
+          payload: { taskId, state: 'cancelled', reason: String(input.reason ?? ''), actor: envelope.requestId },
+        });
       }
       return {
         cancelled: true,
@@ -949,19 +1190,20 @@ export async function createSupervisor(options = {}) {
     'dispatch.permission.resolve': async () => { throw unsupportedAdapterBoundary('dispatch.permission.resolve'); },
     'dispatch.interrupt': async (input) => {
       const dispatchId = input?.dispatchId;
-      const entry = typeof dispatchId === 'string' ? runtimeBindings.get(dispatchId) : null;
-      if (!entry) {
+      if (typeof dispatchId !== 'string' || !runtimeBindings.has(dispatchId)) {
         // Without a reproven runtime binding there is no ownership proof to
         // signal against; the typed boundary stays honest.
         throw unsupportedAdapterBoundary('dispatch.interrupt');
       }
-      const stop = await interruptRuntimeBinding(dispatchId, entry.record, input?.reason);
+      // Route through the proof-driven control path: fence epoch, binding
+      // identity, adapter capability and exit proof are all required.
+      const stop = await controlRuntimeBinding(dispatchId, input?.reason);
       if (!stop.ok) {
-        // Surface refusals as typed operation failures instead of a fabricated
-        // success payload.
-        throw new AiCliError(stop.error.code ?? 'WORKER_IDENTITY_UNPROVEN', stop.error.message ?? 'interrupt refused', {
-          details: { reason: stop.reason ?? null },
-        });
+        throw new AiCliError(
+          stop.error.code ?? 'WORKER_STOP_UNPROVEN',
+          stop.error.message ?? 'interrupt refused',
+          { details: { reason: stop.reason ?? null, ...(stop.signalsAttempted ? { signalsAttempted: stop.signalsAttempted } : {}) } },
+        );
       }
       return stop;
     },

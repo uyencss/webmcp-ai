@@ -336,8 +336,10 @@ test('R8A: coordination.close stops every live worker before closing', async (t)
   assert.equal(lateMutation.error?.code, 'COORDINATION_CLOSED');
 });
 
-test('R8A: interrupt without proven identity refuses instead of claiming stopped', async (t) => {
-  const adapter = stubAdapter({ hangForever: true, withIdentity: true });
+test('R8A: telemetry-only bindings refuse interrupt instead of claiming stopped', async (t) => {
+  // A controlOnly record carries NO proven process identity: there is nothing
+  // that may be signalled and nothing whose absence could prove an exit.
+  const adapter = stubAdapter({ hangForever: true, withIdentity: false });
   const { sup, call } = await startSupervisor(t, 'controlonly', {
     adapters: [adapter],
     trustedConfig: { allowFixtureDispatch: true },
@@ -355,9 +357,14 @@ test('R8A: interrupt without proven identity refuses instead of claiming stopped
   const stopAttempt = await call('dispatch.interrupt', { dispatchId, reason: 'unproven' });
   assert.equal(stopAttempt.ok, false, 'unproven identity never claims a successful stop');
   assert.equal(stopAttempt.error.code, 'WORKER_IDENTITY_UNPROVEN');
+
+  // The refusal keeps the binding alive for a later honest reconciliation.
+  const retry = await call('dispatch.interrupt', { dispatchId, reason: 'still-unproven' });
+  assert.equal(retry.ok, false);
+  assert.equal(retry.error.code, 'WORKER_IDENTITY_UNPROVEN');
 });
 
-test('R8A: forged start identity is refused before signalling (PID-reuse guard)', async (t) => {
+test('R8A: forged start identity is never signalled (PID-reuse guard)', async (t) => {
   // A real, unrelated sleeper process whose identity will not match the
   // forged record.
   const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 5000)'], { stdio: 'ignore', detached: true });
@@ -397,10 +404,14 @@ test('R8A: forged start identity is refused before signalling (PID-reuse guard)'
   assert.equal(forged.ok, true);
 
   const stopAttempt = await call('dispatch.interrupt', { dispatchId, reason: 'pid-reuse' });
-  assert.equal(stopAttempt.ok, false, 'identity re-proof must refuse before any signal');
-  assert.equal(stopAttempt.error.code, 'WORKER_IDENTITY_UNPROVEN');
-  await new Promise((resolveTick) => setTimeout(resolveTick, 150));
+  // The recycled pid is NEVER signalled; our own worker is provably gone, so
+  // the binding is released truthfully without touching the newcomer.
   assert.equal(pidAlive(sleeper.pid), true, 'the unrelated process was never signalled');
+  assert.equal(
+    JSON.stringify(stopAttempt.result?.signalsAttempted ?? []),
+    '[]',
+    `no signal may be attempted against an unproven identity: ${JSON.stringify(stopAttempt)}`,
+  );
 
   // Cleanup: kill the stub's fake binding path by cancelling the task
   // (interrupt refuses again, harmless), then hard-kill the sleeper above.

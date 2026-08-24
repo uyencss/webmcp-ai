@@ -74,6 +74,20 @@ export function createPublicLifecycle(kind, adapter, config) {
             env,
           });
         },
+        // Interrupt control routes through the adapter's own graceful ladder
+        // (SIGINT -> SIGTERM -> SIGKILL); the runtime then demands exit proof.
+        async control({ binding, reason }) {
+          const result = await adapter.interrupt({ binding, reason });
+          if (result?.ok === false) {
+            return { ok: false, error: result.error ?? { code: 'WORKER_STOP_UNPROVEN', message: 'adapter interrupt refused' } };
+          }
+          return {
+            ok: true,
+            mode: 'graceful-ladder',
+            disposition: 'adapter-interrupt',
+            signalsAttempted: result?.__signals ?? result?.result?.signalsAttempted ?? [],
+          };
+        },
         async finalize(context) {
           return adapter.close(context.bindingOnly ? {} : { binding: context.binding });
         },
@@ -92,6 +106,19 @@ export function createPublicLifecycle(kind, adapter, config) {
             followUpTexts: [],
           });
         },
+        // Claude interrupt control is the adapter's own SIGINT-first ladder.
+        async control({ binding, reason }) {
+          const result = await adapter.interrupt({ binding, reason });
+          if (result?.ok === false) {
+            return { ok: false, error: result.error ?? { code: 'WORKER_STOP_UNPROVEN', message: 'adapter interrupt refused' } };
+          }
+          return {
+            ok: true,
+            mode: 'graceful-ladder',
+            disposition: 'adapter-interrupt',
+            signalsAttempted: result?.__signals ?? result?.result?.signalsAttempted ?? [],
+          };
+        },
         async finalize(context) {
           return adapter.close({ binding: context.binding });
         },
@@ -107,6 +134,32 @@ export function createPublicLifecycle(kind, adapter, config) {
             emit: context.emit,
             resumeThread: context.resumeThread ?? null,
           });
+        },
+        // Codex exposes no graceful interrupt: control is the announced hard
+        // kill of exactly the owned child process group.
+        async control({ binding }) {
+          const child = binding?.__child;
+          const signalsAttempted = [];
+          if (!child || child.exitCode !== null || child.signalCode !== null) {
+            return { ok: true, mode: 'hard-kill', alreadyExited: true, signalsAttempted };
+          }
+          if (process.platform !== 'win32') {
+            try {
+              process.kill(-child.pid, 'SIGKILL');
+              signalsAttempted.push('GROUP_SIGKILL');
+            } catch {
+              try {
+                child.kill('SIGKILL');
+                signalsAttempted.push('SIGKILL');
+              } catch { /* already gone */ }
+            }
+          } else {
+            try {
+              child.kill('SIGKILL');
+              signalsAttempted.push('SIGKILL');
+            } catch { /* already gone */ }
+          }
+          return { ok: true, mode: 'hard-kill', disposition: 'group-stopped', signalsAttempted };
         },
         async finalize(context) {
           return adapter.close({ binding: context.binding });
@@ -162,6 +215,23 @@ export function createPublicLifecycle(kind, adapter, config) {
             },
             done: context.doneForServer,
           };
+        },
+        // Interrupt control aborts the SESSION through the provider surface.
+        // The owned server process is NEVER killed by default; it shuts down
+        // during finalize after the provider reaches terminal state.
+        async control({ binding }) {
+          try {
+            await adapter.abortSession(binding);
+            return { ok: true, mode: 'session-abort', signalsAttempted: [] };
+          } catch (error) {
+            return {
+              ok: false,
+              error: {
+                code: error.code ?? 'WORKER_STOP_UNPROVEN',
+                message: String(error.message ?? 'session abort failed').slice(0, 300),
+              },
+            };
+          }
         },
         async finalize(context) {
           const runtime = context.binding?.__runtime;

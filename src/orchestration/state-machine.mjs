@@ -291,7 +291,18 @@ function applyDispatchStateChange(state, payload) {
     ...state.dispatches,
     [payload.dispatchId]: Object.freeze({ ...dispatch, state: payload.state }),
   };
-  return withMutations(state, { dispatches, tasks });
+
+  let interruptEffects = state.interruptEffects;
+  if (payload.state === 'cancelled' && dispatch.state !== 'cancelled') {
+    // Every PROVEN cancellation of a live dispatch records exactly one
+    // durable interrupt effect, independent of which terminal path (cancel,
+    // close, worker self-report) won the race.
+    interruptEffects = [
+      ...interruptEffects.slice(-1 * (MAX_INTERRUPT_EFFECTS - 1)),
+      { dispatchId: payload.dispatchId, taskId: payload.taskId, effect: 'interrupt' },
+    ];
+  }
+  return withMutations(state, { dispatches, tasks, interruptEffects });
 }
 
 function applyTaskStateChange(state, payload) {
@@ -313,10 +324,11 @@ function applyTaskStateChange(state, payload) {
     };
     let interruptEffects = state.interruptEffects;
     for (const dispatch of Object.values(state.dispatches)) {
-      if (
-        dispatch.taskId === payload.taskId
+      // Live dispatches still earn an effect at task-cancel time; dispatches
+      // the control path already reconciled recorded theirs at that moment.
+      if (dispatch.taskId === payload.taskId
         && ['assigned', 'active', 'waiting'].includes(dispatch.state)
-      ) {
+        && !interruptEffects.some((existing) => existing.dispatchId === dispatch.dispatchId)) {
         interruptEffects = [
           ...interruptEffects.slice(-1 * (MAX_INTERRUPT_EFFECTS - 1)),
           { dispatchId: dispatch.dispatchId, taskId: payload.taskId, effect: 'interrupt' },
