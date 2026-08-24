@@ -137,7 +137,7 @@ export function createIpcServer(options) {
       }
 
       if (!capabilitiesMatch(envelope.capability, typeof options.capability === 'function'
-        ? options.capability()
+        ? options.capability(envelope)
         : options.capability)) {
         writeEnvelope(socket, {
           protocol,
@@ -149,10 +149,14 @@ export function createIpcServer(options) {
         socket.destroy();
         return;
       }
+      // The matched raw token travels to the handler so per-route contracts
+      // (e.g. worker callbacks vs coordinator operations) can re-verify it
+      // against their own binding registries.
+      const presentedCapability = envelope.capability;
       delete envelope.capability;
 
       Promise.resolve()
-        .then(() => options.handler(envelope))
+        .then(() => options.handler(envelope, { presentedCapability }))
         .then((result) => {
           writeEnvelope(socket, result);
           socket.end();

@@ -246,6 +246,14 @@ export function createClaudeStreamAdapter(options = {}) {
       const events = [];
       const signalsAttempted = [];
 
+      // The Task objective is the initial turn's prompt: write it as the
+      // first stdin line and close the pipe so real `-p` runs settle instead
+      // of waiting for EOF forever. Queued follow-ups (sendFollowUp) remain
+      // available for adapters that keep the turn open.
+      if (typeof task?.objective === 'string' && task.objective.length > 0) {
+        child.stdin.end(`${task.objective}\n`);
+      }
+
       const donePromise = new Promise((resolveDone) => {
         child.stdout.on('data', (chunk) => {
           stdoutBuffer += chunk.toString('utf8');

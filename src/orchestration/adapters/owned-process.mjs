@@ -194,6 +194,13 @@ export function createOwnedProcessAdapter(options = {}) {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
+      // The Task objective is the worker's initial input contract: workers
+      // that read stdin receive it as the first (and only) line, then the
+      // pipe closes so EOF-driven CLIs settle deterministically.
+      if (typeof task?.objective === 'string' && task.objective.length > 0) {
+        child.stdin.end(`${task.objective}\n`);
+      }
+
       const identityDeps = createPlatformIdentityDeps();
       const provenStartIdentity = (await identityDeps.getStartIdentity(child.pid))
         ?? `${process.platform}:indeterminate-${child.pid}`;

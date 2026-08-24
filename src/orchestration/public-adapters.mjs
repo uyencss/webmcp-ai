@@ -136,6 +136,17 @@ export function createPublicLifecycle(kind, adapter, config) {
               });
             },
           });
+          // Readiness handshake: the SSE subscription MUST be established
+          // before the first prompt so no early provider event is lost and
+          // the prompt is never issued against an unproven stream.
+          const sseReady = await Promise.race([
+            subscription.connected,
+            new Promise((resolveTimeout) => setTimeout(() => resolveTimeout({ __sseTimeout: true }), 5_000).unref?.()),
+          ]);
+          if (sseReady?.__sseTimeout) {
+            try { subscription.close(); } catch { /* already closed */ }
+            throw new AiCliError('PROVIDER_PROTOCOL_ERROR', 'opencode SSE subscription did not become ready before prompting');
+          }
           await adapter.promptAsync(runtime, session.sessionId, context.task.objective);
           return {
             ok: true,

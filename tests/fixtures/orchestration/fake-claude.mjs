@@ -71,6 +71,14 @@ if (mode === 'busy-followup') {
   emit({ type: 'system', subtype: 'init', session_id: effectiveSession });
   let firstPromptSeen = false;
   let buffer = '';
+  if (process.env.WEBMCP_FAKE_STDIN_LOG) {
+    const { appendFileSync } = await import('node:fs');
+    process.stdin.on('data', (chunk) => {
+      for (const line of chunk.toString('utf8').split('\n').filter(Boolean)) {
+        try { appendFileSync(process.env.WEBMCP_FAKE_STDIN_LOG, `${line}\n`); } catch { /* best effort */ }
+      }
+    });
+  }
   process.stdin.on('data', (chunk) => {
     buffer += chunk.toString('utf8');
     let newlineIndex;

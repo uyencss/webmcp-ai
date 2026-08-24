@@ -6,9 +6,22 @@
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createReadStream } from 'node:fs';
+
+const REQ_LOG = process.env.WEBMCP_FAKE_REQ_LOG ?? null;
+function logRequest(label) {
+  if (!REQ_LOG) return;
+  try { appendFileSync(REQ_LOG, `${label}\n`); } catch { /* best effort */ }
+}
+
+if (process.env.WEBMCP_FAKE_IGNORE_SIGTERM === '1' && process.argv[2] !== 'db' && process.argv[2] !== '--version') {
+  process.on('SIGTERM', () => {
+    logRequest('sigterm-trapped');
+    // Trapped: keep serving; only SIGKILL can stop this fixture now.
+  });
+}
 
 const mode = process.argv[2];
 
@@ -147,6 +160,7 @@ function startHttpServer() {
 
   const sessionMatch = url.pathname.match(/^\/session\/([^/]+)(\/.*)?$/);
   if (req.method === 'GET' && url.pathname === '/event') {
+    logRequest('/event');
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -228,6 +242,7 @@ function startHttpServer() {
       return;
     }
     if (req.method === 'POST' && rest === '/prompt_async') {
+      logRequest('/prompt_async');
       if (!session) {
         res.writeHead(404, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'not found' }));

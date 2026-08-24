@@ -16,6 +16,7 @@ import {
   OPERATIONS,
   ORCHESTRATION_LIMITS,
   ORCHESTRATION_PROTOCOL,
+  WORKER_CALLBACK_OPERATIONS,
 } from './constants.mjs';
 import { validateTaskPacket } from './contracts.mjs';
 import { createAdapterRegistry } from './adapters/index.mjs';
@@ -353,7 +354,16 @@ export async function createSupervisor(options = {}) {
 
     server = await createIpcServer({
       endpoint,
-      capability: () => capabilityToken,
+      // Route-scoped authentication: worker callback frames authenticate
+      // against their OWN binding's dispatch capability, never the
+      // coordinator token.
+      capability: (envelope) => {
+        if (WORKER_CALLBACK_OPERATIONS.includes(envelope?.operation)) {
+          const bindingId = envelope.input?.bindingId ?? null;
+          return callbackBindingsMap().get(bindingId)?.capabilityToken ?? null;
+        }
+        return capabilityToken;
+      },
       handler: handleEnvelope,
       protocol: ORCHESTRATION_PROTOCOL,
     });
@@ -1030,7 +1040,7 @@ export async function createSupervisor(options = {}) {
     },
   });
 
-  function handleEnvelope(envelope) {
+  function handleEnvelope(envelope, meta = {}) {
     const respond = (payload) => ({
       protocol: ORCHESTRATION_PROTOCOL,
       requestId: envelope.requestId ?? null,
@@ -1044,6 +1054,16 @@ export async function createSupervisor(options = {}) {
           `unsupported protocol ${String(envelope.protocol)}`,
           { exitCode: 2 },
         );
+      }
+      // Worker callback route: the frame IS the callback contract; its own
+      // validator plus the per-binding capability check (already matched by
+      // the transport for this route) authorize it.
+      if (WORKER_CALLBACK_OPERATIONS.includes(envelope.operation)) {
+        return Promise.resolve()
+          .then(() => processWorkerCallback(envelope.input ?? {}, { presentedCapability: meta.presentedCapability }))
+          .then((result) => (result.ok
+            ? respond({ ok: true, result })
+            : respond({ ok: false, error: result.error })));
       }
       if (!OPERATIONS.includes(envelope.operation)) {
         throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `unknown orchestration operation: ${String(envelope.operation)}`, { exitCode: 2 });
@@ -1131,6 +1151,20 @@ export async function createSupervisor(options = {}) {
     return map;
   }
 
+  /**
+   * Machine-local test/pipeline seam: the durable worker binding table the
+   * callback transport authenticates against. A generic CLI worker learns its
+   * bindingId + dispatch capability from this recorded pairing.
+   */
+  function __workerBindings() {
+    return [...callbackBindingsMap().entries()].map(([bindingId, entry]) => ({
+      bindingId,
+      dispatchId: entry.dispatchId,
+      taskId: entry.taskId,
+      capabilityToken: entry.capabilityToken,
+    }));
+  }
+
   function workerCallbackOptions() {
     return {
       fenceEpoch: () => store.state.fenceEpoch,
@@ -1203,6 +1237,7 @@ export async function createSupervisor(options = {}) {
     stop,
     __store: store,
     __recordRuntimeBinding,
+    __workerBindings,
     processWorkerCallback,
   };
 }

@@ -9,6 +9,7 @@ import { AiCliError } from '../../errors.mjs';
 import { writeAtomicJson } from '../atomic-file.mjs';
 import { validateAdapter } from './index.mjs';
 import { normalizeOpenCodeEvent, createEventDeduper } from './opencode-events.mjs';
+import { createPlatformIdentityDeps } from '../process-identity.mjs';
 
 function sha256(value) {
   return createHash('sha256').update(String(value)).digest('hex');
@@ -168,7 +169,7 @@ export function prepareRuntimeDatabase({ dataRoot, bindingId }) {
  * the caller's XDG_DATA_HOME are preserved untouched; isolation comes from
  * explicit flags plus a dispatch-private config root.
  */
-export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv = {}, port, streamFile, fakeReadyLine, fakeDbEcho, fakeSymlinkDbDir }) {
+export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv = {}, port, streamFile, fakeReadyLine, fakeDbEcho, fakeSymlinkDbDir, fakeRequestLog, fakeIgnoreSigterm }) {
   if (!isAbsolute(dbPath)) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime db path must be absolute', { exitCode: 2 });
   }
@@ -200,6 +201,8 @@ export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv
     ...(fakeReadyLine ? { WEBMCP_FAKE_READY_LINE: fakeReadyLine } : {}),
     ...(fakeDbEcho ? { WEBMCP_FAKE_DB_ECHO: fakeDbEcho } : {}),
     ...(fakeSymlinkDbDir ? { WEBMCP_FAKE_SYMLINK_DB: '1' } : {}),
+    ...(fakeRequestLog ? { WEBMCP_FAKE_REQ_LOG: fakeRequestLog } : {}),
+    ...(fakeIgnoreSigterm ? { WEBMCP_FAKE_IGNORE_SIGTERM: '1' } : {}),
   };
 }
 
@@ -373,6 +376,8 @@ export function createOpenCodeServerAdapter(options = {}) {
       fakeReadyLine: options.readyLineForTest,
       fakeDbEcho: options.dbProbeEchoForTest,
       fakeSymlinkDbDir: options.symlinkDbDirForTest === true,
+      fakeRequestLog: options.requestLogForTest,
+      fakeIgnoreSigterm: options.ignoreSigtermForTest === true,
       baseEnv: pickLaunchEnv(),
     });
 
@@ -496,6 +501,19 @@ export function createOpenCodeServerAdapter(options = {}) {
       throw new AiCliError('POLICY_DENIED', `server effective database mismatch: '${health.json.openCodeDb}' != '${prepared.dbPath}'`);
     }
 
+    // Prove the server process start identity so the supervisor binding can
+    // reattach, interrupt and reconcile exactly like an owned process.
+    const identityDeps = createPlatformIdentityDeps();
+    const provenStartIdentity = (await identityDeps.getStartIdentity(serverChild.pid).catch(() => null))
+      ?? `${process.platform}:indeterminate-${serverChild.pid}`;
+    const processIdentity = Object.freeze({
+      pid: serverChild.pid,
+      startIdentity: provenStartIdentity,
+      processGroupId: serverChild.pid,
+      startedAt: Date.now(),
+      endpoint,
+    });
+
     const runtime = Object.freeze({
       endpoint,
       authToken: password,
@@ -507,6 +525,9 @@ export function createOpenCodeServerAdapter(options = {}) {
     const binding = makeBinding({
       sessionId: null,
       databaseIdentity: prepared.databaseIdentity,
+      // Unified identity surface: the supervisor records THIS field for
+      // recovery/interrupt; serverProcessIdentity stays as diagnostic detail.
+      processIdentity,
       serverProcessIdentity: { pid: serverChild.pid, startedAt: Date.now(), endpoint },
       bindingId,
       ownershipMode: 'runtime-owned',
@@ -577,6 +598,11 @@ export function createOpenCodeServerAdapter(options = {}) {
     subscribe(runtime, { onEvent, dedupeKeyPrefix = '' } = {}) {
       const deduper = createEventDeduper();
       const controller = new AbortController();
+      // Readiness handshake: `connected` resolves as soon as the SSE response
+      // is validated — BEFORE any event flows — so launch wrappers can order
+      // subscription ahead of prompt_async deterministically.
+      let resolveConnected;
+      const connected = new Promise((resolveConnectedPromise) => { resolveConnected = resolveConnectedPromise; });
       const ssePromise = fetch(`${runtime.endpoint}/event`, {
         headers: { authorization: `Basic ${Buffer.from(`opencode:${runtime.authToken}`).toString('base64')}` },
         signal: controller.signal,
@@ -585,6 +611,7 @@ export function createOpenCodeServerAdapter(options = {}) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffered = '';
+        resolveConnected({ ok: true });
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -607,7 +634,14 @@ export function createOpenCodeServerAdapter(options = {}) {
           }
         }
       });
-      return { close: () => controller.abort(), connected: ssePromise.catch(() => { /* subscriber closed or server gone */ }) };
+      // Post-handshake stream errors (including abort-on-close) are already
+      // surfaced through the reader loop; sink the promise itself so no
+      // unhandled rejection escapes.
+      ssePromise.catch(() => { /* subscriber closed or server gone */ });
+      return {
+        close: () => controller.abort(),
+        connected: connected.catch(() => { /* subscriber closed or server gone */ }),
+      };
     },
 
     async promptAsync(runtime, sessionId, text) {
@@ -685,6 +719,7 @@ export function createOpenCodeServerAdapter(options = {}) {
     async stopServer(runtime, { release = false, settled = false } = {}) {
       const child = runtime.__serverChild;
       let stopped = false;
+      let exitProven = !isChildLive(child);
       if (isChildLive(child)) {
         sweepProcessGroup(child, 'SIGTERM');
         await Promise.race([
@@ -692,6 +727,14 @@ export function createOpenCodeServerAdapter(options = {}) {
           new Promise((resolveTick) => setTimeout(resolveTick, 1500).unref?.()),
         ]);
         if (isChildLive(child)) sweepProcessGroup(child, 'SIGKILL');
+        // PROOF, not assumption: the child must actually be dead before any
+        // destructive cleanup is authorized. SIGKILL cannot be trapped, so a
+        // trapped SIGTERM still terminates here.
+        await Promise.race([
+          new Promise((resolveExit) => (exitProven ? resolveExit() : child.once('exit', resolveExit))),
+          new Promise((resolveTick) => setTimeout(resolveTick, 2000).unref?.()),
+        ]);
+        exitProven = !isChildLive(child);
         stopped = true;
       }
       let released = false;
@@ -700,6 +743,12 @@ export function createOpenCodeServerAdapter(options = {}) {
       if (release) {
         if (!settled) {
           throw new AiCliError('POLICY_DENIED', 'runtime sessions may only be released after settlement');
+        }
+        if (!exitProven) {
+          throw new AiCliError(
+            'POLICY_DENIED',
+            'release refused: server process death could not be proven; database retained',
+          );
         }
         const proof = proveReleaseIdentity(runtime, { protectedPaths: options.protectedPathsForTest ?? [] });
         // Only now is deletion authorized: read the manifest, remove, and
@@ -733,6 +782,7 @@ export function createOpenCodeServerAdapter(options = {}) {
         disposition: stopped ? 'stopped' : 'already-exited',
         retained: !released,
         released,
+        exitProven,
         ...(released ? { removedFiles, absenceProven } : {}),
         databaseIdentity: runtime.databaseIdentity,
       };
