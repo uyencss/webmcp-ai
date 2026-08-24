@@ -5,6 +5,7 @@ import { join, isAbsolute, relative, resolve } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 import { ORCHESTRATION_LIMITS } from './constants.mjs';
+import { sanitizeValue, boundText } from './redaction.mjs';
 import { writeAtomicFile } from './atomic-file.mjs';
 
 const RECEIPT_SCHEMA = 'webmcp.ai-acceptance-receipt/v0';
@@ -206,6 +207,7 @@ export async function runAcceptanceCommand(spec) {
   }
 
   return new Promise((resolveRun) => {
+    process._rawDebug && process.env.R4_TRACE && process._rawDebug('TRACE pre-spawn');
     const child = spawnSync(argv[0], argv.slice(1), {
       cwd: spec.cwd,
       shell: false,
@@ -217,6 +219,7 @@ export async function runAcceptanceCommand(spec) {
     });
 
     const elapsedMs = Date.now() - startedAt;
+    process._rawDebug && process.env.R4_TRACE && process._rawDebug(`TRACE post-spawn status=${child.status} sig=${child.signal} err=${child.error?.code} outLen=${child.stdout?.length}`);
     if (child.error?.code === 'ENOENT' || child.error?.code === 'EACCES') {
       resolveRun({
         argvDigest: `sha256:${sha256(JSON.stringify(argv))}`,
@@ -236,11 +239,19 @@ export async function runAcceptanceCommand(spec) {
     let outputRef = null;
     if (bytes > ORCHESTRATION_LIMITS.maxInlinePayloadBytes && spec.stateDir) {
       mkdirSync(join(spec.stateDir, 'refs'), { recursive: true, mode: 0o700 });
+      // Spilled tool output passes the same redaction boundary as everything
+      // else that persists; the ref records bounded, sanitized content plus
+      // explicit truncation metadata for the raw bytes.
+      const sanitizedText = typeof sanitizeValue(combined) === 'string'
+        ? sanitizeValue(combined)
+        : JSON.stringify(sanitizeValue(combined));
+      const bounded = boundText(sanitizedText, { maxBytes: ORCHESTRATION_LIMITS.maxInlinePayloadBytes, label: 'acceptance-output' });
       const name = `ref_${sha256(combined).slice(0, 16)}.txt`;
-      writeAtomicFile(join(spec.stateDir, 'refs', name), combined);
+      writeAtomicFile(join(spec.stateDir, 'refs', name), bounded.text);
       outputRef = join('refs', name);
     }
 
+    process._rawDebug && process.env.R4_TRACE && process._rawDebug('TRACE pre-resolve');
     resolveRun({
       argvDigest: `sha256:${sha256(JSON.stringify(argv))}`,
       exitCode: child.status,

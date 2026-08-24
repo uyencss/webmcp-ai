@@ -7,6 +7,7 @@ import { AiCliError } from '../../errors.mjs';
 import { ORCHESTRATION_LIMITS } from '../constants.mjs';
 import { createPlatformIdentityDeps } from '../process-identity.mjs';
 import { writeAtomicFile } from '../atomic-file.mjs';
+import { sanitizeValue } from '../redaction.mjs';
 import { validateAdapter } from './index.mjs';
 
 function sha256(value) {
@@ -220,7 +221,8 @@ export function createOwnedProcessAdapter(options = {}) {
           }
           mkdirSync(refsDir, { recursive: true, mode: 0o700 });
           const name = `ref_${String(nextSeq()).padStart(6, '0')}_${streamLabel}.txt`;
-          writeAtomicFile(join(refsDir, name), buffered);
+          const sanitizedSpill = sanitizeValue(buffered);
+          writeAtomicFile(join(refsDir, name), typeof sanitizedSpill === 'string' ? sanitizedSpill : JSON.stringify(sanitizedSpill));
           spilledCount += 1;
           emit('progress', {
             summary: `${streamLabel} output spilled to bounded ref`,

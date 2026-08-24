@@ -13,6 +13,7 @@ import {
   SNAPSHOT_SCHEMA,
 } from './constants.mjs';
 import { appendDeliveryLine, journalSizeBytes, recoverJournal } from './journal.mjs';
+import { sanitizeEvent, sanitizeEnvironmentMetadata } from './redaction.mjs';
 import { acknowledgeThrough, applyDelivery, classifyCallback, createInitialState } from './state-machine.mjs';
 
 const REF_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -148,7 +149,14 @@ export function commitDelivery(store, draft, { clock = () => Date.now(), waiters
     }
   }
   const sequence = store.state.lastSequence + 1;
-  const payload = spillLargePayload(store, sequence, draft.payload ?? {}, clock);
+  // THE persistence ingress boundary: every durable payload is sanitized and
+  // its environment metadata allowlisted before any journal/ref write.
+  let payloadDraft = draft.payload ?? {};
+  if (payloadDraft && typeof payloadDraft === 'object' && !Array.isArray(payloadDraft)
+    && payloadDraft.env !== undefined) {
+    payloadDraft = { ...payloadDraft, env: sanitizeEnvironmentMetadata(payloadDraft.env) };
+  }
+  const payload = spillLargePayload(store, sequence, sanitizeEvent(payloadDraft), clock);
 
   const envelope = {
     schema: DELIVERY_PROTOCOL,
