@@ -393,11 +393,54 @@ export async function createSupervisor(options = {}) {
   /**
    * Restored-control interrupt ladder for a reattached owned worker. The
    * durable binding's proven process/group identity is the only authority to
-   * signal; every attempted signal is recorded in a cleanup receipt.
+   * signal: the live pid's start identity is re-proven BEFORE any signal so a
+   * recycled PID can never be swept, and bindings without proven identity are
+   * refused with a typed failure instead of a fabricated success.
    */
   async function interruptRuntimeBinding(dispatchId, record, reason = '') {
+    const pid = record?.processIdentity?.pid;
+    const startIdentity = record?.processIdentity?.startIdentity;
+    if (
+      record?.controlOnly === true
+      || !Number.isInteger(pid)
+      || pid <= 0
+      || typeof startIdentity !== 'string'
+      || startIdentity.length === 0
+    ) {
+      return {
+        ok: false,
+        interrupted: false,
+        stopped: false,
+        error: { code: 'WORKER_IDENTITY_UNPROVEN', message: 'no proven process identity for this binding' },
+        reason,
+      };
+    }
+
+    // PID-reuse guard: the running process must still carry the recorded
+    // start identity before it may be signalled.
+    const identityDeps = createPlatformIdentityDeps();
+    let identityProven = false;
+    try {
+      process.kill(pid, 0);
+      const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+      identityProven = nowIdentity === startIdentity;
+    } catch {
+      identityProven = false;
+    }
+    if (!identityProven) {
+      return {
+        ok: false,
+        interrupted: false,
+        stopped: false,
+        error: {
+          code: 'WORKER_IDENTITY_UNPROVEN',
+          message: 'process identity could not be reproven (exited or PID reused)',
+        },
+        reason,
+      };
+    }
+
     const signalsAttempted = [];
-    const pid = record.processIdentity?.pid;
     const processGroupId = record.processIdentity?.processGroupId;
     const isAlive = (targetPid) => {
       try {
@@ -414,30 +457,28 @@ export async function createSupervisor(options = {}) {
         await new Promise((resolveTick) => setTimeout(resolveTick, 25));
       }
     };
-    if (Number.isInteger(pid) && pid > 0) {
-      if (process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1) {
-        for (const signal of ['SIGTERM', 'SIGKILL']) {
-          if (!isAlive(pid)) break;
-          try {
-            process.kill(-processGroupId, signal);
-            signalsAttempted.push(`GROUP_${signal}`);
-          } catch {
-            try {
-              process.kill(pid, signal);
-              signalsAttempted.push(signal);
-            } catch { /* already gone */ }
-          }
-          await awaitExit();
-        }
-      } else {
-        for (const signal of ['SIGTERM', 'SIGKILL']) {
-          if (!isAlive(pid)) break;
+    if (process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1) {
+      for (const signal of ['SIGTERM', 'SIGKILL']) {
+        if (!isAlive(pid)) break;
+        try {
+          process.kill(-processGroupId, signal);
+          signalsAttempted.push(`GROUP_${signal}`);
+        } catch {
           try {
             process.kill(pid, signal);
             signalsAttempted.push(signal);
           } catch { /* already gone */ }
-          await awaitExit();
         }
+        await awaitExit();
+      }
+    } else {
+      for (const signal of ['SIGTERM', 'SIGKILL']) {
+        if (!isAlive(pid)) break;
+        try {
+          process.kill(pid, signal);
+          signalsAttempted.push(signal);
+        } catch { /* already gone */ }
+        await awaitExit();
       }
     }
     const stopped = !isAlive(pid);
@@ -451,7 +492,7 @@ export async function createSupervisor(options = {}) {
       },
     });
     const current = store.state.dispatches[dispatchId];
-    if (current && ['active', 'waiting'].includes(current.state)) {
+    if (current && ['assigned', 'active', 'waiting'].includes(current.state)) {
       commit({
         type: 'dispatch_state_changed',
         dispatchId,
@@ -658,12 +699,33 @@ export async function createSupervisor(options = {}) {
     });
 
     // Finalization belongs to the OWNER lifetime, not to the start call:
-    // after provider terminal state AND resource reconciliation, a cleanup
-    // receipt lands durably.
+    // after provider terminal state AND resource reconciliation the dispatch
+    // settles DURABLY and its runtime binding is released.
     void (async () => {
       try {
         const terminal = started.done ? await started.done : await serverDone;
-        void terminal;
+        // Terminal results that arrive only through the done promise (e.g. a
+        // provider closing its stream without a result event) must still
+        // become a terminal Delivery — otherwise the reducer never leaves
+        // active and the dispatch hangs forever.
+        const currentAfterTerminal = store.state.dispatches[dispatchId];
+        if (currentAfterTerminal && currentAfterTerminal.terminalOutcome === null) {
+          const bridgedType = ({
+            worker_done: 'worker_done',
+            worker_failed: 'worker_failed',
+            worker_cancelled: 'worker_cancelled',
+          })[terminal?.terminalType] ?? 'worker_failed';
+          commit({
+            type: bridgedType,
+            payload: {
+              dispatchId,
+              taskId,
+              outcome: bridgedType === 'worker_done' ? 'completed' : bridgedType === 'worker_cancelled' ? 'cancelled' : 'failed',
+              exitCode: Number.isInteger(terminal?.exitCode) ? terminal.exitCode : null,
+              source: 'supervisor-terminal-bridge',
+            },
+          });
+        }
         let cleanupReceipt = null;
         try {
           cleanupReceipt = await adapter.lifecycle.finalize({ binding: started.binding });
@@ -680,6 +742,19 @@ export async function createSupervisor(options = {}) {
             retained: cleanupReceipt?.retained ?? null,
           },
         });
+        // The legal settling -> settled transition is committed by the owner
+        // only after resource reconciliation evidence is durable.
+        const current = store.state.dispatches[dispatchId];
+        if (current && current.state === 'settling') {
+          commit({
+            type: 'dispatch_state_changed',
+            dispatchId,
+            taskId,
+            payload: { dispatchId, taskId, state: 'settled' },
+          });
+        }
+        runtimeBindings.delete(dispatchId);
+        persistRuntimeBindingRecords(layout, runtimeBindings);
       } catch {
         // The owner process is shutting down or the wait was cancelled;
         // recovery reconciliation records the truthful outcome instead.
@@ -766,8 +841,17 @@ export async function createSupervisor(options = {}) {
     },
     'coordination.close': async () => {
       commit({ type: 'coordination_state_changed', payload: { state: 'closing' } });
+      // Closing is not just a state change: every live owned worker is
+      // interrupted through its proven binding identity first.
+      const stoppedDispatches = [];
+      for (const [dispatchId, entry] of [...runtimeBindings.entries()]) {
+        const state = store.state.dispatches[dispatchId]?.state;
+        if (!state || !NONTERMINAL_DISPATCH_STATES.has(state)) continue;
+        const stop = await interruptRuntimeBinding(dispatchId, entry.record, 'coordination-close');
+        stoppedDispatches.push({ dispatchId, ok: stop.ok, stopped: stop.stopped === true });
+      }
       commit({ type: 'coordination_state_changed', payload: { state: 'closed' } });
-      return { closed: true };
+      return { closed: true, stoppedDispatches };
     },
     'task.create': async (input, envelope) => {
       const packet = validateTaskPacket(input.packet ?? {});
@@ -788,9 +872,21 @@ export async function createSupervisor(options = {}) {
         taskId,
         payload: { taskId, state: 'cancelled', reason: String(input.reason ?? ''), actor: envelope.requestId },
       });
+      // Cancelling is executable, not just an intent record: every live
+      // runtime binding for this task is interrupted through its proven
+      // process identity before the caller learns the task is cancelled.
+      const stops = [];
+      for (const [dispatchId, entry] of [...runtimeBindings.entries()]) {
+        if (entry.record.taskId !== taskId) continue;
+        const state = store.state.dispatches[dispatchId]?.state;
+        if (!state || !NONTERMINAL_DISPATCH_STATES.has(state)) continue;
+        const stop = await interruptRuntimeBinding(dispatchId, entry.record, String(input.reason ?? 'task-cancelled'));
+        stops.push({ dispatchId, ok: stop.ok, stopped: stop.stopped === true });
+      }
       return {
         cancelled: true,
         interruptEffects: store.state.interruptEffects.filter((effect) => effect.taskId === taskId),
+        stops,
       };
     },
     'dispatch.start': async (input) => {
@@ -831,7 +927,15 @@ export async function createSupervisor(options = {}) {
         // signal against; the typed boundary stays honest.
         throw unsupportedAdapterBoundary('dispatch.interrupt');
       }
-      return interruptRuntimeBinding(dispatchId, entry.record, input?.reason);
+      const stop = await interruptRuntimeBinding(dispatchId, entry.record, input?.reason);
+      if (!stop.ok) {
+        // Surface refusals as typed operation failures instead of a fabricated
+        // success payload.
+        throw new AiCliError(stop.error.code ?? 'WORKER_IDENTITY_UNPROVEN', stop.error.message ?? 'interrupt refused', {
+          details: { reason: stop.reason ?? null },
+        });
+      }
+      return stop;
     },
     'dispatch.verify': async (input) => {
       const verify = verifyDispatch ?? defaultVerifyDispatch;

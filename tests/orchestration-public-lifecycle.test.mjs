@@ -140,7 +140,7 @@ test('public runtime drives an owned-process fixture dispatch end to end through
 
   const inspect = await call('coordination.inspect', {});
   assert.equal(inspect.ok, true);
-  assert.equal(inspect.result.dispatches[dispatchId].state, 'settling', 'terminal provider state settles the dispatch');
+  assert.equal(inspect.result.dispatches[dispatchId].state, 'settled', 'terminal provider state + cleanup settle the dispatch');
   assert.equal(inspect.result.tasks[taskId].state, 'awaiting_acceptance', 'task awaits independent acceptance');
 });
 
@@ -172,7 +172,8 @@ test('public stop control interrupts a live owned-process worker through the sam
   const afterState = inspectAfter.result.dispatches[dispatchId];
   assert.equal(
     afterState.state === 'cancelled'
-      || (afterState.state === 'settling' && afterState.terminalOutcome === 'cancelled'),
+      || (afterState.state === 'settling' && afterState.terminalOutcome === 'cancelled')
+      || (afterState.state === 'settled' && afterState.terminalOutcome === 'cancelled'),
     true,
     JSON.stringify(afterState),
   );

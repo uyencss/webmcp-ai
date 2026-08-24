@@ -282,7 +282,7 @@ async function runPublicSupervisorPhase() {
 
     const inspect = await call('coordination.inspect', {});
     const state = inspect.ok ? inspect.result.dispatches?.[dispatchId]?.state : null;
-    const pass = seen.has('worker_started') && seen.has('worker_done') && seen.has('cleanup_recorded') && state === 'settling';
+    const pass = seen.has('worker_started') && seen.has('worker_done') && seen.has('cleanup_recorded') && state === 'settled';
     return { pass, evidence: { publicLifecycleEvents: [...seen].sort(), dispatchState: state } };
   } finally {
     if (sup) await sup.stop?.().catch(() => {});

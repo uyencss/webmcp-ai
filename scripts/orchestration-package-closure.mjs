@@ -310,7 +310,7 @@ export async function runPackageClosure({
     "const state = inspect.ok ? inspect.result.dispatches[dispatchId].state : null;",
     "const taskState = inspect.ok ? inspect.result.tasks[taskId].state : null;",
     "await sup.stop();",
-    "const ok = seen.has('worker_started') && seen.has('progress') && seen.has('worker_done') && seen.has('cleanup_recorded') && state === 'settling' && taskState === 'awaiting_acceptance';",
+    "const ok = seen.has('worker_started') && seen.has('progress') && seen.has('worker_done') && seen.has('cleanup_recorded') && state === 'settled' && taskState === 'awaiting_acceptance';",
     "console.log(JSON.stringify({ ok, seen: [...seen].sort(), state, taskState }));",
   ].join('\n');
 
