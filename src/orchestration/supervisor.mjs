@@ -33,7 +33,7 @@ import { createWorkerCallbackHandlers } from './worker-callback.mjs';
 import { generateDispatchCapabilityToken } from './worker-callback.mjs';
 import { validateWorkerCallback } from './contracts.mjs';
 import { computeAdapterDigest, computeAdapterMaturity } from './adapters/index.mjs';
-import { loadCanaryReceipts, resolveExecutableDigest } from './canary.mjs';
+import { loadCanaryReceipts, probeExecutableVersion, resolveExecutableDigest } from './canary.mjs';
 import { sanitizeEvent } from './redaction.mjs';
 import { captureWorkspaceBaseline } from './verifier.mjs';
 import { verifyDispatch as defaultVerifyDispatch } from './verifier.mjs';
@@ -473,7 +473,9 @@ export async function createSupervisor(options = {}) {
   /**
    * Capability-specific maturity gate for provider-backed kinds. Fixture
    * adapters stay reachable only through the dual-opt-in trusted seam; no
-   * request can bypass a stale or missing receipt.
+   * request can bypass a stale or missing receipt. Cheap mutable identity is
+   * re-probed at dispatch time: executable CONTENT digest and the live
+   * `--version` answer must both match the receipt right now.
    */
   function assertPublicDispatchMaturity(adapter) {
     if (adapter.lifecycle.kind === 'owned-process') return;
@@ -484,7 +486,7 @@ export async function createSupervisor(options = {}) {
       canaryReceipts: receipts,
       adapterDigest: computeAdapterDigest(adapter),
       executablePathDigest: executable?.digest ?? null,
-      installedVersion: null,
+      installedVersion: probeExecutableVersion(adapter.id, { env }),
       runtimeVersion: process.version,
     };
     const maturity = computeAdapterMaturity(adapter, evidence);

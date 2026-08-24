@@ -1,7 +1,6 @@
-import { createHash } from 'node:crypto';
-
 import { AiCliError } from '../../errors.mjs';
 import { GUARANTEE_TIERS, ORCHESTRATION_LIMITS } from '../constants.mjs';
+import { canaryAdapterDigest, evaluateReceiptFreshness } from '../canary.mjs';
 import { modeRequiresTierSatisfied } from '../contracts.mjs';
 
 export const CAPABILITY_KEYS = Object.freeze([
@@ -103,19 +102,21 @@ export function createAdapterRegistry(adapters = []) {
   };
 }
 
-function digestOf(value) {
-  return createHash('sha256').update(String(value)).digest('hex');
-}
-
-/** Stable digest of an adapter identity for canary receipt comparison. */
+/**
+ * Stable digest of the adapter's real implementation sources for canary
+ * receipt comparison. A behavior-relevant code change invalidates every
+ * existing receipt for that adapter.
+ */
 export function computeAdapterDigest(adapter) {
-  return digestOf(`${adapter.id}:${adapter.maturity}`);
+  return canaryAdapterDigest(adapter.id);
 }
 
 /**
- * Evidence-derived maturity. The code declares a fixture-only ceiling; a
- * machine-local canary receipt may raise it to canary-proven only when the
- * adapter digest, executable path/version and runtime version all match.
+ * Evidence-derived maturity, capability-specific by contract. The code
+ * declares a fixture-only ceiling; a machine-local canary receipt may raise
+ * it to canary-proven only when contract version, expiry, adapter behavior
+ * digest, executable CONTENT digest, freshly probed executable version,
+ * runtime version AND every required capability verdict all match right now.
  */
 export function computeAdapterMaturity(adapter, evidence = null) {
   if (!evidence) return adapter.maturity;
@@ -124,12 +125,16 @@ export function computeAdapterMaturity(adapter, evidence = null) {
   const receipt = (evidence.canaryReceipts ?? []).find((entry) => entry.adapterId === adapter.id);
   if (!receipt) return adapter.maturity;
 
-  const matches = typeof evidence.adapterDigest === 'string'
-    && receipt.adapterDigest === evidence.adapterDigest
-    && receipt.executablePathDigest === evidence.executablePathDigest
-    && receipt.executableVersion === evidence.installedVersion
-    && receipt.runtimeVersion === evidence.runtimeVersion;
-  return matches ? 'canary-proven' : adapter.maturity;
+  const staleReason = evaluateReceiptFreshness(receipt, {
+    adapterDigest: typeof evidence.adapterDigest === 'string'
+      ? evidence.adapterDigest
+      : computeAdapterDigest(adapter),
+    executablePathDigest: evidence.executablePathDigest,
+    installedVersion: evidence.installedVersion ?? null,
+    runtimeVersion: evidence.runtimeVersion ?? process.version,
+    requiredCapabilities: evidence.requiredCapabilities,
+  });
+  return staleReason === null ? 'canary-proven' : adapter.maturity;
 }
 
 /**

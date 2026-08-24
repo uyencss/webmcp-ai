@@ -10,6 +10,7 @@ import {
   createAdapterRegistry,
   validateAdapter,
 } from '../src/orchestration/adapters/index.mjs';
+import { CANARY_CONTRACT_VERSION, CANARY_RECEIPT_SCHEMA } from '../src/orchestration/canary.mjs';
 import { createOwnedProcessAdapter } from '../src/orchestration/adapters/owned-process.mjs';
 import { buildWorkerPacket, createWorkerCallbackHandlers } from '../src/orchestration/worker-callback.mjs';
 import { sanitizeValue } from '../src/orchestration/redaction.mjs';
@@ -111,7 +112,17 @@ test('maturity is evidence-derived and never self-promotes to supported', () => 
 
   // A matching machine-local canary receipt promotes exactly one level.
   const receipt = {
+    schema: CANARY_RECEIPT_SCHEMA,
     adapterId: 'fake',
+    contractVersion: CANARY_CONTRACT_VERSION,
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    capabilities: {
+      launch: 'pass',
+      progressStream: 'pass',
+      promptRoundTrip: 'pass',
+      cleanup: 'pass',
+      publicSupervisorLifecycle: 'pass',
+    },
     adapterDigest: 'digest-match',
     executablePathDigest: 'exe-match',
     executableVersion: '1.0.0',
