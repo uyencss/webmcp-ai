@@ -52,9 +52,6 @@ if (!adapterId || Number.isNaN(timeoutMs) || timeoutMs < 1000) {
 if (!canaryMod.CANARY_ADAPTER_IDS.includes(adapterId)) {
   fail(2, 'CANARY_USAGE', `unknown adapter ${adapterId}; known: ${canaryMod.CANARY_ADAPTER_IDS.join(', ')}`);
 }
-if (withPublicPhase && adapterId !== 'owned-process') {
-  fail(2, 'CANARY_USAGE', '--public is currently implemented for owned-process only');
-}
 
 // ---- authorization gate ------------------------------------------------------
 
@@ -198,38 +195,61 @@ async function scenarioOwnedProcess() {
  * supervisor is started against a scratch state root and the fixture worker
  * runs through the PUBLIC operation table — task.create → dispatch.start →
  * delivery.wait → coordination.inspect — never through direct adapter calls.
+ * Generic across adapters: provider kinds assemble their REAL trusted config
+ * (binaries from env) through createPublicAdapters.
  */
-async function runPublicSupervisorPhase() {
-  const { execFileSync } = await import('node:child_process');
+async function runPublicSupervisorPhase(targetKind = 'owned-process') {
   const stateMod = await import(join(root, 'src/orchestration/paths.mjs'));
   const authorityMod = await import(join(root, 'src/orchestration/authority.mjs'));
   const ipcMod = await import(join(root, 'src/orchestration/ipc.mjs'));
   const constantsMod = await import(join(root, 'src/orchestration/constants.mjs'));
   const supervisorMod = await import(join(root, 'src/orchestration/supervisor.mjs'));
   const publicAdaptersMod = await import(join(root, 'src/orchestration/public-adapters.mjs'));
-  const ownedMod = await import(join(root, 'src/orchestration/adapters/owned-process.mjs'));
 
-  const stateRoot = join(scratch, 'public-state');
+  // macOS sun_path is capped at 104 bytes: the PUBLIC supervisor gets its own
+  // SHORT temp state root instead of nesting under the long canary-work dir.
+  const publicStateRoot = mkdtempSync(join(tmpdir(), 'w8pub-'));
+  registerCleanup('public state cleanup', () => rmSync(publicStateRoot, { recursive: true, force: true }));
   const coordinationId = `coord_canary_${Date.now().toString(36)}`;
-  const supEnv = { ...env, WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateRoot };
+  const supEnv = { ...env, WEBMCP_AI_ORCHESTRATION_STATE_DIR: publicStateRoot };
   const rootsLocal = stateMod.resolveOrchestrationRoots({ env: supEnv });
-  const inner = ownedMod.createOwnedProcessAdapter({ stateDir: join(scratch, 'public-op-state') });
+  const isOwnedFixture = targetKind === 'owned-process';
   const config = publicAdaptersMod.createTrustedCoordinatorConfig({
-    stateDir: join(scratch, 'public-trusted'),
-    allowFixtureDispatch: true,
-    ownedProcessCommand: {
-      command: process.execPath,
-      args: [join(root, 'tests/fixtures/orchestration/fake-worker.mjs')],
-      env: { ...env, FAKE_WORKER_MODE: 'ordered' },
-    },
+    stateDir: join(publicStateRoot, 'trusted'),
+    allowFixtureDispatch: isOwnedFixture,
+    openCodeBin: env.OPENCODE_BIN ?? 'opencode',
+    claudeBin: env.CLAUDE_BIN ?? 'claude',
+    codexBin: env.CODEX_BIN ?? 'codex',
+    ...(isOwnedFixture ? {
+      ownedProcessCommand: {
+        command: process.execPath,
+        args: [join(root, 'tests/fixtures/orchestration/fake-worker.mjs')],
+        env: { ...env, FAKE_WORKER_MODE: 'ordered' },
+      },
+    } : {}),
   });
-  const adapter = publicAdaptersMod.asPublicAdapter(
-    inner,
-    publicAdaptersMod.createPublicLifecycle('owned-process', inner, config),
-  );
 
-  const workspace = join(scratch, 'public-ws');
+  let adapter = null;
+  if (isOwnedFixture) {
+    const ownedMod = await import(join(root, 'src/orchestration/adapters/owned-process.mjs'));
+    const inner = ownedMod.createOwnedProcessAdapter({ stateDir: join(publicStateRoot, 'op') });
+    adapter = publicAdaptersMod.asPublicAdapter(
+      inner,
+      publicAdaptersMod.createPublicLifecycle('owned-process', inner, config),
+    );
+  } else {
+    const adapters = publicAdaptersMod.createPublicAdapters(config);
+    adapter = adapters.find((entry) => entry.id === targetKind) ?? null;
+  }
+  if (!adapter) return { pass: false, evidence: { reason: `no public adapter assembled for ${targetKind}` } };
+
+  let workspace = join(publicStateRoot, `ws-${targetKind}`);
   mkdirSync(workspace, { recursive: true });
+  if (targetKind === 'codex-exec') {
+    workspace = join(publicStateRoot, 'repo');
+    const gitInit = spawnSync('git', ['init', '-q', workspace], { shell: false, encoding: 'utf8', env });
+    if (gitInit.status !== 0) return { pass: false, evidence: { reason: 'codex public phase could not prepare its git workspace' } };
+  }
 
   let sup = null;
   try {
@@ -238,7 +258,10 @@ async function runPublicSupervisorPhase() {
       mode: 'create',
       coordinationId,
       adapters: [adapter],
-      trustedCoordinatorConfig: { allowFixtureDispatch: true },
+      trustedCoordinatorConfig: {
+        allowFixtureDispatch: isOwnedFixture,
+        ...(isOwnedFixture ? {} : { allowUnprovenProviderDispatch: true }),
+      },
     });
     registerCleanup('public supervisor stop', () => sup?.stop?.());
 
@@ -255,14 +278,13 @@ async function runPublicSupervisorPhase() {
       },
       { timeoutMs: 20_000 },
     );
-    void execFileSync;
 
     const created = await call('task.create', {
-      packet: { objective: 'canary public lifecycle', workspace, allowedReadRoots: [workspace], allowedWriteRoots: [] },
+      packet: { objective: 'Reply with exactly: ok', workspace, allowedReadRoots: [workspace], allowedWriteRoots: [] },
     });
     if (!created.ok) return { pass: false, evidence: { reason: `task.create failed: ${created.error?.code ?? '?'}` } };
     const taskId = created.result.taskId;
-    const startResponse = await call('dispatch.start', { taskId, adapterId: 'owned-process' });
+    const startResponse = await call('dispatch.start', { taskId, adapterId: targetKind });
     if (!startResponse.ok) return { pass: false, evidence: { reason: `dispatch.start failed: ${startResponse.error?.code ?? '?'}` } };
     const dispatchId = startResponse.result.dispatchId;
 
@@ -282,8 +304,9 @@ async function runPublicSupervisorPhase() {
 
     const inspect = await call('coordination.inspect', {});
     const state = inspect.ok ? inspect.result.dispatches?.[dispatchId]?.state : null;
-    const pass = seen.has('worker_started') && seen.has('worker_done') && seen.has('cleanup_recorded') && state === 'settled';
-    return { pass, evidence: { publicLifecycleEvents: [...seen].sort(), dispatchState: state } };
+    const outcome = inspect.ok ? inspect.result.dispatches?.[dispatchId]?.terminalOutcome : null;
+    const pass = seen.has('worker_started') && seen.has('worker_done') && seen.has('cleanup_recorded') && state === 'settled' && outcome === 'completed';
+    return { pass, evidence: { publicLifecycleEvents: [...seen].sort(), dispatchState: state, terminalOutcome: outcome } };
   } finally {
     if (sup) await sup.stop?.().catch(() => {});
   }
@@ -292,7 +315,7 @@ async function runPublicSupervisorPhase() {
 async function scenarioOpenCodeServer() {
   const serverMod = await import(join(root, 'src/orchestration/adapters/opencode-server.mjs'));
   const binPath = env.OPENCODE_BIN ?? 'opencode';
-  const installedVersion = boundedVersionProbe(binPath, ['--version']);
+  const installedVersion = await boundedVersionProbe(binPath, ['--version']);
   if (installedVersion !== '1.18.21') {
     return { notReady: true, reason: `pinned opencode 1.18.21 required, found ${installedVersion ?? 'none'}` };
   }
@@ -352,6 +375,25 @@ async function scenarioOpenCodeServer() {
     if (stopReceipt.disposition !== 'stopped') throw new Error(`unexpected stop disposition ${stopReceipt.disposition}`);
     capabilities.cleanup = stopReceipt.released ? 'pass' : 'fail';
 
+    if (withPublicPhase) {
+      const publicPhase = await runPublicSupervisorPhase('opencode-server');
+      capabilities.publicSupervisorLifecycle = publicPhase.pass ? 'pass' : 'fail';
+      return {
+        ok: publicPhase.pass,
+        evidence: {
+          healthOk: true,
+          sessionLifecycleOk: true,
+          databaseIdentity: started.runtime.databaseIdentity.slice(0, 16),
+          isolatedDb: true,
+          stopDisposition: stopReceipt.disposition,
+          promptRoundTrip: withPrompt ? capabilities.promptRoundTrip : 'unsupported',
+          ...publicPhase.evidence,
+        },
+        capabilities,
+        executableVersion: installedVersion,
+      };
+    }
+
     return {
       ok: Object.entries(capabilities).every(([name, verdict]) => name === 'publicSupervisorLifecycle' || verdict !== 'fail'),
       evidence: {
@@ -373,7 +415,7 @@ async function scenarioOpenCodeServer() {
 async function scenarioClaudeStream() {
   const claudeMod = await import(join(root, 'src/orchestration/adapters/claude-stream.mjs'));
   const binPath = env.CLAUDE_BIN ?? 'claude';
-  const installedVersion = boundedVersionProbe(binPath, ['--version']);
+  const installedVersion = await boundedVersionProbe(binPath, ['--version']);
   if (!installedVersion) {
     return { notReady: true, reason: 'claude binary did not answer a bounded --version probe' };
   }
@@ -398,59 +440,122 @@ async function scenarioClaudeStream() {
     claudeBin: binPath,
     stateDir: join(scratch, 'state'),
   });
-  const events = [];
   const capabilities = capabilityScaffold();
-  const spawned = await adapter.spawn({
-    task: { taskId: 'task_canary', workspace: scratch },
+
+  // Two-prompt SESSION-RESUME protocol (contract v1): turn one runs in its
+  // own process and must return EXACTLY `ok`; turn two starts a SECOND
+  // process resumed with --resume <sessionId> and must return EXACTLY
+  // `ping-pong`. Anything else fails its specific capability.
+  function collectResultTexts(eventLog) {
+    return eventLog
+      .filter((entry) => entry.type === 'worker_done')
+      .map((entry) => {
+        try {
+          const payload = JSON.parse(entry.blob);
+          return String(payload.summary ?? '').trim();
+        } catch {
+          return '';
+        }
+      });
+  }
+
+  const firstEvents = [];
+  let spawned = await adapter.spawn({
+    task: { taskId: 'task_canary', workspace: scratch, objective: 'Reply with exactly: ok' },
     dispatch: { dispatchId: 'disp_canary', bindingId: 'worker_canary', taskId: 'task_canary', fenceEpoch: 1 },
-    emit: (type, payload) => events.push({
-      type,
-      blob: JSON.stringify(payload ?? {}).slice(0, 400),
-    }),
+    emit: (type, payload) => firstEvents.push({ type, blob: JSON.stringify(payload ?? {}).slice(0, 400) }),
   });
   registerCleanup('claude worker stop', async () => {
     spawned?.binding?.__child?.kill?.('SIGKILL');
   });
   if (spawned.ok === false) throw new Error(`spawn rejected: ${spawned.error?.code ?? 'unknown'}`);
   capabilities.launch = 'pass';
-
-  // Two-prompt session-resume protocol (contract v1): the first turn must
-  // return EXACTLY `ok`; the resumed second turn must return EXACTLY
-  // `ping-pong`. Anything else fails its specific capability.
-  const queuedFirst = await spawned.sendFollowUp('Reply with exactly: ok');
-  if (!queuedFirst.ok) throw new Error('first prompt hand-off to stdin failed');
-  const queuedSecond = await spawned.sendFollowUp('Reply with exactly: ping-pong');
-  if (!queuedSecond.ok) {
-    capabilities.progressStream = 'fail';
-    throw new Error('second prompt hand-off to stdin failed');
-  }
-  // Real `-p` runs consume stdin until EOF; the queued-followup seam keeps the
-  // pipe open by design, so the canary closes it to let the turn settle.
-  spawned.binding?.__child?.stdin?.end();
-  const terminal = await spawned.done;
-  const blobs = events.map((entry) => entry.blob).join(' ');
-  if (/Failed to authenticate|authentication_failed|oauth session expired/i.test(blobs)) {
+  // The adapter writes the objective to stdin and closes it; the real `-p`
+  // process settles on its own.
+  const terminal1 = await spawned.done;
+  const blobs1 = firstEvents.map((entry) => entry.blob).join(' ');
+  if (/Failed to authenticate|authentication_failed|oauth session expired/i.test(blobs1)) {
     return {
       notReady: true,
       reason: 'claude authentication is expired or missing; refresh it yourself outside this harness',
     };
   }
-  capabilities.progressStream = events.some((entry) => entry.type === 'progress') ? 'pass' : 'fail';
-  const resultSummaries = events
-    .filter((entry) => entry.type === 'worker_done')
-    .map((entry) => entry.blob);
-  capabilities.promptRoundTrip = resultSummaries.some((blob) => /"ok"/.test(blob)) ? 'pass' : 'fail';
-  capabilities.continuationResume = resultSummaries.some((blob) => blob.includes('ping-pong')) ? 'pass' : 'fail';
-  capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal.terminalType) ? 'pass' : 'fail';
-  const sawResultEvent = events.some((entry) => entry.type === 'worker_done' || entry.type === 'progress');
-  const ok = terminal.terminalType === 'worker_done' && sawResultEvent;
+  capabilities.progressStream = firstEvents.some((entry) => entry.type === 'progress') ? 'pass' : 'fail';
+  const firstTexts = collectResultTexts(firstEvents);
+  capabilities.promptRoundTrip = firstTexts.includes('ok') ? 'pass' : 'fail';
+  const sessionId = spawned.binding?.sessionId ?? terminal1?.sessionId ?? null;
+
+  if (!sessionId || capabilities.promptRoundTrip !== 'pass') {
+    // Without a proven session id or a correct first answer there is nothing
+    // to resume — record honest unsupported instead of pretending.
+    capabilities.continuationResume = sessionId ? 'fail' : 'unsupported';
+    capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal1.terminalType) ? 'pass' : 'fail';
+    return {
+      ok: false,
+      evidence: {
+        terminalType: terminal1.terminalType,
+        exitCode: terminal1.exitCode ?? null,
+        observedEvents: [...new Set(firstEvents.map((entry) => entry.type))].sort(),
+        resultTexts: firstTexts,
+        sessionId,
+      },
+      capabilities,
+      executableVersion: installedVersion,
+    };
+  }
+
+  // Turn two: a SECOND process, resumed from the recorded session.
+  const secondEvents = [];
+  const second = await adapter.spawn({
+    task: { taskId: 'task_canary2', workspace: scratch, objective: 'Reply with exactly: ping-pong' },
+    dispatch: { dispatchId: 'disp_canary2', bindingId: 'worker_canary2', taskId: 'task_canary2', fenceEpoch: 1 },
+    emit: (type, payload) => secondEvents.push({ type, blob: JSON.stringify(payload ?? {}).slice(0, 400) }),
+    resumeSessionId: sessionId,
+  });
+  registerCleanup('claude resume worker stop', async () => {
+    second?.binding?.__child?.kill?.('SIGKILL');
+  });
+  if (second.ok === false) throw new Error(`resume spawn rejected: ${second.error?.code ?? 'unknown'}`);
+  const terminal2 = await second.done;
+  const blobs2 = secondEvents.map((entry) => entry.blob).join(' ');
+  if (/Failed to authenticate|authentication_failed|oauth session expired/i.test(blobs2)) {
+    return {
+      notReady: true,
+      reason: 'claude authentication expired between turns; refresh it yourself outside this harness',
+    };
+  }
+  const secondTexts = collectResultTexts(secondEvents);
+  capabilities.continuationResume = secondTexts.includes('ping-pong') ? 'pass' : 'fail';
+  capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal1.terminalType)
+    && ['worker_done', 'worker_failed'].includes(terminal2.terminalType)
+    ? 'pass'
+    : 'fail';
+  const ok = capabilities.promptRoundTrip === 'pass'
+    && capabilities.continuationResume === 'pass'
+    && capabilities.cleanup === 'pass';
+
+  if (withPublicPhase) {
+    const publicPhase = await runPublicSupervisorPhase('claude-stream');
+    capabilities.publicSupervisorLifecycle = publicPhase.pass ? 'pass' : 'fail';
+    return {
+      ok: ok && publicPhase.pass,
+      evidence: {
+        turnOne: { terminalType: terminal1.terminalType, resultTexts: firstTexts },
+        turnTwo: { terminalType: terminal2.terminalType, resultTexts: secondTexts },
+        observedEvents: [...new Set([...firstEvents, ...secondEvents].map((entry) => entry.type))].sort(),
+        ...publicPhase.evidence,
+      },
+      capabilities,
+      executableVersion: installedVersion,
+    };
+  }
+
   return {
     ok,
     evidence: {
-      terminalType: terminal.terminalType,
-      exitCode: terminal.exitCode ?? null,
-      observedEvents: [...new Set(events.map((entry) => entry.type))].sort(),
-      ...(sawResultEvent ? {} : { lastEventBlobs: events.slice(-4).map((entry) => entry.blob) }),
+      turnOne: { terminalType: terminal1.terminalType, resultTexts: firstTexts },
+      turnTwo: { terminalType: terminal2.terminalType, resultTexts: secondTexts },
+      observedEvents: [...new Set([...firstEvents, ...secondEvents].map((entry) => entry.type))].sort(),
     },
     capabilities,
     executableVersion: installedVersion,
@@ -460,7 +565,7 @@ async function scenarioClaudeStream() {
 async function scenarioCodexExec() {
   const codexMod = await import(join(root, 'src/orchestration/adapters/codex-exec.mjs'));
   const binPath = env.CODEX_BIN ?? 'codex';
-  const installedVersion = boundedVersionProbe(binPath, ['--version']);
+  const installedVersion = await boundedVersionProbe(binPath, ['--version']);
   if (!installedVersion) {
     return { notReady: true, reason: 'codex binary did not answer a bounded --version probe' };
   }
@@ -487,6 +592,23 @@ async function scenarioCodexExec() {
   const terminal = await spawned.done;
   capabilities.progressStream = events.some((entry) => entry === 'progress') ? 'pass' : 'fail';
   capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal.terminalType) ? 'pass' : 'fail';
+
+  if (withPublicPhase) {
+    const publicPhase = await runPublicSupervisorPhase('codex-exec');
+    capabilities.publicSupervisorLifecycle = publicPhase.pass ? 'pass' : 'fail';
+    return {
+      ok: publicPhase.pass && terminal.terminalType === 'worker_done',
+      evidence: {
+        terminalType: terminal.terminalType,
+        exitCode: terminal.exitCode ?? null,
+        observedEvents: [...new Set(events)].sort(),
+        ...publicPhase.evidence,
+      },
+      capabilities,
+      executableVersion: installedVersion,
+    };
+  }
+
   return {
     ok: terminal.terminalType === 'worker_done',
     evidence: {

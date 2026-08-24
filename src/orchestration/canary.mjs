@@ -2,9 +2,12 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { AiCliError } from '../errors.mjs';
 import { writeAtomicJson } from './atomic-file.mjs';
+
+const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 
 export const CANARY_RECEIPT_SCHEMA = 'webmcp.ai-canary-receipt/v1';
 export const CANARY_CONTRACT_VERSION = 'webmcp.ai-canary-contract/v1';
@@ -61,13 +64,20 @@ const ADAPTER_BEHAVIOR_MODULES = Object.freeze({
   'claude-stream': Object.freeze(['adapters/claude-stream.mjs']),
   'codex-exec': Object.freeze(['adapters/codex-exec.mjs']),
 });
-const SHARED_BEHAVIOR_MODULES = Object.freeze(['public-adapters.mjs']);
+const SHARED_BEHAVIOR_MODULES = Object.freeze([
+  'public-adapters.mjs',
+  // The public lifecycle is driven by these owner modules: a behavior-relevant
+  // change here invalidates every provider receipt until canaries rerun.
+  'supervisor.mjs',
+  'store.mjs',
+  'state-machine.mjs',
+]);
 
 function behaviorModulePaths(adapterId, { behaviorModules } = {}) {
   if (Array.isArray(behaviorModules)) return behaviorModules;
   const perAdapter = ADAPTER_BEHAVIOR_MODULES[adapterId];
   if (!perAdapter) return null;
-  return [...perAdapter, ...SHARED_BEHAVIOR_MODULES].map((relativePath) => join(import.meta.dirname, relativePath));
+  return [...perAdapter, ...SHARED_BEHAVIOR_MODULES].map((relativePath) => join(moduleDir, relativePath));
 }
 
 /**

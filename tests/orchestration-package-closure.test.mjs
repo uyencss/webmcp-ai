@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   auditShippedPaths,
   evaluateRangeDiffCheck,
+  rangeCheckApplies,
   runPackageClosure,
 } from '../scripts/orchestration-package-closure.mjs';
 
@@ -126,4 +127,12 @@ test('R7: installed artifact closes the package: install, imports, CLI and publi
   assert.equal(receipt.hermetic.homeRepurposed, false);
 
   assert.equal(receipt.rangeDiffCheck.ok, true, JSON.stringify(receipt.rangeDiffCheck));
+});
+
+test('R8D: range gate applies only when the owner base exists locally', () => {
+  const repoRoot = new URL('..', import.meta.url).pathname;
+  // A historical commit that IS present in a full checkout.
+  assert.equal(rangeCheckApplies(repoRoot, '47bfccee8f5d6b1c944908cfb9903d87a4b6014b'), true);
+  // An arbitrary absent SHA must not break the permanent lifecycle.
+  assert.equal(rangeCheckApplies(repoRoot, '0'.repeat(40)), false);
 });

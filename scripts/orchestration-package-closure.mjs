@@ -88,6 +88,20 @@ export function evaluateRangeDiffCheck(output) {
   return { ok: violations.length === 0, violations };
 }
 
+/**
+ * Whether the owner-base..HEAD range check can run in THIS checkout. Shallow
+ * CI clones do not contain historical SHAs; the one-time gate must never
+ * break the permanent publish lifecycle.
+ */
+export function rangeCheckApplies(repoRoot, baseSha = OWNER_BASE_COMMIT) {
+  const probe = spawnSync('git', ['cat-file', '-e', `${baseSha}^{commit}`], {
+    cwd: repoRoot,
+    shell: false,
+    encoding: 'utf8',
+  });
+  return probe.status === 0;
+}
+
 function scopedNpmEnv({ emptyNpmrc, cacheDir, prefixDir }) {
   return {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
@@ -396,15 +410,25 @@ export async function runPackageClosure({
   requireCondition(!existsSync(disabledStateDir), 'no orchestration state directory is created while disabled');
 
   // ---- owner-base..HEAD range diff check --------------------------------------
-
-  const rangeDiff = spawnSync('git', ['diff', '--check', ownerBaseRange], {
-    cwd: repoRoot,
-    shell: false,
-    encoding: 'utf8',
-    timeout: 30_000,
+  // One-time remediation gate: it applies only when the owner-base SHA exists
+  // locally. Shallow CI checkouts skip it instead of failing npm publish.
+  let rangeVerdict = { ok: true, violations: [], skipped: false };
+  if (rangeCheckApplies(repoRoot, OWNER_BASE_COMMIT)) {
+    const rangeDiff = spawnSync('git', ['diff', '--check', ownerBaseRange], {
+      cwd: repoRoot,
+      shell: false,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    rangeVerdict = evaluateRangeDiffCheck(`${rangeDiff.stdout}${rangeDiff.stderr}`);
+  } else {
+    rangeVerdict.skipped = true;
+  }
+  checks.push({
+    check: 'owner-base..HEAD range diff-check is clean',
+    ok: rangeVerdict.ok,
+    ...(rangeVerdict.skipped ? { note: 'skipped: owner base not present in this checkout' } : {}),
   });
-  const rangeVerdict = evaluateRangeDiffCheck(`${rangeDiff.stdout}${rangeDiff.stderr}`);
-  checks.push({ check: 'owner-base..HEAD range diff-check is clean', ok: rangeVerdict.ok });
   if (!rangeVerdict.ok) violations.push(...rangeVerdict.violations.map((v) => `range diff-check: ${v}`));
 
   // ---- cleanup ------------------------------------------------------------------

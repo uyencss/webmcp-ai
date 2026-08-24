@@ -8,14 +8,14 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 
 test('package publication runs tests and includes release notes', () => {
   const gate = String(packageJson.scripts.prepublishOnly);
-  // The release gate is one documented, repeatable command path without
-  // nested npm lifecycles: unit suite, coverage thresholds, installed-package
-  // closure, pack dry-run and the owner-base..HEAD whitespace check.
+  // The permanent publish lifecycle: unit suite, coverage thresholds,
+  // installed-package closure and pack dry-run — no nested npm lifecycles and
+  // NO fixed-SHA git gate (one-time remediation checks never block releases).
   assert.match(gate, /node --test tests\/\*\.test\.mjs/);
   assert.match(gate, /--test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80/);
   assert.match(gate, /node scripts\/orchestration-package-closure\.mjs/);
   assert.match(gate, /npm pack --dry-run/);
-  assert.match(gate, /git diff --check 47bfccee8f5d6b1c944908cfb9903d87a4b6014b\.\.HEAD/);
+  assert.equal(/git diff --check 47bfccee/.test(gate), false, 'the one-time SHA gate stays out of the publish lifecycle');
   assert.equal(gate.includes('npm run'), false, 'no recursive npm lifecycle inside prepublishOnly');
   assert.ok(packageJson.files.includes('CHANGELOG.md'));
   assert.equal(existsSync(`${root}/CHANGELOG.md`), true);

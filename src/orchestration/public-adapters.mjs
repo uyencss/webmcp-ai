@@ -27,6 +27,10 @@ export function createTrustedCoordinatorConfig(options = {}) {
     stateDir: options.stateDir ?? null,
     streamFile: options.streamFile ?? null,
     allowFixtureDispatch: options.allowFixtureDispatch === true,
+    // Second, narrower dual-opt-in: lets the AUTHORIZED canary/closure
+    // harness drive a provider adapter through the public runtime before any
+    // receipt exists. Requests can never set it.
+    allowUnprovenProviderDispatch: options.allowUnprovenProviderDispatch === true,
     confinement: options.confinement ?? null, // 'disposable-workspace' | null
     disposableRoot: options.disposableRoot ?? null,
     ownedProcessCommand: options.ownedProcessCommand ?? null,

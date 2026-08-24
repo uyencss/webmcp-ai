@@ -9,11 +9,43 @@ permissions:
   id-token: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['18', '20', '24']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history: the package-closure range gate and provenance need it.
+          fetch-depth: 0
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Package closure (Node 20 only)
+        if: matrix.node-version == '20'
+        run: npm run test:package-closure
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -23,9 +55,6 @@ jobs:
 
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
-
-      - name: Test
-        run: npm test
 
       - name: Publish to npm
         run: npm publish --provenance --access public

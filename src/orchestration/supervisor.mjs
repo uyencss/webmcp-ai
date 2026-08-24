@@ -531,6 +531,10 @@ export async function createSupervisor(options = {}) {
   function assertPublicDispatchMaturity(adapter) {
     if (adapter.lifecycle.kind === 'owned-process') return;
     if (trustedConfig?.allowFixtureDispatch === true) return;
+    // Authorized-harness seam: the canary/closure coordinator may drive a
+    // provider through the PUBLIC runtime to EARN its receipt. Still never a
+    // request-level bypass.
+    if (trustedConfig?.allowUnprovenProviderDispatch === true) return;
     const receipts = loadCanaryReceipts(roots.stateRoot);
     const executable = resolveExecutableDigest(adapter.id, { env });
     const evidence = {
