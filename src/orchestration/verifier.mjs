@@ -93,10 +93,10 @@ function probeSucceeded(result) {
 /**
  * Canonicalize an absolute path's EXISTING prefix segment by segment
  * (resolving symlinks like realpath would) while keeping any missing tail
- * purely lexical, so comparisons never mix two spellings of one directory
- * (e.g. /var vs /private/var).
+ * purely lexical, so containment checks never mix two spellings of one
+ * directory and symlinked segments are judged by where they REALLY lead.
  */
-function canonicalExistingPrefix(pathValue) {
+export function canonicalizeExistingPrefix(pathValue) {
   const absolute = resolve(pathValue);
   let cursor = isAbsolute(absolute) ? '/' : '.';
   for (const segment of absolute.split(/[\\/]/).filter(Boolean)) {
@@ -108,6 +108,10 @@ function canonicalExistingPrefix(pathValue) {
     }
   }
   return cursor;
+}
+
+function canonicalExistingPrefix(pathValue) {
+  return canonicalizeExistingPrefix(pathValue);
 }
 
 /** True when two paths overlap in EITHER containment direction. */

@@ -186,6 +186,11 @@ export function createOwnedProcessAdapter(options = {}) {
       };
 
       emit('worker_started', { dispatchId: dispatch.dispatchId });
+      // A not-yet-existing (canonicalized-safe) workspace tail is legal under
+      // preventive confinement; create it so the child has a real cwd.
+      try {
+        mkdirSync(task.workspace, { recursive: true });
+      } catch { /* spawn below surfaces an unusable workspace honestly */ }
       const child = spawn(resolvedCommand, argv, {
         cwd: task.workspace,
         env,

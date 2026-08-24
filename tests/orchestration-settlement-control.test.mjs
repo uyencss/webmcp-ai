@@ -162,7 +162,7 @@ test('R8A: a public dispatch settles durably and releases its runtime binding', 
 
   const { sup, call } = await startSupervisor(t, 'settled', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Settle me',
@@ -195,7 +195,7 @@ test('R8A: a silent exit still produces a terminal delivery and settles', async 
   const adapter = stubAdapter({ hangForever: false, doneOutcome: { terminalType: 'worker_done', exitCode: 0, outcome: 'completed' } });
   const { sup, call } = await startSupervisor(t, 'silent-exit', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Silent worker',
@@ -231,7 +231,7 @@ test('R8A: task.cancel really interrupts a live owned worker', async (t) => {
   const adapter = asPublicAdapter(inner, createPublicLifecycle('owned-process', inner, config));
   const { sup, call } = await startSupervisor(t, 'cancel-sup', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const workspace = tempDir(t, 'ws3');
   const taskId = await seedTask(call, {
@@ -304,7 +304,7 @@ test('R8A: coordination.close stops every live worker before closing', async (t)
   const adapter = asPublicAdapter(inner, createPublicLifecycle('owned-process', inner, config));
   const { sup, call } = await startSupervisor(t, 'close-sup', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Close me',
@@ -354,7 +354,7 @@ test('R8A: telemetry-only bindings refuse interrupt instead of claiming stopped'
   const adapter = stubAdapter({ hangForever: true, withIdentity: false });
   const { sup, call } = await startSupervisor(t, 'controlonly', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Stub worker',
@@ -388,7 +388,7 @@ test('R8A: forged start identity is never signalled (PID-reuse guard)', async (t
   const adapter = stubAdapter({ hangForever: true, withIdentity: false });
   const { sup, call } = await startSupervisor(t, 'reuse', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Reuse target',

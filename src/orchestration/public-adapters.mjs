@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 import { validateAdapter } from './adapters/index.mjs';
@@ -7,6 +9,7 @@ import { createOpenCodeServerAdapter } from './adapters/opencode-server.mjs';
 import { createClaudeStreamAdapter } from './adapters/claude-stream.mjs';
 import { createCodexExecAdapter } from './adapters/codex-exec.mjs';
 import { renderWorkerPreamble } from './worker-callback.mjs';
+import { canonicalizeExistingPrefix } from './verifier.mjs';
 
 export const PUBLIC_ADAPTER_KINDS = Object.freeze([
   'owned-process',
@@ -34,6 +37,10 @@ export function createTrustedCoordinatorConfig(options = {}) {
     allowUnprovenProviderDispatch: options.allowUnprovenProviderDispatch === true,
     confinement: options.confinement ?? null, // 'disposable-workspace' | null
     disposableRoot: options.disposableRoot ?? null,
+    // Provider-native preventive gates that a COMPLETED canary has proven,
+    // keyed by adapter id (e.g. { 'opencode-server': 'canary-proven' }).
+    // Only machine-local trusted configuration may grant this.
+    providerNativeGate: Object.freeze({ ...(options.providerNativeGate ?? {}) }),
     ownedProcessCommand: options.ownedProcessCommand ?? null,
     openCodeBin: options.openCodeBin ?? env.OPENCODE_BIN ?? 'opencode',
     openCodeArgs: options.openCodeArgs ?? [],
@@ -44,6 +51,153 @@ export function createTrustedCoordinatorConfig(options = {}) {
     fakeModeEnv: options.fakeModeEnv ?? {},
   };
   return Object.freeze(config);
+}
+
+const TRUSTED_CONFIG_SCHEMA = 'webmcp.ai-trusted-coordinator-config/v1';
+const TRUSTED_ADAPTERS_SCHEMA = 'webmcp.ai-trusted-adapters/v1';
+const TRUSTED_CONFIG_ALLOWED_FIELDS = new Set([
+  'schema',
+  'stateDir',
+  'confinement',
+  'disposableRoot',
+  'providerNativeGate',
+  'ownedProcess',
+  'publicAdapters',
+]);
+// Fields a config FILE may never set: the fixture/bypass opt-ins are dual
+// opt-ins reserved for authorized harnesses, never file-granted privileges.
+const TRUSTED_CONFIG_FORBIDDEN_FIELDS = new Set(['allowFixtureDispatch', 'allowUnprovenProviderDispatch']);
+const ADAPTER_ENV_ALLOWLIST = new Set(['PATH', 'HOME', 'TMPDIR', 'LANG', 'TZ']);
+
+function requirePrivateFile(path, kind) {
+  if (process.platform !== 'win32') {
+    const mode = statSync(path).mode & 0o777;
+    if (mode !== 0o600) {
+      throw new AiCliError('POLICY_DENIED', `${kind} must be mode 0600 (got ${mode.toString(8)}): ${path}`);
+    }
+  }
+}
+
+function parseJsonFile(path, schema, kind) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `${kind} is not valid JSON: ${error?.code ?? 'ERROR'}`, { exitCode: 2 });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `${kind} must be a JSON object`, { exitCode: 2 });
+  }
+  if (parsed.schema !== schema) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `${kind} schema must be ${schema}`, { exitCode: 2 });
+  }
+  return parsed;
+}
+
+function enforceTrustedConfigFields(parsed) {
+  for (const key of Object.keys(parsed)) {
+    if (TRUSTED_CONFIG_FORBIDDEN_FIELDS.has(key)) {
+      throw new AiCliError('POLICY_DENIED', `trusted coordinator config files may never set ${key}`);
+    }
+    if (!TRUSTED_CONFIG_ALLOWED_FIELDS.has(key)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `trusted coordinator config has unknown field ${key}`, { exitCode: 2 });
+    }
+  }
+}
+
+/**
+ * Load a machine-local trusted coordinator configuration file (mode 0600).
+ * The ONLY way the packaged supervisor entry receives confinement policy,
+ * disposable roots or launch commands. Caller-supplied Task/IPC payloads are
+ * structurally incapable of providing any of these.
+ */
+export function loadTrustedCoordinatorConfigFile(path) {
+  requirePrivateFile(path, 'trusted coordinator config');
+  const parsed = parseJsonFile(path, TRUSTED_CONFIG_SCHEMA, 'trusted coordinator config');
+  enforceTrustedConfigFields(parsed);
+  if (parsed.confinement !== undefined && parsed.confinement !== null && parsed.confinement !== 'disposable-workspace') {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'confinement must be disposable-workspace or null', { exitCode: 2 });
+  }
+  if (parsed.ownedProcess !== undefined && parsed.ownedProcess !== null) {
+    const op = parsed.ownedProcess;
+    if (!op || typeof op !== 'object' || Array.isArray(op)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'ownedProcess must be an object', { exitCode: 2 });
+    }
+    for (const key of Object.keys(op)) {
+      if (!['command', 'args', 'env'].includes(key)) {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `ownedProcess has unknown field ${key}`, { exitCode: 2 });
+      }
+    }
+    if (typeof op.command !== 'string' || !isAbsolute(op.command)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'ownedProcess.command must be an absolute path', { exitCode: 2 });
+    }
+    if (op.args !== undefined && (!Array.isArray(op.args) || op.args.some((arg) => typeof arg !== 'string'))) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'ownedProcess.args must be a string array', { exitCode: 2 });
+    }
+    if (op.env !== undefined && (typeof op.env !== 'object' || op.env === null || Array.isArray(op.env))) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'ownedProcess.env must be an object', { exitCode: 2 });
+    }
+  }
+  const env = process.env;
+  return createTrustedCoordinatorConfig({
+    stateDir: parsed.stateDir ?? null,
+    confinement: parsed.confinement ?? null,
+    disposableRoot: parsed.disposableRoot ?? null,
+    providerNativeGate: parsed.providerNativeGate ?? {},
+    ownedProcessCommand: parsed.ownedProcess
+      ? { command: parsed.ownedProcess.command, args: parsed.ownedProcess.args ?? [], env: { ...parsed.ownedProcess.env } }
+      : null,
+    publicAdapters: undefined,
+    allowFixtureDispatch: false,
+    allowUnprovenProviderDispatch: false,
+    openCodeBin: env.OPENCODE_BIN ?? 'opencode',
+    claudeBin: env.CLAUDE_BIN ?? 'claude',
+    codexBin: env.CODEX_BIN ?? 'codex',
+  });
+}
+
+/**
+ * Load a machine-local trusted adapter registry file (mode 0600): adapter id,
+ * ABSOLUTE executable, argv array and a sanitized static environment
+ * allowlist per entry. Nothing here is reachable from Task payloads.
+ */
+export function loadTrustedAdapterRegistry(path) {
+  requirePrivateFile(path, 'trusted adapter registry');
+  const parsed = parseJsonFile(path, TRUSTED_ADAPTERS_SCHEMA, 'trusted adapter registry');
+  if (!Array.isArray(parsed.adapters) || parsed.adapters.length === 0) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'trusted adapter registry requires a non-empty adapters array', { exitCode: 2 });
+  }
+  const adapters = parsed.adapters.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'adapter entries must be objects', { exitCode: 2 });
+    }
+    for (const key of Object.keys(entry)) {
+      if (!['id', 'executable', 'args', 'env'].includes(key)) {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `adapter entry has unknown field ${key}`, { exitCode: 2 });
+      }
+    }
+    if (typeof entry.id !== 'string' || entry.id.length === 0) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'adapter id must be a non-empty string', { exitCode: 2 });
+    }
+    if (typeof entry.executable !== 'string' || !isAbsolute(entry.executable)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `adapter ${entry.id} executable must be absolute`, { exitCode: 2 });
+    }
+    if (entry.args !== undefined && (!Array.isArray(entry.args) || entry.args.some((arg) => typeof arg !== 'string'))) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `adapter ${entry.id} args must be a string array`, { exitCode: 2 });
+    }
+    const safeEnv = {};
+    for (const [key, value] of Object.entries(entry.env ?? {})) {
+      if (!ADAPTER_ENV_ALLOWLIST.has(key)) {
+        throw new AiCliError('POLICY_DENIED', `adapter ${entry.id} env key ${key} is outside the static allowlist`);
+      }
+      if (typeof value !== 'string' || value.length > 4096) {
+        throw new AiCliError('POLICY_DENIED', `adapter ${entry.id} env value for ${key} must be a bounded string`);
+      }
+      safeEnv[key] = value;
+    }
+    return { id: entry.id, command: entry.executable, args: [...(entry.args ?? [])], env: safeEnv };
+  });
+  return Object.freeze({ schema: TRUSTED_ADAPTERS_SCHEMA, adapters });
 }
 
 function requireTrusted(config, field, message) {

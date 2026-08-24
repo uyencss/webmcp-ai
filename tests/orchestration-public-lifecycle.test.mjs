@@ -55,7 +55,9 @@ async function startSupervisor(t, name, { adapters = [], trustedConfig = null, s
     env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir },
     mode: 'create',
     coordinationId,
-    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: trustedConfig } : {}),
+    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: (trustedConfig && !('confinement' in trustedConfig))
+      ? { ...trustedConfig, confinement: 'disposable-workspace', disposableRoot: tmpdir() }
+      : trustedConfig } : {}),
   });
   if (seed) {
     // Default task used across tests; individual tests add more via ops.
@@ -250,7 +252,9 @@ test('mutable dispatch without preventive confinement fails before launch', asyn
   const { adapter, stateDir: adapterState } = ownedProcessAdapterPair(t);
   const { sup, call } = await startSupervisor(t, 'no-confinement', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true }, // note: no confinement declared
+    // Explicit null opts OUT of the harness default so this test really runs
+    // without any preventive confinement.
+    trustedConfig: { allowFixtureDispatch: true, confinement: null },
   });
   const workspace = tempDir(t, 'ws-mutable');
   const taskId = await seedTask(call, {

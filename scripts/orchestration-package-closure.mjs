@@ -300,7 +300,7 @@ export async function runPackageClosure({
     "  ownedProcessCommand: { command: process.execPath, args: [worker], env: {} },",
     "});",
     "const adapter = pa.asPublicAdapter(inner, pa.createPublicLifecycle('owned-process', inner, config));",
-    "const sup = await supMod.createSupervisor({ env, mode: 'create', coordinationId, adapters: [adapter], trustedCoordinatorConfig: { allowFixtureDispatch: true } });",
+    "const sup = await supMod.createSupervisor({ env, mode: 'create', coordinationId, adapters: [adapter], trustedCoordinatorConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: stateRoot } });",
     "const call = async (operation, input) => ipcMod.requestIpc(",
     "  ipcMod.deriveEndpoint({ ipcRoot: path.join(roots.stateRoot, 'ipc'), coordinationId }),",
     "  { protocol: constantsMod.ORCHESTRATION_PROTOCOL, requestId: 'req_' + Math.random().toString(36).slice(2, 8), coordinationId, fenceEpoch: sup.__store.state.fenceEpoch, capability: authMod.readClientCapability({ coordinationDir: path.join(roots.stateRoot, 'coordinations', coordinationId) }), operation, input },",

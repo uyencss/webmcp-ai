@@ -93,7 +93,9 @@ async function startSupervisor(t, name, { adapters = [], trustedConfig = null } 
     env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir },
     mode: 'create',
     coordinationId,
-    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: trustedConfig } : {}),
+    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: (trustedConfig && !('confinement' in trustedConfig))
+      ? { ...trustedConfig, confinement: 'disposable-workspace', disposableRoot: tmpdir() }
+      : trustedConfig } : {}),
   });
   t.after(() => sup.stop());
   const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir } });
@@ -126,7 +128,7 @@ async function runSettledDispatch(t, { doneOutcome, packet }) {
   const adapter = doneAdapter(doneOutcome);
   const { sup, stateDir, call } = await startSupervisor(t, `acc-${Math.random().toString(36).slice(2, 6)}`, {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   void stateDir;
   const taskId = await seedTask(call, packet);

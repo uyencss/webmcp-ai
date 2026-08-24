@@ -166,7 +166,7 @@ test('R9B: task.cancel never claims cancelled over an unproven stop', async (t) 
   const adapter = stubOwnedAdapter();
   const { sup, call } = await startSupervisor(t, 'cancel-dishonest', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Stub worker',
@@ -209,7 +209,7 @@ test('R9B: a surviving worker keeps its binding and defers cancellation', async 
   const adapter = stubbornAdapter(sleeper.pid, startIdentity, controlCalls);
   const { sup, call } = await startSupervisor(t, 'survivor', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Survivor',
@@ -254,7 +254,7 @@ test('R9B: coordination.close stays closing and fails typed while a stop is unpr
   const adapter = stubbornAdapter(sleeper.pid, startIdentity, controlCalls);
   const { sup, call } = await startSupervisor(t, 'close-deferred', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Close target',
@@ -339,7 +339,7 @@ test('R9B: dispatch.interrupt routes through adapter control (session abort, no 
 
   const { call } = await startSupervisor(t, 'oc-abort', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Abort me',
@@ -371,7 +371,7 @@ test('R9B: stale fence epoch bindings are refused before any control', async (t)
   const adapter = stubOwnedAdapter();
   const { sup, call } = await startSupervisor(t, 'stale-epoch', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Stale binding',
@@ -417,7 +417,7 @@ test('R9B: owned-process interrupt ladders SIGINT before SIGTERM/SIGKILL', async
   const adapter = asPublicAdapter(inner, createPublicLifecycle('owned-process', inner, config));
   const { sup, call } = await startSupervisor(t, 'ladder-sup', {
     adapters: [adapter],
-    trustedConfig: { allowFixtureDispatch: true },
+    trustedConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const taskId = await seedTask(call, {
     objective: 'Ladder me',

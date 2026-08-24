@@ -40,7 +40,9 @@ async function startSupervisor(t, name, { adapters = [], trustedConfig = null } 
     env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir },
     mode: 'create',
     coordinationId,
-    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: trustedConfig } : {}),
+    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: (trustedConfig && !('confinement' in trustedConfig))
+      ? { ...trustedConfig, confinement: 'disposable-workspace', disposableRoot: tmpdir() }
+      : trustedConfig } : {}),
   });
   t.after(() => sup.stop());
   const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir } });

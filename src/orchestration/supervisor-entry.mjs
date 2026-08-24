@@ -5,7 +5,12 @@ import { pathToFileURL } from 'node:url';
 
 import { AiCliError } from '../errors.mjs';
 import { ORCHESTRATION_PROTOCOL } from './constants.mjs';
-import { createPublicAdapters, createTrustedCoordinatorConfig } from './public-adapters.mjs';
+import {
+  createPublicAdapters,
+  createTrustedCoordinatorConfig,
+  loadTrustedCoordinatorConfigFile,
+  loadTrustedAdapterRegistry,
+} from './public-adapters.mjs';
 import { createSupervisor } from './supervisor.mjs';
 
 const BOOTSTRAP_OWNER_FIELDS = new Set(['host', 'instanceId']);
@@ -110,15 +115,43 @@ async function main() {
   // packaged supervisor stays fail-closed (no adapters) unless operators opt
   // in through WEBMCP_AI_ORCHESTRATION_PUBLIC_ADAPTERS=1; fixture overrides
   // additionally require WEBMCP_AI_ORCHESTRATION_TEST_FIXTURES=1.
+  //
+  // Confinement policy, disposable roots and launch commands NEVER arrive via
+  // Task payloads or IPC frames: they come exclusively from a mode-0600
+  // machine-local config file named by WEBMCP_AI_ORCHESTRATION_TRUSTED_CONFIG
+  // (plus, optionally, a trusted adapter registry file for generic
+  // owned-process launches).
   let adapters = [];
+  let trustedConfig = null;
   if (process.env.WEBMCP_AI_ORCHESTRATION_PUBLIC_ADAPTERS === '1') {
     const allowFixtures = process.env.WEBMCP_AI_ORCHESTRATION_TEST_FIXTURES === '1';
-    const config = createTrustedCoordinatorConfig({
+    const fileConfig = process.env.WEBMCP_AI_ORCHESTRATION_TRUSTED_CONFIG
+      ? loadTrustedCoordinatorConfigFile(process.env.WEBMCP_AI_ORCHESTRATION_TRUSTED_CONFIG)
+      : null;
+    const registryEntry = process.env.WEBMCP_AI_ORCHESTRATION_TRUSTED_ADAPTERS
+      ? (loadTrustedAdapterRegistry(process.env.WEBMCP_AI_ORCHESTRATION_TRUSTED_ADAPTERS).adapters
+        .find((adapterEntry) => adapterEntry.id === 'owned-process') ?? null)
+      : null;
+    // File-granted fields override ambient defaults; opt-in flags stay
+    // environment-only and can NEVER be granted by any file.
+    const configOptions = {
+      ...fileConfig,
       env: process.env,
-      stateDir: process.env.WEBMCP_AI_ORCHESTRATION_STATE_DIR ?? join(homedir(), '.webmcp-ai', 'orchestration-state'),
+      stateDir: fileConfig?.stateDir
+        ?? process.env.WEBMCP_AI_ORCHESTRATION_STATE_DIR
+        ?? join(homedir(), '.webmcp-ai', 'orchestration-state'),
       allowFixtureDispatch: allowFixtures,
-    });
-    adapters = createPublicAdapters(config);
+      allowUnprovenProviderDispatch: false,
+    };
+    if (!configOptions.ownedProcessCommand && registryEntry) {
+      configOptions.ownedProcessCommand = {
+        command: registryEntry.command,
+        args: registryEntry.args,
+        env: registryEntry.env,
+      };
+    }
+    trustedConfig = createTrustedCoordinatorConfig(configOptions);
+    adapters = createPublicAdapters(trustedConfig);
   }
 
   activeSupervisor = await createSupervisor({
@@ -126,7 +159,7 @@ async function main() {
     mode,
     ...(coordinationId ? { coordinationId } : {}),
     manifest: { owner: bootstrap.owner },
-    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: { allowFixtureDispatch: process.env.WEBMCP_AI_ORCHESTRATION_TEST_FIXTURES === '1' } } : {}),
+    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: trustedConfig } : {}),
   });
 
   emit({

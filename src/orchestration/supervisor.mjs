@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
@@ -42,7 +42,7 @@ import { validateWorkerCallback } from './contracts.mjs';
 import { computeAdapterDigest, computeAdapterMaturity } from './adapters/index.mjs';
 import { loadCanaryReceipts, probeExecutableVersion, resolveExecutableDigest } from './canary.mjs';
 import { sanitizeEvent } from './redaction.mjs';
-import { captureWorkspaceBaseline } from './verifier.mjs';
+import { captureWorkspaceBaseline, canonicalizeExistingPrefix } from './verifier.mjs';
 import { verifyDispatch as defaultVerifyDispatch } from './verifier.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
@@ -53,6 +53,12 @@ function unsupportedAdapterBoundary(operation) {
     `operation ${operation} reaches the adapter boundary, which no adapter provides yet`,
     { exitCode: 2 },
   );
+}
+
+/** Lexical containment after canonicalization; '' counts as inside. */
+function isWithin(candidate, rootPath) {
+  const rel = relative(rootPath, candidate);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 const DISPATCH_START_FIELDS = new Set(['taskId', 'adapterId', 'capability']);
@@ -765,20 +771,25 @@ export async function createSupervisor(options = {}) {
   }
 
   /**
-   * Preventive confinement boundary for mutable dispatch: without a
-   * coordinator-declared disposable workspace the dispatch refuses to launch.
+   * Preventive confinement boundary for EVERY mutable dispatch. An adapter
+   * that can write — or whose read-only nature is UNPROVEN — may only launch
+   * when the WHOLE task workspace lives inside a coordinator-declared
+   * disposable workspace (canonicalized segment-by-segment against lexical,
+   * symlink and missing-tail escapes). A provider-native preventive gate
+   * counts only when trusted configuration records its canary proof.
    */
-  function assertConfinementFor(packet) {
-    const mutable = (packet?.allowedWriteRoots ?? []).length > 0;
-    if (!mutable) return;
-    if (trustedConfig?.confinement !== 'disposable-workspace' || !trustedConfig.disposableRoot) {
+  function assertConfinementFor(packet, adapter) {
+    const nativeGateProven = trustedConfig?.providerNativeGate?.[adapter?.id] === 'canary-proven';
+    const hasWriteRoots = (packet?.allowedWriteRoots ?? []).length > 0;
+    if (nativeGateProven && !hasWriteRoots) return; // provider-native gate covers read-only tasks
+
+    // Empty allowedWriteRoots NEVER proves a worker read-only.
+    if (!trustedConfig?.confinement || trustedConfig.confinement !== 'disposable-workspace' || !trustedConfig.disposableRoot) {
       throw new AiCliError(
         'POLICY_DENIED',
-        'mutable dispatch requires preventive confinement (a disposable workspace) before launch',
+        'dispatch requires preventive confinement (a disposable workspace) before launch',
       );
     }
-    // A confinement root that does not exist (or is not a real directory)
-    // cannot preventively confine anything — refuse instead of pretending.
     if (!isAbsolute(trustedConfig.disposableRoot)) {
       throw new AiCliError('POLICY_DENIED', 'disposable workspace root must be an absolute path');
     }
@@ -791,8 +802,22 @@ export async function createSupervisor(options = {}) {
     if (!disposableStats.isDirectory()) {
       throw new AiCliError('POLICY_DENIED', 'disposable workspace root must be a directory');
     }
-    for (const root of packet.allowedWriteRoots) {
-      if (!isAbsolute(root) || relative(trustedConfig.disposableRoot, root).startsWith('..')) {
+    const disposableReal = realpathSync(trustedConfig.disposableRoot);
+    // Workspace containment: canonical existing prefix + lexical missing
+    // tail, so symlinked segments are judged by their REAL destination and a
+    // not-yet-created workspace tail stays safely inside the root.
+    const workspaceReal = canonicalizeExistingPrefix(String(packet.workspace));
+    if (!isWithin(workspaceReal, disposableReal)) {
+      throw new AiCliError(
+        'POLICY_DENIED',
+        'task workspace must live inside the disposable workspace before any worker spawns',
+      );
+    }
+    for (const root of packet.allowedWriteRoots ?? []) {
+      if (!isAbsolute(root)) {
+        throw new AiCliError('POLICY_DENIED', 'mutable write roots must be absolute paths');
+      }
+      if (!isWithin(canonicalizeExistingPrefix(root), disposableReal)) {
         throw new AiCliError(
           'POLICY_DENIED',
           'mutable write roots must live inside the disposable workspace',
@@ -810,7 +835,7 @@ export async function createSupervisor(options = {}) {
    */
   async function runPublicDispatch(adapter, { taskId, packet }) {
     assertPublicDispatchMaturity(adapter);
-    assertConfinementFor(packet);
+    assertConfinementFor(packet, adapter);
 
     const dispatchId = `disp_${randomUUID()}`;
     const bindingId = `worker_${randomUUID().slice(0, 12)}`;

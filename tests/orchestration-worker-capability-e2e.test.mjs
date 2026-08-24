@@ -144,7 +144,7 @@ test('R9C: a real installed child delivers progress and terminal through its cap
     mode: 'create',
     coordinationId,
     adapters: [adapter],
-    trustedCoordinatorConfig: { allowFixtureDispatch: true },
+    trustedCoordinatorConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   t.after(() => sup.stop());
 
@@ -252,7 +252,7 @@ test('R9C: journals and snapshots never contain the plaintext capability token',
     mode: 'create',
     coordinationId,
     adapters: [adapter],
-    trustedCoordinatorConfig: { allowFixtureDispatch: true },
+    trustedCoordinatorConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   t.after(() => sup.stop());
 
@@ -387,7 +387,7 @@ test('R9C: a callback-capable child reconnects after a supervisor restart', asyn
     mode: 'create',
     coordinationId,
     adapters: [buildAdapter()],
-    trustedCoordinatorConfig: { allowFixtureDispatch: true },
+    trustedCoordinatorConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   const call1 = makeCall(sup1);
   const created = await call1('task.create', {
@@ -421,7 +421,7 @@ test('R9C: a callback-capable child reconnects after a supervisor restart', asyn
     mode: 'recover',
     coordinationId,
     adapters: [buildAdapter()],
-    trustedCoordinatorConfig: { allowFixtureDispatch: true },
+    trustedCoordinatorConfig: { allowFixtureDispatch: true, confinement: 'disposable-workspace', disposableRoot: tmpdir() },
   });
   t.after(() => sup2.stop());
   const call2 = makeCall(sup2);
