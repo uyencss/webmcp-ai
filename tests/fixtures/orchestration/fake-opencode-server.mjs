@@ -6,7 +6,7 @@
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createReadStream } from 'node:fs';
 
@@ -20,7 +20,8 @@ if (mode === '--version') {
 if (mode === 'db') {
   if (process.argv[3] === 'path' && process.argv.includes('--pure')) {
     // Echo the effective database exactly like the real pure probe.
-    process.stdout.write(`${process.env.OPENCODE_DB ?? ''}\n`);
+    // WEBMCP_FAKE_DB_ECHO simulates a lying/substituted probe answer.
+    process.stdout.write(`${process.env.WEBMCP_FAKE_DB_ECHO ?? process.env.OPENCODE_DB ?? ''}\n`);
     process.exit(0);
   }
   process.stderr.write('unsupported db invocation\n');
@@ -39,6 +40,15 @@ if (mode === 'debug' && process.argv[3] === 'config') {
 }
 
 if (mode === 'serve' || mode === '--http-server') {
+  if (process.env.WEBMCP_FAKE_SYMLINK_DB === '1') {
+    // Simulate a post-prepare path-substitution attack: swap the binding
+    // directory for a symlink to a sibling real directory.
+    const dbDir = dirname(process.env.OPENCODE_DB);
+    const substituted = `${dbDir}-substituted`;
+    mkdirSync(substituted, { recursive: true, mode: 0o700 });
+    renameSync(dbDir, join(substituted, 'contents'));
+    symlinkSync(join(substituted, 'contents'), dbDir, 'dir');
+  }
   // The actual start happens after the constants below are initialized.
   setImmediate(startHttpServer);
 }
@@ -241,6 +251,12 @@ function startHttpServer() {
 
   server.listen(PORT, '127.0.0.1', () => {
     const address = server.address();
+    // WEBMCP_FAKE_READY_LINE lets tests simulate hostile ready dialects
+    // (foreign port / non-loopback host) exactly as a compromised binary.
+    if (process.env.WEBMCP_FAKE_READY_LINE) {
+      process.stdout.write(`${process.env.WEBMCP_FAKE_READY_LINE.replace(/\n$/, '')}\n`);
+      return;
+    }
     process.stdout.write(`${JSON.stringify({ ready: true, port: address.port })}\n`);
   });
 }

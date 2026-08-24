@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import net from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import { sanitizeValue } from '../src/orchestration/redaction.mjs';
@@ -750,8 +751,9 @@ test('stopServer sweeps the whole detached group including grandchildren', { tim
     `    res.writeHead(200, { 'content-type': 'application/json' });`,
     `    res.end(JSON.stringify({ status: 'ok' }));`,
     `  });`,
-    `  http.listen(0, '127.0.0.1', () => {`,
-    `    // Real-binary ready dialect; exercises the plaintext parser branch.`,
+    `  http.listen(Number(process.env.WEBMCP_FAKE_PORT) || 0, '127.0.0.1', () => {`,
+    `    // Real-binary ready dialect on the exact requested port; exercises the`,
+    `    // plaintext parser branch.`,
     `    process.stdout.write('opencode server listening on http://127.0.0.1:' + http.address().port + '\\n');`,
     `  });`,
     `}`,
@@ -1181,7 +1183,12 @@ test('opencode-server adapter surfaces typed negatives and honest probe reports'
     Promise.resolve().then(() => adapter.deleteSession({ endpoint: 'http://127.0.0.1:1', authToken: 'x', __sessionId: 'ses_raw' })));
 
   const runtimeDb = join(stateDir, 'webmcp-ai-runtime', 'worker_rel', 'opencode.db');
-  const runtimeLike = { dbPath: runtimeDb, databaseIdentity: 'digest', __serverChild: null };
+  mkdirSync(dirname(runtimeDb), { recursive: true });
+  for (const artifact of ['opencode.db', 'opencode.db-wal', 'opencode.db-shm']) {
+    writeFileSync(join(dirname(runtimeDb), artifact), 'runtime-owned\n');
+  }
+  const runtimeIdentity = createHash('sha256').update(runtimeDb).digest('hex');
+  const runtimeLike = { dbPath: runtimeDb, databaseIdentity: runtimeIdentity, __serverChild: null };
   await assert.rejects(
     () => adapter.stopServer(runtimeLike, { release: true }),
     (e) => e.code === 'POLICY_DENIED' && /settlement/.test(e.message),
@@ -1189,12 +1196,15 @@ test('opencode-server adapter surfaces typed negatives and honest probe reports'
   const guarded = serverMod.createOpenCodeServerAdapter({ stateDir: covTemp(t, 'oc-guarded'), protectedPathsForTest: [runtimeDb] });
   await assert.rejects(
     () => guarded.stopServer(runtimeLike, { release: true, settled: true }),
-    (e) => e.code === 'POLICY_DENIED' && /outside the runtime-owned tree/.test(e.message),
+    (e) => e.code === 'POLICY_DENIED' && /protected or user-owned/.test(e.message),
   );
+  assert.equal(existsSync(runtimeDb), true, 'guarded database is retained');
   const released = await adapter.stopServer(runtimeLike, { release: true, settled: true });
   assert.equal(released.released, true);
   assert.equal(released.retained, false);
   assert.equal(released.disposition, 'already-exited');
+  assert.equal(released.absenceProven, true, 'release proves absence instead of asserting a boolean');
+  assert.equal(existsSync(runtimeDb), false);
 
   const versionFixture = join(covTemp(t, 'oc-version'), 'version.mjs');
   writeFileSync(versionFixture, "console.log('1.18.21');\n");

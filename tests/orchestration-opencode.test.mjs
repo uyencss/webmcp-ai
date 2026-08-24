@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -347,4 +349,242 @@ test('probe stays honest when node:sqlite is unavailable', () => {
   const probe = adapter.probeSync();
   assert.equal(probe.available, false);
   assert.match(probe.reason, /unavailable|node:sqlite/i);
+});
+
+// ---------------------------------------------------------------------------
+// R5 — ownership, port binding, and database cleanup hardening (audit §9)
+// ---------------------------------------------------------------------------
+
+function sha256Text(value) {
+  return createHash('sha256').update(String(value)).digest('hex');
+}
+
+/**
+ * Assert startRuntimeServer fails with the expected typed error while
+ * guaranteeing no owned server is ever left behind — under RED the failure
+ * may arrive late (or not at all), so both outcomes are cleaned up.
+ */
+async function expectStartFailure(adapter, args, matcher) {
+  let started = null;
+  try {
+    started = await adapter.startRuntimeServer(args);
+  } catch (error) {
+    assert.ok(matcher(error), `unexpected failure ${error?.code ?? error?.name}: ${error?.message}`);
+    return;
+  }
+  try {
+    assert.fail(`expected startRuntimeServer to fail, resolved ${started.runtime.endpoint}`);
+  } finally {
+    await adapter.stopServer(started.runtime).catch(() => {});
+  }
+}
+
+test('R5: real chmod behavior yields 0700 dir and 0600 reserved db file', (t) => {
+  const dataRoot = tempDir(t, 'perm');
+  // Simulate a pre-existing wide-open binding directory: the dead
+  // process.chmod?.() no-op must not leave it enforceable-only-on-paper.
+  mkdirSync(join(dataRoot, 'webmcp-ai-runtime', 'worker_perm'), { recursive: true, mode: 0o755 });
+  chmodSync(join(dataRoot, 'webmcp-ai-runtime', 'worker_perm'), 0o755);
+
+  const prepared = prepareRuntimeDatabase({ dataRoot, bindingId: 'worker_perm' });
+  assert.equal(statSync(prepared.dbDir).mode & 0o777, 0o700, 'binding directory is enforced to 0700');
+  assert.ok(existsSync(prepared.dbPath), 'runtime database file identity is reserved');
+  assert.equal(statSync(prepared.dbPath).mode & 0o777, 0o600, 'runtime database file is enforced to 0600');
+});
+
+test('R5: ready line reporting a foreign port fails closed', async (t) => {
+  const stateDir = tempDir(t, 'portmm');
+  const workspace = tempDir(t, 'ws5');
+  const adapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir,
+    readyLineForTest: `${JSON.stringify({ ready: true, port: 43210 })}\n`,
+  });
+
+  await expectStartFailure(adapter, { workspace, bindingId: 'worker_pmm', fenceEpoch: 1 }, (error) => {
+    assert.equal(error.code, 'PROVIDER_PROTOCOL_ERROR');
+    assert.match(error.message, /port/i);
+    return true;
+  });
+});
+
+test('R5: non-loopback ready endpoint fails closed', async (t) => {
+  const stateDir = tempDir(t, 'nonloop');
+  const workspace = tempDir(t, 'ws6');
+  // Reserve one genuinely free port so the ready line can report the RIGHT
+  // port on the WRONG host — isolating the loopback check.
+  const probe = net.createServer();
+  await new Promise((resolveListen) => probe.listen(0, '127.0.0.1', resolveListen));
+  const chosenPort = probe.address().port;
+  await new Promise((resolveClose) => probe.close(resolveClose));
+  const adapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir,
+    requestedPortForTest: chosenPort,
+    readyLineForTest: `opencode server listening on http://10.9.8.7:${chosenPort}\n`,
+  });
+
+  await expectStartFailure(adapter, { workspace, bindingId: 'worker_nl', fenceEpoch: 1 }, (error) => {
+    assert.equal(error.code, 'PROVIDER_PROTOCOL_ERROR');
+    assert.match(error.message, /loopback|host/i);
+    return true;
+  });
+});
+
+test('R5: symlink-substituted runtime database fails before session use', async (t) => {
+  const stateDir = tempDir(t, 'symdb');
+  const workspace = tempDir(t, 'ws7');
+  const adapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir,
+    symlinkDbDirForTest: true,
+  });
+
+  await expectStartFailure(adapter, { workspace, bindingId: 'worker_sym', fenceEpoch: 1 }, (error) => {
+    assert.equal(error.code, 'POLICY_DENIED');
+    return true;
+  });
+});
+
+test('R5: default/user databases are never selected or harmed', async (t) => {
+  const dataRoot = tempDir(t, 'default');
+  const userDefaultDb = join(dataRoot, 'opencode.db');
+  const sharedCliDb = join(dataRoot, 'opencode-cli.db');
+  writeFileSync(userDefaultDb, 'user default bytes\n');
+  writeFileSync(sharedCliDb, 'shared cli bytes\n');
+
+  // Even with a hostile caller-supplied OPENCODE_DB the isolated launch env
+  // pins exactly the runtime-owned path.
+  const prepared = prepareRuntimeDatabase({ dataRoot, bindingId: 'worker_df' });
+  const env = buildIsolatedEnv({
+    dbPath: prepared.dbPath,
+    dispatchPrivateDir: tempDir(t, 'dfdispatch'),
+    password: 'pw',
+    baseEnv: { OPENCODE_DB: userDefaultDb },
+  });
+  assert.equal(env.OPENCODE_DB, prepared.dbPath);
+  assert.match(prepared.dbPath, /webmcp-ai-runtime[\\/]worker_df[\\/]opencode\.db$/);
+  assert.notEqual(prepared.dbPath, userDefaultDb);
+  assert.notEqual(prepared.dbPath, sharedCliDb);
+  assert.equal(readFileSync(userDefaultDb, 'utf8'), 'user default bytes\n');
+  assert.equal(readFileSync(sharedCliDb, 'utf8'), 'shared cli bytes\n');
+});
+
+test('R5: release removes the verified database plus sidecars and proves absence', async (t) => {
+  const stateDir = tempDir(t, 'rel');
+  const workspace = tempDir(t, 'ws8');
+  const adapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir,
+  });
+
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_rel', fenceEpoch: 1 });
+  await adapter.createSession(started.runtime);
+  // Known sqlite sidecars as the real binary would leave them behind.
+  for (const side of ['opencode.db-wal', 'opencode.db-shm', 'opencode.db-journal']) {
+    writeFileSync(join(dirname(started.runtime.dbPath), side), 'sidecar\n');
+  }
+  const dbDir = dirname(started.runtime.dbPath);
+
+  const receipt = await adapter.stopServer(started.runtime, { release: true, settled: true });
+  assert.equal(receipt.released, true, 'release is truthfully recorded');
+  assert.equal(receipt.absenceProven, true, 'absence is proven, not assumed');
+  assert.equal(existsSync(dbDir), false, 'isolated binding directory removed');
+  assert.equal(existsSync(started.runtime.dbPath), false, 'database removed');
+  for (const side of ['opencode.db-wal', 'opencode.db-shm', 'opencode.db-journal', 'sessions.json']) {
+    assert.equal(existsSync(join(dbDir, side)), false, `sidecar ${side} removed`);
+  }
+  assert.deepEqual(
+    (receipt.removedFiles ?? []).sort(),
+    ['opencode.db', 'opencode.db-journal', 'opencode.db-shm', 'opencode.db-wal', 'sessions.json'],
+  );
+});
+
+test('R5: unprovable release identity retains files and fails typed', async (t) => {
+  const stateDir = tempDir(t, 'amb');
+  const workspace = tempDir(t, 'ws9');
+  const adapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir,
+  });
+
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_amb', fenceEpoch: 1 });
+  const dbDir = dirname(started.runtime.dbPath);
+
+  // (a) digest drift
+  const digestDrift = { ...started.runtime, databaseIdentity: '0'.repeat(64) };
+  await assert.rejects(
+    () => adapter.stopServer(digestDrift, { release: true, settled: true }),
+    (error) => error.code === 'POLICY_DENIED',
+  );
+
+  // (b) structurally plausible but nonexistent substituted tree
+  const forged = {
+    ...started.runtime,
+    dbPath: join(stateDir, 'evil', 'webmcp-ai-runtime', 'worker_evil', 'opencode.db'),
+    databaseIdentity: sha256Text(join(stateDir, 'evil', 'webmcp-ai-runtime', 'worker_evil', 'opencode.db')),
+  };
+  await assert.rejects(
+    () => adapter.stopServer(forged, { release: true, settled: true }),
+    (error) => error.code === 'POLICY_DENIED',
+  );
+
+  // (c) protected-path guard still wins over structural validity
+  const guardedAdapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir,
+    protectedPathsForTest: [started.runtime.dbPath],
+  });
+  await assert.rejects(
+    () => guardedAdapter.stopServer(started.runtime, { release: true, settled: true }),
+    (error) => error.code === 'POLICY_DENIED',
+  );
+
+  assert.equal(existsSync(started.runtime.dbPath), true, 'ambiguous identity never deletes');
+  assert.equal(existsSync(dbDir), true, 'binding directory retained on refusal');
+  await adapter.stopServer(started.runtime);
+});
+
+test('R5: an ambient server on the requested port cannot hijack the binding', async (t) => {
+  const blocker = net.createServer();
+  await new Promise((resolveListen) => blocker.listen(0, '127.0.0.1', resolveListen));
+  t.after(() => new Promise((resolveClose) => blocker.close(resolveClose)));
+  const blockedPort = blocker.address().port;
+
+  // (a) the requested port is occupied: bootstrap must fail typed and the
+  // ambient server must survive untouched.
+  const stateDir = tempDir(t, 'hijack');
+  const workspace = tempDir(t, 'ws10');
+  const adapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir,
+    requestedPortForTest: blockedPort,
+  });
+  await expectStartFailure(adapter, { workspace, bindingId: 'worker_hj', fenceEpoch: 1 }, (error) => {
+    assert.equal(error.code, 'WORKER_PROCESS_LOST');
+    return true;
+  });
+  assert.equal(blocker.listening, true, 'the ambient server was never swept');
+
+  // (b) a ready line answering with someone else's port is rejected even
+  // though our own child bound the requested port fine.
+  const stateDir2 = tempDir(t, 'hijack2');
+  const lyingAdapter = createOpenCodeServerAdapter({
+    openCodeBin: process.execPath,
+    openCodeArgs: [fakeOpenCode],
+    stateDir: stateDir2,
+    requestedPortForTest: blockedPort === 41000 ? 41001 : 41000,
+    readyLineForTest: `${JSON.stringify({ ready: true, port: blockedPort })}\n`,
+  });
+  await expectStartFailure(lyingAdapter, { workspace, bindingId: 'worker_hj2', fenceEpoch: 1 }, (error) => {
+    assert.equal(error.code, 'PROVIDER_PROTOCOL_ERROR');
+    return true;
+  });
 });

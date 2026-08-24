@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, readdirSync, rmSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { writeAtomicJson } from '../atomic-file.mjs';
@@ -12,6 +12,89 @@ import { normalizeOpenCodeEvent, createEventDeduper } from './opencode-events.mj
 
 function sha256(value) {
   return createHash('sha256').update(String(value)).digest('hex');
+}
+
+const POSIX_MODES = process.platform !== 'win32';
+const RUNTIME_DIR_MODE = 0o700;
+const RUNTIME_FILE_MODE = 0o600;
+
+/**
+ * Enforce and then VERIFY a POSIX mode. A mode that cannot be proven is a
+ * hard failure, never a warning.
+ */
+function enforceMode(targetPath, mode, kind) {
+  if (!POSIX_MODES) return;
+  chmodSync(targetPath, mode);
+  const actual = statSync(targetPath).mode & 0o777;
+  if (actual !== mode) {
+    throw new AiCliError('POLICY_DENIED', `runtime ${kind} permissions could not be enforced (${actual.toString(8)} != ${mode.toString(8)})`);
+  }
+}
+
+const KNOWN_DATABASE_SIDECARS = new Set([
+  'opencode.db-wal',
+  'opencode.db-shm',
+  'opencode.db-journal',
+  'sessions.json',
+]);
+
+/**
+ * Prove the binding directory is still a real directory inside its real
+ * parent — catching post-prepare symlink/path-substitution attacks.
+ */
+function proveIsolatedDatabaseLocation(dbPath) {
+  const dbDir = dirname(dbPath);
+  let dirStats;
+  try {
+    dirStats = lstatSync(dbDir);
+  } catch {
+    throw new AiCliError('POLICY_DENIED', 'runtime database directory vanished before identity proof');
+  }
+  if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
+    throw new AiCliError('POLICY_DENIED', 'runtime database directory is not a real directory');
+  }
+  const realDir = realpathSync(dbDir);
+  if (realDir !== join(realpathSync(dirname(dbDir)), basename(dbDir))) {
+    throw new AiCliError('POLICY_DENIED', 'runtime database directory resolves outside its binding');
+  }
+  if (existsSync(dbPath)) {
+    const fileStats = lstatSync(dbPath);
+    if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
+      throw new AiCliError('POLICY_DENIED', 'runtime database path is not a regular file');
+    }
+  }
+}
+
+/**
+ * Prove that a runtime's database path is exactly one isolated, runtime-owned
+ * binding directory before any deletion is authorized. Every unprovable
+ * property fails closed and retains the files.
+ */
+function proveReleaseIdentity(runtime, { protectedPaths = [] } = {}) {
+  const dbPath = typeof runtime?.dbPath === 'string' ? runtime.dbPath : null;
+  if (!dbPath || !isAbsolute(dbPath)) {
+    throw new AiCliError('POLICY_DENIED', 'release refused: database path is not an absolute proven path');
+  }
+  if (runtime.databaseIdentity !== sha256(dbPath)) {
+    throw new AiCliError('POLICY_DENIED', 'release refused: database identity digest does not match its path');
+  }
+  const dbDir = dirname(dbPath);
+  if (!/^worker_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(basename(dbDir))) {
+    throw new AiCliError('POLICY_DENIED', 'release refused: database does not live in a runtime binding directory');
+  }
+  if (basename(dirname(dbDir)) !== 'webmcp-ai-runtime') {
+    throw new AiCliError('POLICY_DENIED', 'release refused: binding directory is not inside the webmcp-ai-runtime tree');
+  }
+  if (basename(dbPath) !== 'opencode.db') {
+    throw new AiCliError('POLICY_DENIED', 'release refused: unexpected database file name');
+  }
+  for (const guarded of protectedPaths) {
+    if (!relative(guarded, dbPath).startsWith('..')) {
+      throw new AiCliError('POLICY_DENIED', 'refusing to release a protected or user-owned database');
+    }
+  }
+  proveIsolatedDatabaseLocation(dbPath);
+  return { dbDir };
 }
 
 /**
@@ -71,12 +154,12 @@ export function prepareRuntimeDatabase({ dataRoot, bindingId }) {
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
     throw new AiCliError('POLICY_DENIED', 'runtime database directory is unsafe');
   }
-  try {
-    process.chmod?.(dbDir, 0o700);
-  } catch {
-    // chmod best-effort on platforms without POSIX modes.
-  }
+  enforceMode(dbDir, RUNTIME_DIR_MODE, 'database directory');
   const dbPath = join(dbDir, 'opencode.db');
+  // Reserve the database file identity so its mode is ours from creation,
+  // never inherited from a provider-side default.
+  if (!existsSync(dbPath)) closeSync(openSync(dbPath, 'a', RUNTIME_FILE_MODE));
+  enforceMode(dbPath, RUNTIME_FILE_MODE, 'database file');
   return Object.freeze({ dbDir, dbPath, databaseIdentity: sha256(dbPath) });
 }
 
@@ -85,7 +168,7 @@ export function prepareRuntimeDatabase({ dataRoot, bindingId }) {
  * the caller's XDG_DATA_HOME are preserved untouched; isolation comes from
  * explicit flags plus a dispatch-private config root.
  */
-export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv = {}, port, streamFile }) {
+export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv = {}, port, streamFile, fakeReadyLine, fakeDbEcho, fakeSymlinkDbDir }) {
   if (!isAbsolute(dbPath)) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime db path must be absolute', { exitCode: 2 });
   }
@@ -114,6 +197,9 @@ export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv
     WEBMCP_FAKE_SERVER_PASSWORD: password,
     ...(port !== undefined ? { WEBMCP_FAKE_PORT: String(port) } : {}),
     ...(streamFile ? { WEBMCP_FAKE_STREAM_FILE: streamFile } : {}),
+    ...(fakeReadyLine ? { WEBMCP_FAKE_READY_LINE: fakeReadyLine } : {}),
+    ...(fakeDbEcho ? { WEBMCP_FAKE_DB_ECHO: fakeDbEcho } : {}),
+    ...(fakeSymlinkDbDir ? { WEBMCP_FAKE_SYMLINK_DB: '1' } : {}),
   };
 }
 
@@ -126,6 +212,35 @@ async function freeLoopbackPort() {
       probe.close(() => resolvePort(port));
     });
   });
+}
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+function isLoopbackHost(host) {
+  if (host === null) return true; // JSON ready dialect implies loopback-only binding.
+  return LOOPBACK_HOSTS.has(String(host).toLowerCase().replace(/^\[|\]$/g, ''));
+}
+
+/**
+ * Parse both documented ready dialects into {host, port}:
+ * - fixture JSON: {"ready":true,"port":N} (no host field, loopback implied);
+ * - pinned binary text: "opencode server listening on http://host:port".
+ */
+function parseReadyLine(line) {
+  try {
+    const ready = JSON.parse(line);
+    if (Number.isInteger(ready?.port)) return { host: null, port: ready.port };
+    if (typeof ready?.url === 'string') {
+      const parsed = new URL(ready.url);
+      if (/^\d{2,5}$/.test(parsed.port)) return { host: parsed.hostname, port: Number.parseInt(parsed.port, 10) };
+    }
+  } catch {
+    const listening = line.match(/listening on\s+https?:\/\/(?:\[([a-f0-9:]+)\]|([^:\s/]+)):(\d{2,5})/i);
+    if (listening) {
+      return { host: listening[1] ?? listening[2], port: Number.parseInt(listening[3], 10) };
+    }
+  }
+  return null;
 }
 
 function requestBasic(endpoint, method, path, authToken, body = null) {
@@ -245,14 +360,19 @@ export function createOpenCodeServerAdapter(options = {}) {
       mcp: {},
     });
 
-    const port = await freeLoopbackPort();
+    // Reserve the port up front and pass it explicitly: the reported ready
+    // endpoint must equal THIS port or bootstrap fails closed.
+    const requestedPort = options.requestedPortForTest ?? (await freeLoopbackPort());
     const password = randomBytes(24).toString('base64url');
     const env = buildIsolatedEnv({
       dbPath: prepared.dbPath,
       dispatchPrivateDir,
       password,
-      port,
+      port: requestedPort,
       streamFile,
+      fakeReadyLine: options.readyLineForTest,
+      fakeDbEcho: options.dbProbeEchoForTest,
+      fakeSymlinkDbDir: options.symlinkDbDirForTest === true,
       baseEnv: pickLaunchEnv(),
     });
 
@@ -264,7 +384,7 @@ export function createOpenCodeServerAdapter(options = {}) {
 
     // Explicit port/hostname flags: the real binary ignores env-port hints and
     // otherwise binds its default 4096, colliding with ambient servers.
-    const serverChild = spawn(openCodeBin, [...extraArgs, 'serve', '--port', String(port), '--hostname', '127.0.0.1'], {
+    const serverChild = spawn(openCodeBin, [...extraArgs, 'serve', '--port', String(requestedPort), '--hostname', '127.0.0.1'], {
       cwd: workspace,
       env,
       detached: process.platform !== 'win32',
@@ -292,16 +412,21 @@ export function createOpenCodeServerAdapter(options = {}) {
         while (newlineIndex !== -1 && !settled) {
           const line = buffered.slice(0, newlineIndex).trim();
           buffered = buffered.slice(newlineIndex + 1);
-          let parsedPort = null;
-          try {
-            const ready = JSON.parse(line);
-            if (Number.isInteger(ready?.port)) parsedPort = ready.port;
-          } catch {
-            const listening = line.match(/listening on\s+https?:\/\/[^\s]*:(\d{2,5})/i);
-            if (listening) parsedPort = Number.parseInt(listening[1], 10);
-          }
-          if (parsedPort !== null) {
-            finish(true, null, `http://127.0.0.1:${parsedPort}`);
+          const parsed = parseReadyLine(line);
+          if (parsed) {
+            if (parsed.port !== requestedPort) {
+              finish(
+                false,
+                new AiCliError(
+                  'PROVIDER_PROTOCOL_ERROR',
+                  `ready line reported port ${parsed.port} which does not match the requested port ${requestedPort}`,
+                ),
+              );
+            } else if (!isLoopbackHost(parsed.host)) {
+              finish(false, new AiCliError('PROVIDER_PROTOCOL_ERROR', `ready line reported non-loopback host '${parsed.host}'`));
+            } else {
+              finish(true, null, `http://127.0.0.1:${requestedPort}`);
+            }
             return;
           }
           newlineIndex = buffered.indexOf('\n');
@@ -325,10 +450,17 @@ export function createOpenCodeServerAdapter(options = {}) {
       serverChild.once('exit', (code) => finish(false, new AiCliError('WORKER_PROCESS_LOST', `server exited during bootstrap (${code})`)));
     });
 
-    // Prove the effective database matches the intended path; mismatch fails
-    // closed instead of degrading to an ambient database.
+    // Prove the effective database matches the intended canonical path;
+    // mismatch or symlink substitution fails closed instead of degrading to an
+    // ambient database.
     const intendedDbPath = options.forceIntendedDbPathForTest ?? prepared.dbPath;
-    const dbProbe = await runBounded(openCodeBin, [...extraArgs, 'db', 'path', '--pure'], env);
+    let dbProbe;
+    try {
+      dbProbe = await runBounded(openCodeBin, [...extraArgs, 'db', 'path', '--pure'], env);
+    } catch (error) {
+      sweepProcessGroup(serverChild, 'SIGKILL');
+      throw error;
+    }
     if (dbProbe.code !== 0 || dbProbe.stdout.trim() !== intendedDbPath) {
       sweepProcessGroup(serverChild, 'SIGKILL');
       throw new AiCliError(
@@ -336,14 +468,32 @@ export function createOpenCodeServerAdapter(options = {}) {
         `runtime database identity mismatch: resolved '${dbProbe.stdout.trim()}' != intended '${intendedDbPath}'`,
       );
     }
+    try {
+      proveIsolatedDatabaseLocation(prepared.dbPath);
+    } catch (error) {
+      sweepProcessGroup(serverChild, 'SIGKILL');
+      throw error;
+    }
 
-    const health = await requestBasic(endpoint, 'GET', '/global/health', password);
+    let health;
+    try {
+      health = await requestBasic(endpoint, 'GET', '/global/health', password);
+    } catch (error) {
+      sweepProcessGroup(serverChild, 'SIGKILL');
+      throw new AiCliError('PROVIDER_PROTOCOL_ERROR', `server health check failed: ${error?.cause?.code ?? error?.code ?? error?.message}`);
+    }
     // Health dialects: the pinned real binary reports `{ healthy: true }`,
     // the packaged fixture reports `{ status: 'ok' }`; accept either.
     const healthOk = health.ok && (health.json?.status === 'ok' || health.json?.healthy === true);
     if (!healthOk) {
       sweepProcessGroup(serverChild, 'SIGKILL');
       throw new AiCliError('PROVIDER_PROTOCOL_ERROR', 'server health check failed');
+    }
+    // When the dialect exposes the effective db, it must be exactly the one we
+    // bound into the child environment — before any session is created.
+    if (typeof health.json?.openCodeDb === 'string' && health.json.openCodeDb !== prepared.dbPath) {
+      sweepProcessGroup(serverChild, 'SIGKILL');
+      throw new AiCliError('POLICY_DENIED', `server effective database mismatch: '${health.json.openCodeDb}' != '${prepared.dbPath}'`);
     }
 
     const runtime = Object.freeze({
@@ -525,11 +675,12 @@ export function createOpenCodeServerAdapter(options = {}) {
       return this.respondPermission(bindingOrRuntime, permissionId, decision);
     },
 
-    /**
-     * Stop the owned server. Cleanup receipts record disposition; user-owned
+/**
+ * Stop the owned server. Cleanup receipts record disposition; user-owned
      * default databases and the shared one-shot CLI database are never
      * touched; runtime-owned databases are retained unless explicitly
-     * released after settlement.
+     * released after settlement. Release first PROVES the isolated database
+     * identity, removes exactly that directory tree, and proves absence.
      */
     async stopServer(runtime, { release = false, settled = false } = {}) {
       const child = runtime.__serverChild;
@@ -544,16 +695,36 @@ export function createOpenCodeServerAdapter(options = {}) {
         stopped = true;
       }
       let released = false;
+      let removedFiles;
+      let absenceProven;
       if (release) {
         if (!settled) {
           throw new AiCliError('POLICY_DENIED', 'runtime sessions may only be released after settlement');
         }
-        const insideRuntimeTree = runtime.dbPath.includes('webmcp-ai-runtime');
-        const protectedHit = (options.protectedPathsForTest ?? []).some(
-          (guarded) => !relative(guarded, runtime.dbPath).startsWith('..'),
-        );
-        if (protectedHit || !insideRuntimeTree) {
-          throw new AiCliError('POLICY_DENIED', 'refusing to release a database outside the runtime-owned tree');
+        const proof = proveReleaseIdentity(runtime, { protectedPaths: options.protectedPathsForTest ?? [] });
+        // Only now is deletion authorized: read the manifest, remove, and
+        // prove absence of every known artifact.
+        try {
+          removedFiles = readdirSync(proof.dbDir).sort();
+        } catch {
+          throw new AiCliError('POLICY_DENIED', 'release refused: isolated runtime directory could not be enumerated');
+        }
+        for (const name of removedFiles) {
+          if (!KNOWN_DATABASE_SIDECARS.has(name) && name !== 'opencode.db') {
+            throw new AiCliError('POLICY_DENIED', `release refused: unexpected file '${name}' inside the isolated runtime directory`);
+          }
+        }
+        try {
+          rmSync(proof.dbDir, { recursive: true, force: true });
+        } catch (error) {
+          throw new AiCliError('POLICY_DENIED', `runtime database cleanup failed: ${error?.code ?? error?.message}`);
+        }
+        absenceProven =
+          !existsSync(proof.dbDir) &&
+          !existsSync(runtime.dbPath) &&
+          ![...KNOWN_DATABASE_SIDECARS].some((side) => existsSync(join(proof.dbDir, side)));
+        if (!absenceProven) {
+          throw new AiCliError('POLICY_DENIED', 'runtime database cleanup could not prove absence');
         }
         released = true;
       }
@@ -562,6 +733,7 @@ export function createOpenCodeServerAdapter(options = {}) {
         disposition: stopped ? 'stopped' : 'already-exited',
         retained: !released,
         released,
+        ...(released ? { removedFiles, absenceProven } : {}),
         databaseIdentity: runtime.databaseIdentity,
       };
     },
