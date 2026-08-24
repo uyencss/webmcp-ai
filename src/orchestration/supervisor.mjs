@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 import {
@@ -30,7 +30,12 @@ import { acquireSupervisorLock, releaseSupervisorLock } from './lock.mjs';
 import { createPlatformIdentityDeps } from './process-identity.mjs';
 import { commitDelivery, openCoordinationStore, persistAck } from './store.mjs';
 import { createWorkerCallbackHandlers } from './worker-callback.mjs';
+import { generateDispatchCapabilityToken } from './worker-callback.mjs';
 import { validateWorkerCallback } from './contracts.mjs';
+import { computeAdapterDigest, computeAdapterMaturity } from './adapters/index.mjs';
+import { loadCanaryReceipts, resolveExecutableDigest } from './canary.mjs';
+import { sanitizeEvent } from './redaction.mjs';
+import { captureWorkspaceBaseline } from './verifier.mjs';
 import { verifyDispatch as defaultVerifyDispatch } from './verifier.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
@@ -41,6 +46,24 @@ function unsupportedAdapterBoundary(operation) {
     `operation ${operation} reaches the adapter boundary, which no adapter provides yet`,
     { exitCode: 2 },
   );
+}
+
+const DISPATCH_START_FIELDS = new Set(['taskId', 'adapterId', 'capability']);
+
+function strictDispatchStartInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'dispatch.start input must be an object', { exitCode: 2 });
+  }
+  const unknown = Object.keys(input).filter((key) => !DISPATCH_START_FIELDS.has(key));
+  if (unknown.length > 0) {
+    // Request-supplied executables, commands, environment overrides, database
+    // paths or maturity bypasses are contract violations, never hints.
+    throw new AiCliError(
+      'ORCHESTRATION_INVALID_INPUT',
+      `dispatch.start input has forbidden field(s): ${unknown.sort().join(', ')}`,
+      { exitCode: 2 },
+    );
+  }
 }
 
 async function buildSupervisorIdentity(processGeneration) {
@@ -205,6 +228,7 @@ export async function createSupervisor(options = {}) {
     manifest = {},
     adapters = [],
     verifyDispatch = null,
+    trustedCoordinatorConfig: trustedConfig = null,
   } = options;
   const freshCreate = options.mode ? options.mode === 'create' : true;
   // The registry stays empty by default: adapter-backed dispatch fails closed
@@ -291,7 +315,7 @@ export async function createSupervisor(options = {}) {
         if (!dispatch || !NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
         const record = storedBindings[dispatch.dispatchId] ?? null;
         let live = false;
-        if (record && typeof record === 'object') {
+        if (record && typeof record === 'object' && record.controlOnly !== true) {
           const pid = record.processIdentity?.pid;
           if (Number.isInteger(pid) && pid > 0) {
             try {
@@ -446,6 +470,228 @@ export async function createSupervisor(options = {}) {
     };
   }
 
+  /**
+   * Capability-specific maturity gate for provider-backed kinds. Fixture
+   * adapters stay reachable only through the dual-opt-in trusted seam; no
+   * request can bypass a stale or missing receipt.
+   */
+  function assertPublicDispatchMaturity(adapter) {
+    if (adapter.lifecycle.kind === 'owned-process') return;
+    if (trustedConfig?.allowFixtureDispatch === true) return;
+    const receipts = loadCanaryReceipts(roots.stateRoot);
+    const executable = resolveExecutableDigest(adapter.id, { env });
+    const evidence = {
+      canaryReceipts: receipts,
+      adapterDigest: computeAdapterDigest(adapter),
+      executablePathDigest: executable?.digest ?? null,
+      installedVersion: null,
+      runtimeVersion: process.version,
+    };
+    const maturity = computeAdapterMaturity(adapter, evidence);
+    if (maturity !== 'canary-proven') {
+      throw new AiCliError(
+        'POLICY_DENIED',
+        `provider-backed dispatch via ${adapter.id} requires current capability-specific canary evidence`,
+      );
+    }
+  }
+
+  /**
+   * Preventive confinement boundary for mutable dispatch: without a
+   * coordinator-declared disposable workspace the dispatch refuses to launch.
+   */
+  function assertConfinementFor(packet) {
+    const mutable = (packet?.allowedWriteRoots ?? []).length > 0;
+    if (!mutable) return;
+    if (trustedConfig?.confinement !== 'disposable-workspace' || !trustedConfig.disposableRoot) {
+      throw new AiCliError(
+        'POLICY_DENIED',
+        'mutable dispatch requires preventive confinement (a disposable workspace) before launch',
+      );
+    }
+    for (const root of packet.allowedWriteRoots) {
+      if (!isAbsolute(root) || relative(trustedConfig.disposableRoot, root).startsWith('..')) {
+        throw new AiCliError(
+          'POLICY_DENIED',
+          'mutable write roots must live inside the disposable workspace',
+        );
+      }
+    }
+  }
+
+  /**
+   * The authoritative public dispatch pipeline: validate → resolve trusted
+   * adapter → enforce maturity → capture supervisor-owned baseline → durable
+   * state → launch through the adapter → ingest sanitized progress → retain a
+   * restart-recoverable control handle → finalize after terminal state and
+   * resource reconciliation.
+   */
+  async function runPublicDispatch(adapter, { taskId, packet }) {
+    assertPublicDispatchMaturity(adapter);
+    assertConfinementFor(packet);
+
+    const dispatchId = `disp_${randomUUID()}`;
+    const bindingId = `worker_${randomUUID().slice(0, 12)}`;
+    const capabilityToken = generateDispatchCapabilityToken();
+    const fenceEpoch = store.state.fenceEpoch;
+
+    // Supervisor-owned pre-dispatch workspace baseline. Non-git fixture
+    // workspaces record a null baseline so verification later fails closed.
+    let baseline = null;
+    try {
+      baseline = captureWorkspaceBaseline({ ...packet, taskId });
+    } catch {
+      baseline = null;
+    }
+    if (baseline) {
+      writeAtomicJson(join(layout.coordinationDir, 'tasks', `${taskId}.baseline.json`), baseline);
+    }
+
+    commit({
+      type: 'dispatch_created',
+      dispatchId,
+      taskId,
+      payload: {
+        dispatchId,
+        taskId,
+        adapterId: adapter.id,
+        capability: adapter.lifecycle.kind,
+        baselineCaptured: baseline !== null,
+      },
+    });
+
+    const taskContext = { ...packet, taskId };
+
+    // Server-style adapters settle through provider terminal events instead of
+    // an owned process exit; bridge both shapes onto one done promise.
+    let resolveServerDone;
+    const serverDone = new Promise((resolveDone) => { resolveServerDone = resolveDone; });
+
+    const emit = (type, payload) => {
+      const sanitizedPayload = sanitizeEvent(payload ?? {});
+      if (type === 'worker_done') resolveServerDone?.({ outcome: 'completed' });
+      try {
+        commit({
+          type,
+          ...(sanitizedPayload?.dispatchId ? { dispatchId: sanitizedPayload.dispatchId } : {}),
+          ...(sanitizedPayload?.taskId ? { taskId: sanitizedPayload.taskId } : {}),
+          payload: sanitizedPayload,
+        });
+      } catch {
+        // Provider telemetry that cannot satisfy the delivery contract is
+        // dropped defensively; terminal resolution above still proceeds.
+      }
+    };
+
+    commit({
+      type: 'worker_binding_recorded',
+      bindingId,
+      payload: { bindingId, dispatchId, guaranteeTier: 'owned-process', ownershipMode: 'runtime-owned' },
+    });
+    commit({
+      type: 'dispatch_state_changed',
+      dispatchId,
+      taskId,
+      payload: { dispatchId, taskId, state: 'assigned' },
+    });
+
+    let started;
+    try {
+      started = await adapter.lifecycle.launch({
+        task: taskContext,
+        dispatch: {
+          dispatchId,
+          bindingId,
+          taskId,
+          coordinationId,
+          fenceEpoch,
+          mode: packet?.mode ?? 'delegated-result-return',
+          guaranteeTier: 'owned-process',
+        },
+        emit,
+        resumeSessionId: null,
+        resumeThread: null,
+        doneForServer: serverDone,
+      });
+    } catch (error) {
+      // Launch failure must leave truthful durable state, never a phantom
+      // active dispatch.
+      commit({
+        type: 'dispatch_state_changed',
+        dispatchId,
+        taskId,
+        payload: { dispatchId, taskId, state: 'failed', reason: error.message?.slice(0, 300) ?? 'launch-failed' },
+      });
+      throw error;
+    }
+
+    if (!started?.ok || !started.binding) {
+      commit({
+        type: 'dispatch_state_changed',
+        dispatchId,
+        taskId,
+        payload: { dispatchId, taskId, state: 'failed', reason: 'adapter-refused-launch' },
+      });
+      throw new AiCliError('PROVIDER_PROTOCOL_ERROR', `${adapter.id} refused to launch its worker`);
+    }
+
+    commit({
+      type: 'dispatch_state_changed',
+      dispatchId,
+      taskId,
+      payload: { dispatchId, taskId, state: 'active' },
+    });
+
+    // Retain the control handle durably when the adapter proved process
+    // identity; telemetry-only bindings reconcile to lost on recovery.
+    const identity = started.binding.processIdentity ?? null;
+    await __recordRuntimeBinding(dispatchId, {
+      bindingId,
+      adapterId: adapter.id,
+      capability: adapter.lifecycle.kind,
+      taskId,
+      callbackCapability: capabilityToken,
+      processIdentity: identity ?? undefined,
+      controlOnly: !identity,
+    });
+
+    // Finalization belongs to the OWNER lifetime, not to the start call:
+    // after provider terminal state AND resource reconciliation, a cleanup
+    // receipt lands durably.
+    void (async () => {
+      try {
+        const terminal = started.done ? await started.done : await serverDone;
+        void terminal;
+        let cleanupReceipt = null;
+        try {
+          cleanupReceipt = await adapter.lifecycle.finalize({ binding: started.binding });
+        } catch (error) {
+          cleanupReceipt = { disposition: 'cleanup-error', reason: error.message?.slice(0, 200) };
+        }
+        commit({
+          type: 'cleanup_recorded',
+          payload: {
+            dispatchId,
+            taskId,
+            disposition: cleanupReceipt?.disposition ?? 'unknown',
+            released: cleanupReceipt?.released ?? null,
+            retained: cleanupReceipt?.retained ?? null,
+          },
+        });
+      } catch {
+        // The owner process is shutting down or the wait was cancelled;
+        // recovery reconciliation records the truthful outcome instead.
+      }
+    })();
+
+    return {
+      dispatchId,
+      bindingId,
+      adapterId: adapter.id,
+      sessionId: started.sessionId ?? started.binding.sessionId ?? null,
+    };
+  }
+
   async function waitForDeliveries(input) {
     const requested = Number.isInteger(input.timeoutMs) ? input.timeoutMs : 30_000;
     const timeoutMs = Math.max(1, Math.min(requested, ORCHESTRATION_LIMITS.maxWaitMs));
@@ -546,6 +792,7 @@ export async function createSupervisor(options = {}) {
       };
     },
     'dispatch.start': async (input) => {
+      strictDispatchStartInput(input);
       const taskId = input.taskId;
       const task = store.state.tasks[taskId];
       if (!task) throw new AiCliError('TASK_NOT_FOUND', `no task ${taskId}`);
@@ -566,10 +813,10 @@ export async function createSupervisor(options = {}) {
       // registry only contains validated adapters with honest maturity.
       const adapterId = input.adapterId ?? packet?.adapterId ?? null;
       const adapter = adapterId ? registry.get(adapterId) : null;
-      if (!adapter || adapter.maturity === 'unavailable') {
+      if (!adapter || adapter.maturity === 'unavailable' || !adapter.lifecycle) {
         throw unsupportedAdapterBoundary('dispatch.start');
       }
-      throw unsupportedAdapterBoundary('dispatch.start');
+      return runPublicDispatch(adapter, { taskId, packet, capability: input.capability ?? null });
     },
     'dispatch.reply': async () => { throw unsupportedAdapterBoundary('dispatch.reply'); },
     'dispatch.guidance': async () => { throw unsupportedAdapterBoundary('dispatch.guidance'); },
@@ -592,7 +839,15 @@ export async function createSupervisor(options = {}) {
       const task = store.state.tasks[taskId];
       if (!task) throw new AiCliError('TASK_NOT_FOUND', `no task ${taskId}`);
       const packet = taskPackets.get(taskId);
-      const baseline = input.baseline ?? packet?.baseline ?? null;
+      let baseline = input.baseline ?? packet?.baseline ?? null;
+      if (!baseline) {
+        // The supervisor-owned pre-dispatch baseline persisted at start time
+        // is the authoritative verification input.
+        const baselinePath = join(layout.coordinationDir, 'tasks', `${taskId}.baseline.json`);
+        if (existsSync(baselinePath)) {
+          try { baseline = JSON.parse(readFileSync(baselinePath, 'utf8')); } catch { baseline = null; }
+        }
+      }
       if (!baseline) {
         throw new AiCliError(
           'ORCHESTRATION_INDETERMINATE',
@@ -611,17 +866,26 @@ export async function createSupervisor(options = {}) {
         stateDir: layout.coordinationDir,
         now: Date.now(),
       });
-      commit({
-        type: 'acceptance_recorded',
-        taskId,
-        payload: {
+      if (receipt.verdict === 'accepted' || receipt.verdict === 'rejected') {
+        commit({
+          type: 'acceptance_recorded',
           taskId,
+          payload: {
+            taskId,
+            dispatchId,
+            acceptance: receipt.verdict,
+            workerClaimMatched: receipt.workerClaimMatched,
+            testsRun: receipt.tests.length,
+          },
+        });
+      } else {
+        // Indeterminate verification is evidence, never an acceptance state.
+        commit({
+          type: 'test_verdict_recorded',
           dispatchId,
-          verdict: receipt.verdict,
-          workerClaimMatched: receipt.workerClaimMatched,
-          testsRun: receipt.tests.length,
-        },
-      });
+          payload: { dispatchId, verdict: 'indeterminate', reason: 'verification-indeterminate' },
+        });
+      }
       return { receipt, verdict: receipt.verdict };
     },
     'decision-gate.create': async (input) => {
@@ -737,7 +1001,12 @@ export async function createSupervisor(options = {}) {
     if (record.taskId !== dispatch.taskId) {
       throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding taskId does not match its dispatch');
     }
-    validateRuntimeBindingRecord(record);
+    if (record.controlOnly === true) {
+      // Telemetry-only binding: no proven process identity, so recovery must
+      // reconcile this dispatch to lost rather than reattach.
+    } else {
+      validateRuntimeBindingRecord(record);
+    }
     runtimeBindings.set(dispatchId, { record });
     persistRuntimeBindingRecords(layout, runtimeBindings);
     return { ok: true, persisted: true };

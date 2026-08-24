@@ -1,8 +1,11 @@
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { AiCliError } from '../errors.mjs';
 import { ORCHESTRATION_PROTOCOL } from './constants.mjs';
+import { createPublicAdapters, createTrustedCoordinatorConfig } from './public-adapters.mjs';
 import { createSupervisor } from './supervisor.mjs';
 
 const BOOTSTRAP_OWNER_FIELDS = new Set(['host', 'instanceId']);
@@ -103,11 +106,27 @@ async function main() {
   }
   const bootstrap = parseBootstrapInput(rawBootstrap);
 
+  // Adapter assembly is coordinator-owned machine-local configuration. The
+  // packaged supervisor stays fail-closed (no adapters) unless operators opt
+  // in through WEBMCP_AI_ORCHESTRATION_PUBLIC_ADAPTERS=1; fixture overrides
+  // additionally require WEBMCP_AI_ORCHESTRATION_TEST_FIXTURES=1.
+  let adapters = [];
+  if (process.env.WEBMCP_AI_ORCHESTRATION_PUBLIC_ADAPTERS === '1') {
+    const allowFixtures = process.env.WEBMCP_AI_ORCHESTRATION_TEST_FIXTURES === '1';
+    const config = createTrustedCoordinatorConfig({
+      env: process.env,
+      stateDir: process.env.WEBMCP_AI_ORCHESTRATION_STATE_DIR ?? join(homedir(), '.webmcp-ai', 'orchestration-state'),
+      allowFixtureDispatch: allowFixtures,
+    });
+    adapters = createPublicAdapters(config);
+  }
+
   activeSupervisor = await createSupervisor({
     env: process.env,
     mode,
     ...(coordinationId ? { coordinationId } : {}),
     manifest: { owner: bootstrap.owner },
+    ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: { allowFixtureDispatch: process.env.WEBMCP_AI_ORCHESTRATION_TEST_FIXTURES === '1' } } : {}),
   });
 
   emit({
@@ -131,6 +150,9 @@ const invokedDirectly = process.argv[1]
 
 if (invokedDirectly) {
   main().catch((error) => {
+    if (process.env.WEBMCP_AI_BOOTSTRAP_TRACE && error.stack) {
+      process.stderr.write(`${error.stack}\n`);
+    }
     emit({
       ok: false,
       protocol: ORCHESTRATION_PROTOCOL,

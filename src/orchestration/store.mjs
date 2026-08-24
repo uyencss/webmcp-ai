@@ -187,9 +187,10 @@ export function commitDelivery(store, draft, { clock = () => Date.now(), waiters
     throw new AiCliError('JOURNAL_BACKPRESSURE', 'journal backpressure threshold reached');
   }
 
-  appendDeliveryLine(store.layout.journalPath, envelope);
-  // Journal is durable; the pure reducer may no longer fail closed silently.
+  // Validation happens BEFORE the durable append: a reducer-invalid event
+  // must leave no journal record at all.
   const nextState = applyDelivery(store.state, envelope);
+  appendDeliveryLine(store.layout.journalPath, envelope);
   writeAtomicJson(store.layout.snapshotPath, snapshotFromState(nextState));
   store.state = nextState;
   if (waiters) notifyWaiters(waiters);

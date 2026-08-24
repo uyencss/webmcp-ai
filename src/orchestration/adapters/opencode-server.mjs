@@ -457,7 +457,7 @@ export function createOpenCodeServerAdapter(options = {}) {
           }
         }
       });
-      return { close: () => controller.abort(), connected: ssePromise };
+      return { close: () => controller.abort(), connected: ssePromise.catch(() => { /* subscriber closed or server gone */ }) };
     },
 
     async promptAsync(runtime, sessionId, text) {
