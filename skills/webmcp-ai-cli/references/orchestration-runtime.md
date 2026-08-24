@@ -157,25 +157,47 @@ receipt; nothing in this package self-promotes.
 ### Authorized live canaries
 
 ```bash
-WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_OWNED=1 npm run canary -- owned-process
-WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_OPENCODE=1 npm run canary -- opencode-server
-WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_CLAUDE=1 npm run canary -- claude-stream
-WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_CODEX=1 npm run canary -- codex-exec
+# owned-process (0 model calls; trivial fixture worker)
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_OWNED=1 \
+  node scripts/orchestration-live-canary.mjs owned-process --public
+
+# opencode-server (exactly 1 model call — the public phase IS the round trip)
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_OPENCODE=1 \
+  node scripts/orchestration-live-canary.mjs opencode-server --public
+
+# claude-stream (at most 2 model calls: public phase turn one `ok`,
+# plus one direct resumed turn two `ping-pong` for continuationResume)
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_CLAUDE=1 \
+  node scripts/orchestration-live-canary.mjs claude-stream --public
+
+# codex-exec (exactly 1 model call through the public supervisor)
+WEBMCP_AI_LIVE_CANARY=1 WEBMCP_AI_LIVE_CODEX=1 \
+  node scripts/orchestration-live-canary.mjs codex-exec --public
 ```
 
 Each run needs BOTH the global flag and the per-adapter flag; without them it
-fails closed before touching any executable (`CANARY_GATE_CLOSED`). Scenarios
-are time-bounded and auth-free by default: `owned-process` proves process
-identity plus the terminal ladder on a trivial worker; `opencode-server`
-proves bootstrap, health, session lifecycle, isolated-database topology and
-clean group stop against the pinned real binary (add `--prompt` for exactly
-one bounded model round trip); `claude-stream` / `codex-exec` drive one tiny
-stdin prompt through the owned process. A passing run writes a mode-`0600`
-receipt under `<stateRoot>/canary/<adapter>.json` binding the adapter digest,
-resolved executable path digest and node runtime version; `capabilities --json`
-then reports that single adapter as `canary-proven` on this machine only, and
-dispatch time re-verifies strictly. Upgrading or moving a provider binary
-invalidates its receipt until the canary is re-run.
+fails closed before touching any executable (`CANARY_GATE_CLOSED`). There is
+NO separate authentication precheck and NO duplicate prompt: the public
+supervisor phase itself performs the single bounded prompt round trip and its
+SSE/stream events prove `progressStream`, while the EXACT reply text proves
+`promptRoundTrip`. Scenarios are time-bounded and auth-free by default.
+`owned-process` proves process identity plus the terminal ladder on a trivial
+worker; `opencode-server` additionally proves bootstrap, health, isolated-
+database topology and clean group stop against the pinned real binary;
+`claude-stream` spends its second (and last) model call only on the resumed
+`ping-pong` continuation.
+
+Promotion is exact, never aspirational. A passing run writes a mode-`0600`
+receipt under `<stateRoot>/canary/<adapter>.json` binding the adapter behavior
+digest, canonical executable PATH + content digest, probed version and node
+runtime. The runner then re-evaluates maturity from THAT receipt against the
+per-adapter REQUIRED capability set (`launch`, `progressStream`,
+`promptRoundTrip`, `cleanup`, `publicSupervisorLifecycle`; Claude additionally
+requires `continuationResume`). Only a fully fresh match emits
+`CANARY_PASSED`; partial evidence is stored but reported as
+`CANARY_EVIDENCE_RECORDED` and promotes nothing. Dispatch time re-verifies
+strictly. Upgrading OR MOVING a provider binary invalidates its receipt until
+the canary is re-run.
 
 ## 6. Retention and cleanup
 

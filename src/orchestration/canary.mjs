@@ -43,6 +43,30 @@ export const DEFAULT_REQUIRED_DISPATCH_CAPABILITIES = Object.freeze([
   'publicSupervisorLifecycle',
 ]);
 
+/**
+ * EXACT required capability set per adapter/dispatch kind. A receipt only
+ * promotes its adapter when every capability in ITS set reads 'pass'.
+ */
+export const ADAPTER_REQUIRED_CAPABILITIES = Object.freeze({
+  'owned-process': Object.freeze([
+    'launch', 'progressStream', 'cleanup', 'publicSupervisorLifecycle',
+  ]),
+  'opencode-server': Object.freeze([
+    'launch', 'progressStream', 'promptRoundTrip', 'cleanup', 'publicSupervisorLifecycle',
+  ]),
+  'claude-stream': Object.freeze([
+    'launch', 'progressStream', 'promptRoundTrip', 'continuationResume', 'cleanup', 'publicSupervisorLifecycle',
+  ]),
+  'codex-exec': Object.freeze([
+    'launch', 'progressStream', 'promptRoundTrip', 'cleanup', 'publicSupervisorLifecycle',
+  ]),
+});
+
+/** Typed lookup; unknown adapters get the conservative default set. */
+export function requiredCapabilitiesFor(adapterId) {
+  return ADAPTER_REQUIRED_CAPABILITIES[adapterId] ?? DEFAULT_REQUIRED_DISPATCH_CAPABILITIES;
+}
+
 const CANARY_CAPABILITY_STATUSES = Object.freeze(['pass', 'fail', 'unsupported']);
 
 function sha256Text(value) {
@@ -71,7 +95,26 @@ const SHARED_BEHAVIOR_MODULES = Object.freeze([
   'supervisor.mjs',
   'store.mjs',
   'state-machine.mjs',
+  // Capability-relevant shared infrastructure the scenarios exercise live:
+  // authenticated IPC transport, worker callback ingress, process identity
+  // proofs and journal durability all affect what a receipt actually proved.
+  'ipc.mjs',
+  'worker-callback.mjs',
+  'process-identity.mjs',
+  'journal.mjs',
 ]);
+
+/** Static inspection seam for tests: per-adapter behavior module lists. */
+export const ADAPTER_BEHAVIOR_MODULES_FOR_TEST = Object.freeze(
+  Object.fromEntries(
+    Object.entries(ADAPTER_BEHAVIOR_MODULES).map(([id, modules]) => [id, Object.freeze([...modules])]),
+  ),
+);
+
+/** Static inspection seam for tests: shared behavior module list. */
+export function sharedBehaviorModulesForTest() {
+  return [...SHARED_BEHAVIOR_MODULES];
+}
 
 function behaviorModulePaths(adapterId, { behaviorModules } = {}) {
   if (Array.isArray(behaviorModules)) return behaviorModules;
@@ -273,16 +316,30 @@ export function probeExecutableVersion(adapterId, { env = {} } = {}) {
  * when every checked property matches, otherwise a lowercase stale reason
  * fragment suitable for user-facing diagnostics.
  */
+function sameExecutablePath(firstPath, secondPath) {
+  if (firstPath === secondPath) return true;
+  try {
+    return realpathSync(firstPath) === realpathSync(secondPath);
+  } catch {
+    return false;
+  }
+}
+
 export function evaluateReceiptFreshness(receipt, binding) {
   if (!receipt || receipt.schema !== CANARY_RECEIPT_SCHEMA) return 'schema';
   if (receipt.contractVersion !== CANARY_CONTRACT_VERSION) return 'contract';
   const expiry = Date.parse(String(receipt.expiresAt ?? ''));
   if (Number.isNaN(expiry) || expiry <= Date.now()) return 'expiry';
   if (typeof binding.adapterDigest !== 'string' || receipt.adapterDigest !== binding.adapterDigest) return 'adapter';
+  // EXACT canonical executable PATH must match too: moving/replacing the
+  // binary at a different path invalidates the receipt even when content
+  // digests happen to coincide. Symlink ALIASING of the same file is not drift.
+  if (binding.executablePath !== undefined && typeof receipt.executablePath === 'string'
+    && !sameExecutablePath(receipt.executablePath, binding.executablePath)) return 'executable-path';
   if (!binding.executablePathDigest || receipt.executablePathDigest !== binding.executablePathDigest) return 'executable';
   if (binding.installedVersion === null || receipt.executableVersion !== binding.installedVersion) return 'version';
   if (receipt.runtimeVersion !== binding.runtimeVersion) return 'runtime';
-  const required = binding.requiredCapabilities ?? DEFAULT_REQUIRED_DISPATCH_CAPABILITIES;
+  const required = binding.requiredCapabilities ?? requiredCapabilitiesFor(receipt.adapterId);
   for (const capability of required) {
     if (receipt.capabilities?.[capability] !== 'pass') return `capability:${capability}`;
   }
@@ -297,10 +354,23 @@ function currentBinding(adapterId, { env, behaviorModulesForAdapter, requiredCap
   return {
     adapterDigest,
     executablePathDigest: resolved?.digest ?? null,
+    executablePath: resolved?.path ?? undefined,
     installedVersion: installedVersionOverride ?? probeExecutableVersion(adapterId, { env }),
     runtimeVersion: undefined,
-    requiredCapabilities,
+    requiredCapabilities: requiredCapabilities ?? requiredCapabilitiesFor(adapterId),
   };
+}
+
+/**
+ * Pure promotion decision for a JUST-recorded receipt. `CANARY_PASSED` is
+ * emitted ONLY when the receipt re-evaluates as fully canary-proven in THIS
+ * environment right now; anything less stays recorded evidence with a typed
+ * stale reason and never claims promotion.
+ */
+export function decideCanaryOutcome({ receipt, binding }) {
+  const staleReason = evaluateReceiptFreshness(receipt, binding);
+  if (staleReason === null) return { code: 'CANARY_PASSED', promoted: true };
+  return { code: 'CANARY_EVIDENCE_RECORDED', promoted: false, staleReason };
 }
 
 /**

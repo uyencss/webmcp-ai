@@ -24,7 +24,6 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const { resolveOrchestrationRoots } = await import(join(root, 'src/orchestration/paths.mjs'));
 const canaryMod = await import(join(root, 'src/orchestration/canary.mjs'));
-const adaptersIndex = await import(join(root, 'src/orchestration/adapters/index.mjs'));
 
 function emitJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 1)}\n`);
@@ -191,14 +190,14 @@ async function scenarioOwnedProcess() {
 }
 
 /**
- * Public supervisor lifecycle proof for the owned-process canary: a real
- * supervisor is started against a scratch state root and the fixture worker
- * runs through the PUBLIC operation table — task.create → dispatch.start →
- * delivery.wait → coordination.inspect — never through direct adapter calls.
- * Generic across adapters: provider kinds assemble their REAL trusted config
- * (binaries from env) through createPublicAdapters.
+ * Public supervisor lifecycle proof, GENERIC across adapters: a real
+ * supervisor is driven through the PUBLIC operation table — task.create →
+ * dispatch.start → delivery.wait → coordination.inspect — and this phase IS
+ * the prompt round trip. One bounded model interaction proves launch, SSE/
+ * stream progress, the exact reply text and clean settlement simultaneously;
+ * no duplicate model prompts are spent elsewhere.
  */
-async function runPublicSupervisorPhase(targetKind = 'owned-process') {
+async function runPublicSupervisorPhase(targetKind, { objective = 'Reply with exactly: ok' } = {}) {
   const stateMod = await import(join(root, 'src/orchestration/paths.mjs'));
   const authorityMod = await import(join(root, 'src/orchestration/authority.mjs'));
   const ipcMod = await import(join(root, 'src/orchestration/ipc.mjs'));
@@ -280,7 +279,7 @@ async function runPublicSupervisorPhase(targetKind = 'owned-process') {
     );
 
     const created = await call('task.create', {
-      packet: { objective: 'Reply with exactly: ok', workspace, allowedReadRoots: [workspace], allowedWriteRoots: [] },
+      packet: { objective, workspace, allowedReadRoots: [workspace], allowedWriteRoots: [] },
     });
     if (!created.ok) return { pass: false, evidence: { reason: `task.create failed: ${created.error?.code ?? '?'}` } };
     const taskId = created.result.taskId;
@@ -290,12 +289,18 @@ async function runPublicSupervisorPhase(targetKind = 'owned-process') {
 
     const seen = new Set();
     let cursor = 0;
-    const deadline = Date.now() + Math.min(timeoutMs, 30_000);
+    let progressEvents = 0;
+    let doneSummary = null;
+    const deadline = Date.now() + Math.min(timeoutMs, 90_000);
     for (;;) {
       const wait = await call('delivery.wait', { afterSequence: cursor, timeoutMs: 2_000 });
       if (!wait.ok) break;
       for (const delivery of wait.result.deliveries ?? []) {
         seen.add(delivery.type);
+        if (delivery.type === 'progress') progressEvents += 1;
+        if (delivery.type === 'worker_done') {
+          doneSummary = String(delivery.payload?.summary ?? '').trim();
+        }
         cursor = Math.max(cursor, delivery.sequence);
       }
       if (seen.has('worker_done') && seen.has('cleanup_recorded')) break;
@@ -305,8 +310,20 @@ async function runPublicSupervisorPhase(targetKind = 'owned-process') {
     const inspect = await call('coordination.inspect', {});
     const state = inspect.ok ? inspect.result.dispatches?.[dispatchId]?.state : null;
     const outcome = inspect.ok ? inspect.result.dispatches?.[dispatchId]?.terminalOutcome : null;
-    const pass = seen.has('worker_started') && seen.has('worker_done') && seen.has('cleanup_recorded') && state === 'settled' && outcome === 'completed';
-    return { pass, evidence: { publicLifecycleEvents: [...seen].sort(), dispatchState: state, terminalOutcome: outcome } };
+    const settled = state === 'settled';
+    const completed = outcome === 'completed';
+    const pass = seen.has('worker_started') && seen.has('worker_done') && seen.has('cleanup_recorded') && settled && completed;
+    return {
+      pass,
+      startedOk: true,
+      progressEvents,
+      doneSummary,
+      cleanupDisposition: null,
+      sessionId: startResponse.result.sessionId ?? null,
+      settled,
+      completed,
+      evidence: { publicLifecycleEvents: [...seen].sort(), dispatchState: state, terminalOutcome: outcome },
+    };
   } finally {
     if (sup) await sup.stop?.().catch(() => {});
   }
@@ -338,36 +355,12 @@ async function scenarioOpenCodeServer() {
     }
     capabilities.launch = 'pass';
 
-    const session = await adapter.createSession(started.runtime);
-    const deleted = await adapter.requestJson(
-      started.runtime,
-      'DELETE',
-      `/session/${encodeURIComponent(session.sessionId)}`,
-    );
-    if (!deleted.ok) throw new Error('session delete failed over the documented surface');
-    capabilities.progressStream = 'unsupported';
-
-    if (withPrompt) {
-      try {
-        const created = await adapter.createSession(started.runtime);
-        await adapter.promptAsync(started.runtime, created.sessionId, 'Reply with exactly: ok');
-        const deadline = Date.now() + Math.min(timeoutMs, 90_000);
-        let finalText = null;
-        while (Date.now() < deadline) {
-          const view = await adapter.readSession(started.runtime, created.sessionId);
-          const status = view?.status ?? (Array.isArray(view?.messages) && view.messages.length > 0 ? 'idle' : null);
-          if (status === 'idle') {
-            finalText = JSON.stringify(view ?? {}).slice(0, 200_000);
-            break;
-          }
-          await new Promise((resolveTick) => setTimeout(resolveTick, 500));
-        }
-        if (finalText === null) throw new Error('prompt round trip did not settle before the bound');
-        capabilities.promptRoundTrip = /ok/i.test(finalText) ? 'pass' : 'fail';
-      } catch {
-        capabilities.promptRoundTrip = 'fail';
-      }
-    }
+    // The PUBLIC supervisor phase IS the prompt round trip: SSE progress and
+    // the exact reply text are earned there in a single bounded model call.
+    const phase = await runPublicSupervisorPhase('opencode-server');
+    capabilities.progressStream = (phase.progressEvents ?? 0) > 0 ? 'pass' : 'fail';
+    capabilities.promptRoundTrip = phase.doneSummary?.toLowerCase() === 'ok' ? 'pass' : 'fail';
+    capabilities.publicSupervisorLifecycle = phase.pass ? 'pass' : 'fail';
 
     const dbInsideRuntimeTree = String(started.runtime.dbPath).includes('webmcp-ai-runtime');
     if (!dbInsideRuntimeTree) throw new Error('runtime database escaped the owned tree');
@@ -375,34 +368,16 @@ async function scenarioOpenCodeServer() {
     if (stopReceipt.disposition !== 'stopped') throw new Error(`unexpected stop disposition ${stopReceipt.disposition}`);
     capabilities.cleanup = stopReceipt.released ? 'pass' : 'fail';
 
-    if (withPublicPhase) {
-      const publicPhase = await runPublicSupervisorPhase('opencode-server');
-      capabilities.publicSupervisorLifecycle = publicPhase.pass ? 'pass' : 'fail';
-      return {
-        ok: publicPhase.pass,
-        evidence: {
-          healthOk: true,
-          sessionLifecycleOk: true,
-          databaseIdentity: started.runtime.databaseIdentity.slice(0, 16),
-          isolatedDb: true,
-          stopDisposition: stopReceipt.disposition,
-          promptRoundTrip: withPrompt ? capabilities.promptRoundTrip : 'unsupported',
-          ...publicPhase.evidence,
-        },
-        capabilities,
-        executableVersion: installedVersion,
-      };
-    }
-
     return {
-      ok: Object.entries(capabilities).every(([name, verdict]) => name === 'publicSupervisorLifecycle' || verdict !== 'fail'),
+      ok: Object.values(capabilities).every((verdict) => verdict === 'pass'),
       evidence: {
         healthOk: true,
-        sessionLifecycleOk: true,
         databaseIdentity: started.runtime.databaseIdentity.slice(0, 16),
         isolatedDb: true,
         stopDisposition: stopReceipt.disposition,
-        promptRoundTrip: withPrompt ? capabilities.promptRoundTrip : 'unsupported',
+        sseProgressEvents: phase.progressEvents,
+        doneSummary: phase.doneSummary,
+        ...phase.evidence,
       },
       capabilities,
       executableVersion: installedVersion,
@@ -419,84 +394,34 @@ async function scenarioClaudeStream() {
   if (!installedVersion) {
     return { notReady: true, reason: 'claude binary did not answer a bounded --version probe' };
   }
-  // Auth pre-check: a tiny direct -p turn surfaces expired OAuth without any
-  // login attempt; the harness never refreshes credentials itself.
-  const authProbe = spawnSync(binPath, ['-p', '--output-format', 'json', 'Reply with exactly: ok'], {
-    cwd: scratch,
-    shell: false,
-    encoding: 'utf8',
-    timeout: 60_000,
-    env,
-    input: '',
-  });
-  const probeOut = String(authProbe.stdout ?? '');
-  if (/failed to authenticate|authentication_failed|oauth session expired/i.test(probeOut)) {
-    return {
-      notReady: true,
-      reason: 'claude authentication is expired or missing; refresh it yourself outside this harness',
-    };
-  }
+  // NOTE: there is NO separate model-call authentication precheck. Auth
+  // problems surface through the public phase itself and simply fail the
+  // scenario; the harness never spends an extra model prompt on probing.
   const adapter = claudeMod.createClaudeStreamAdapter({
     claudeBin: binPath,
     stateDir: join(scratch, 'state'),
   });
   const capabilities = capabilityScaffold();
 
-  // Two-prompt SESSION-RESUME protocol (contract v1): turn one runs in its
-  // own process and must return EXACTLY `ok`; turn two starts a SECOND
-  // process resumed with --resume <sessionId> and must return EXACTLY
-  // `ping-pong`. Anything else fails its specific capability.
-  function collectResultTexts(eventLog) {
-    return eventLog
-      .filter((entry) => entry.type === 'worker_done')
-      .map((entry) => {
-        try {
-          const payload = JSON.parse(entry.blob);
-          return String(payload.summary ?? '').trim();
-        } catch {
-          return '';
-        }
-      });
-  }
-
-  const firstEvents = [];
-  let spawned = await adapter.spawn({
-    task: { taskId: 'task_canary', workspace: scratch, objective: 'Reply with exactly: ok' },
-    dispatch: { dispatchId: 'disp_canary', bindingId: 'worker_canary', taskId: 'task_canary', fenceEpoch: 1 },
-    emit: (type, payload) => firstEvents.push({ type, blob: JSON.stringify(payload ?? {}).slice(0, 400) }),
-  });
-  registerCleanup('claude worker stop', async () => {
-    spawned?.binding?.__child?.kill?.('SIGKILL');
-  });
-  if (spawned.ok === false) throw new Error(`spawn rejected: ${spawned.error?.code ?? 'unknown'}`);
-  capabilities.launch = 'pass';
-  // The adapter writes the objective to stdin and closes it; the real `-p`
-  // process settles on its own.
-  const terminal1 = await spawned.done;
-  const blobs1 = firstEvents.map((entry) => entry.blob).join(' ');
-  if (/Failed to authenticate|authentication_failed|oauth session expired/i.test(blobs1)) {
-    return {
-      notReady: true,
-      reason: 'claude authentication is expired or missing; refresh it yourself outside this harness',
-    };
-  }
-  capabilities.progressStream = firstEvents.some((entry) => entry.type === 'progress') ? 'pass' : 'fail';
-  const firstTexts = collectResultTexts(firstEvents);
-  capabilities.promptRoundTrip = firstTexts.includes('ok') ? 'pass' : 'fail';
-  const sessionId = spawned.binding?.sessionId ?? terminal1?.sessionId ?? null;
+  // The PUBLIC supervisor phase IS turn one: launch, stream progress and the
+  // exact `ok` round trip are all earned there.
+  const phase = await runPublicSupervisorPhase('claude-stream');
+  capabilities.launch = phase.startedOk ? 'pass' : 'fail';
+  capabilities.progressStream = (phase.progressEvents ?? 0) > 0 ? 'pass' : 'fail';
+  capabilities.promptRoundTrip = phase.doneSummary?.toLowerCase() === 'ok' ? 'pass' : 'fail';
+  capabilities.publicSupervisorLifecycle = phase.pass ? 'pass' : 'fail';
+  const sessionId = phase.sessionId ?? null;
 
   if (!sessionId || capabilities.promptRoundTrip !== 'pass') {
     // Without a proven session id or a correct first answer there is nothing
     // to resume — record honest unsupported instead of pretending.
     capabilities.continuationResume = sessionId ? 'fail' : 'unsupported';
-    capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal1.terminalType) ? 'pass' : 'fail';
+    capabilities.cleanup = capabilities.publicSupervisorLifecycle;
     return {
       ok: false,
       evidence: {
-        terminalType: terminal1.terminalType,
-        exitCode: terminal1.exitCode ?? null,
-        observedEvents: [...new Set(firstEvents.map((entry) => entry.type))].sort(),
-        resultTexts: firstTexts,
+        observedEvents: ['public-phase'],
+        resultTexts: [phase.doneSummary],
         sessionId,
       },
       capabilities,
@@ -504,7 +429,8 @@ async function scenarioClaudeStream() {
     };
   }
 
-  // Turn two: a SECOND process, resumed from the recorded session.
+  // Turn two: a SECOND process resumed from the recorded session proves
+  // continuation as its own distinct capability (one extra model call).
   const secondEvents = [];
   const second = await adapter.spawn({
     task: { taskId: 'task_canary2', workspace: scratch, objective: 'Reply with exactly: ping-pong' },
@@ -517,45 +443,20 @@ async function scenarioClaudeStream() {
   });
   if (second.ok === false) throw new Error(`resume spawn rejected: ${second.error?.code ?? 'unknown'}`);
   const terminal2 = await second.done;
-  const blobs2 = secondEvents.map((entry) => entry.blob).join(' ');
-  if (/Failed to authenticate|authentication_failed|oauth session expired/i.test(blobs2)) {
-    return {
-      notReady: true,
-      reason: 'claude authentication expired between turns; refresh it yourself outside this harness',
-    };
-  }
-  const secondTexts = collectResultTexts(secondEvents);
+  const secondTexts = secondEvents
+    .filter((entry) => entry.type === 'worker_done')
+    .map((entry) => {
+      try { return String(JSON.parse(entry.blob).summary ?? '').trim(); } catch { return ''; }
+    });
   capabilities.continuationResume = secondTexts.includes('ping-pong') ? 'pass' : 'fail';
-  capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal1.terminalType)
-    && ['worker_done', 'worker_failed'].includes(terminal2.terminalType)
-    ? 'pass'
-    : 'fail';
-  const ok = capabilities.promptRoundTrip === 'pass'
-    && capabilities.continuationResume === 'pass'
-    && capabilities.cleanup === 'pass';
-
-  if (withPublicPhase) {
-    const publicPhase = await runPublicSupervisorPhase('claude-stream');
-    capabilities.publicSupervisorLifecycle = publicPhase.pass ? 'pass' : 'fail';
-    return {
-      ok: ok && publicPhase.pass,
-      evidence: {
-        turnOne: { terminalType: terminal1.terminalType, resultTexts: firstTexts },
-        turnTwo: { terminalType: terminal2.terminalType, resultTexts: secondTexts },
-        observedEvents: [...new Set([...firstEvents, ...secondEvents].map((entry) => entry.type))].sort(),
-        ...publicPhase.evidence,
-      },
-      capabilities,
-      executableVersion: installedVersion,
-    };
-  }
+  capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal2.terminalType) ? 'pass' : 'fail';
 
   return {
-    ok,
+    ok: Object.values(capabilities).every((verdict) => verdict === 'pass'),
     evidence: {
-      turnOne: { terminalType: terminal1.terminalType, resultTexts: firstTexts },
+      turnOne: { doneSummary: phase.doneSummary, progressEvents: phase.progressEvents },
       turnTwo: { terminalType: terminal2.terminalType, resultTexts: secondTexts },
-      observedEvents: [...new Set([...firstEvents, ...secondEvents].map((entry) => entry.type))].sort(),
+      modelCallBudgetUsed: 2,
     },
     capabilities,
     executableVersion: installedVersion,
@@ -563,7 +464,6 @@ async function scenarioClaudeStream() {
 }
 
 async function scenarioCodexExec() {
-  const codexMod = await import(join(root, 'src/orchestration/adapters/codex-exec.mjs'));
   const binPath = env.CODEX_BIN ?? 'codex';
   const installedVersion = await boundedVersionProbe(binPath, ['--version']);
   if (!installedVersion) {
@@ -573,48 +473,25 @@ async function scenarioCodexExec() {
   const workspace = join(scratch, 'repo');
   const gitInit = spawnSync('git', ['init', '-q', workspace], { shell: false, encoding: 'utf8', env });
   if (gitInit.status !== 0) throw new Error('could not prepare a disposable git workspace');
-  const adapter = codexMod.createCodexExecAdapter({
-    codexBin: binPath,
-    stateDir: join(scratch, 'state'),
-  });
-  const events = [];
-  const capabilities = capabilityScaffold();
-  const spawned = await adapter.spawn({
-    task: { taskId: 'task_canary', workspace, objective: 'Reply with exactly: ok' },
-    dispatch: { dispatchId: 'disp_canary', bindingId: 'worker_canary', taskId: 'task_canary', fenceEpoch: 1 },
-    emit: (type) => events.push(type),
-  });
-  registerCleanup('codex worker stop', async () => {
-    spawned?.binding?.__child?.kill?.('SIGKILL');
-  });
-  if (spawned.ok === false) throw new Error(`spawn rejected: ${spawned.error?.code ?? 'unknown'}`);
-  capabilities.launch = 'pass';
-  const terminal = await spawned.done;
-  capabilities.progressStream = events.some((entry) => entry === 'progress') ? 'pass' : 'fail';
-  capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal.terminalType) ? 'pass' : 'fail';
 
-  if (withPublicPhase) {
-    const publicPhase = await runPublicSupervisorPhase('codex-exec');
-    capabilities.publicSupervisorLifecycle = publicPhase.pass ? 'pass' : 'fail';
-    return {
-      ok: publicPhase.pass && terminal.terminalType === 'worker_done',
-      evidence: {
-        terminalType: terminal.terminalType,
-        exitCode: terminal.exitCode ?? null,
-        observedEvents: [...new Set(events)].sort(),
-        ...publicPhase.evidence,
-      },
-      capabilities,
-      executableVersion: installedVersion,
-    };
-  }
+  // The PUBLIC supervisor phase is the ENTIRE codex scenario: one bounded
+  // model call proves launch, stream progress, the EXACT reply text and
+  // settlement through the public operation table.
+  const phase = await runPublicSupervisorPhase('codex-exec');
+  const capabilities = capabilityScaffold();
+  capabilities.launch = phase.startedOk ? 'pass' : 'fail';
+  capabilities.progressStream = (phase.progressEvents ?? 0) > 0 ? 'pass' : 'fail';
+  capabilities.promptRoundTrip = phase.doneSummary?.toLowerCase() === 'ok' ? 'pass' : 'fail';
+  capabilities.cleanup = phase.pass ? 'pass' : 'fail';
+  capabilities.publicSupervisorLifecycle = phase.pass ? 'pass' : 'fail';
 
   return {
-    ok: terminal.terminalType === 'worker_done',
+    ok: Object.values(capabilities).every((verdict) => verdict === 'pass'),
     evidence: {
-      terminalType: terminal.terminalType,
-      exitCode: terminal.exitCode ?? null,
-      observedEvents: [...new Set(events)].sort(),
+      doneSummary: phase.doneSummary,
+      progressEvents: phase.progressEvents,
+      modelCallBudgetUsed: 1,
+      ...phase.evidence,
     },
     capabilities,
     executableVersion: installedVersion,
@@ -667,10 +544,41 @@ const receipt = canaryMod.recordCanaryReceipt(roots.stateRoot, {
   evidence: scenario.evidence,
 });
 
+// Promotion decision is PURE and exact: the just-written receipt must
+// re-evaluate as canary-proven in THIS environment right now (adapter
+// digest, canonical executable path + content digest, version, runtime AND
+// every required per-adapter capability). Anything less stays recorded
+// evidence under a DIFFERENT code and never claims passed/promoted.
+const decision = canaryMod.decideCanaryOutcome({
+  receipt,
+  binding: {
+    adapterDigest: receipt.adapterDigest,
+    executablePathDigest: receipt.executablePathDigest,
+    executablePath: receipt.executablePath,
+    installedVersion: receipt.executableVersion,
+    runtimeVersion: receipt.runtimeVersion,
+    requiredCapabilities: canaryMod.requiredCapabilitiesFor(adapterId),
+  },
+});
+
+if (!decision.promoted) {
+  emitJson({
+    ok: false,
+    code: 'CANARY_EVIDENCE_RECORDED',
+    message: `evidence recorded; promotion refused (${decision.staleReason})`,
+    adapterId,
+    staleReason: decision.staleReason,
+    requiredCapabilities: canaryMod.requiredCapabilitiesFor(adapterId),
+    receiptPath: canaryMod.canaryReceiptPath(roots.stateRoot, adapterId),
+  });
+  process.exit(6);
+}
+
 emitJson({
   ok: true,
   code: 'CANARY_PASSED',
   adapterId,
+  maturityNow: 'canary-proven',
   receiptPath: canaryMod.canaryReceiptPath(roots.stateRoot, adapterId),
   receipt: {
     createdAt: receipt.createdAt,
@@ -678,14 +586,4 @@ emitJson({
     runtimeVersion: receipt.runtimeVersion,
     scenario: receipt.scenario,
   },
-  maturityNow: adaptersIndex.computeAdapterMaturity(
-    { id: adapterId, maturity: 'fixture-only' },
-    {
-      canaryReceipts: [receipt],
-      adapterDigest: receipt.adapterDigest,
-      executablePathDigest: receipt.executablePathDigest,
-      installedVersion: receipt.executableVersion,
-      runtimeVersion: receipt.runtimeVersion,
-    },
-  ),
 });
