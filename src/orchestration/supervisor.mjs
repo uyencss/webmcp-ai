@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
@@ -562,6 +562,20 @@ export async function createSupervisor(options = {}) {
         'mutable dispatch requires preventive confinement (a disposable workspace) before launch',
       );
     }
+    // A confinement root that does not exist (or is not a real directory)
+    // cannot preventively confine anything — refuse instead of pretending.
+    if (!isAbsolute(trustedConfig.disposableRoot)) {
+      throw new AiCliError('POLICY_DENIED', 'disposable workspace root must be an absolute path');
+    }
+    let disposableStats = null;
+    try {
+      disposableStats = lstatSync(trustedConfig.disposableRoot);
+    } catch {
+      throw new AiCliError('POLICY_DENIED', 'disposable workspace root does not exist; create it before dispatching mutable work');
+    }
+    if (!disposableStats.isDirectory()) {
+      throw new AiCliError('POLICY_DENIED', 'disposable workspace root must be a directory');
+    }
     for (const root of packet.allowedWriteRoots) {
       if (!isAbsolute(root) || relative(trustedConfig.disposableRoot, root).startsWith('..')) {
         throw new AiCliError(
@@ -948,21 +962,57 @@ export async function createSupervisor(options = {}) {
       return stop;
     },
     'dispatch.verify': async (input) => {
+      // Strict input contract: verification evidence is NEVER caller
+      // supplied. Baseline, worker outcome and acceptance commands come from
+      // supervisor-owned durable state and the trusted Task packet only.
+      const allowedVerifyFields = new Set(['taskId', 'dispatchId']);
+      const unknownFields = Object.keys(input ?? {}).filter((key) => !allowedVerifyFields.has(key));
+      if (unknownFields.length > 0) {
+        throw new AiCliError(
+          'ORCHESTRATION_INVALID_INPUT',
+          `dispatch.verify has forbidden field(s): ${unknownFields.sort().join(', ')}`,
+        );
+      }
       const verify = verifyDispatch ?? defaultVerifyDispatch;
       if (!verify) throw unsupportedAdapterBoundary('dispatch.verify');
       const taskId = input.taskId;
-      const dispatchId = input.dispatchId ?? input.taskId;
       const task = store.state.tasks[taskId];
       if (!task) throw new AiCliError('TASK_NOT_FOUND', `no task ${taskId}`);
       const packet = taskPackets.get(taskId);
-      let baseline = input.baseline ?? packet?.baseline ?? null;
-      if (!baseline) {
-        // The supervisor-owned pre-dispatch baseline persisted at start time
-        // is the authoritative verification input.
-        const baselinePath = join(layout.coordinationDir, 'tasks', `${taskId}.baseline.json`);
-        if (existsSync(baselinePath)) {
-          try { baseline = JSON.parse(readFileSync(baselinePath, 'utf8')); } catch { baseline = null; }
+      if (!packet) {
+        throw new AiCliError('TASK_NOT_FOUND', `no trusted packet recorded for ${taskId}`);
+      }
+
+      // The verified dispatch must be the one THIS task owns and it must have
+      // settled durably (terminal outcome + resource reconciliation).
+      const candidates = Object.values(store.state.dispatches)
+        .filter((entry) => entry.taskId === taskId);
+      let dispatch = null;
+      if (typeof input.dispatchId === 'string') {
+        dispatch = store.state.dispatches[input.dispatchId] ?? null;
+        if (!dispatch || dispatch.taskId !== taskId) {
+          throw new AiCliError('DISPATCH_NOT_FOUND', `no dispatch ${input.dispatchId} bound to task ${taskId}`);
         }
+      } else if (candidates.length === 1) {
+        dispatch = candidates[0];
+      } else {
+        throw new AiCliError(
+          'ORCHESTRATION_INVALID_INPUT',
+          `task ${taskId} does not identify exactly one dispatch (${candidates.length})`,
+        );
+      }
+      if (dispatch.state !== 'settled' || !dispatch.terminalOutcome) {
+        throw new AiCliError(
+          'ORCHESTRATION_INVALID_INPUT',
+          `dispatch ${dispatch.dispatchId} is ${dispatch.state}; independent verification requires a settled dispatch`,
+        );
+      }
+
+      // Supervisor-owned pre-dispatch baseline sidecar is the ONLY baseline.
+      const baselinePath = join(layout.coordinationDir, 'tasks', `${taskId}.baseline.json`);
+      let baseline = null;
+      if (existsSync(baselinePath)) {
+        try { baseline = JSON.parse(readFileSync(baselinePath, 'utf8')); } catch { baseline = null; }
       }
       if (!baseline) {
         throw new AiCliError(
@@ -970,15 +1020,16 @@ export async function createSupervisor(options = {}) {
           'no pre-dispatch workspace baseline is available for independent verification',
         );
       }
+
       const receipt = await verify({
         coordinationId,
         taskId,
-        dispatchId,
+        dispatchId: dispatch.dispatchId,
         fenceEpoch: store.state.fenceEpoch,
-        task: { ...packet, taskId, workspace: packet?.workspace ?? input.workspace },
+        task: { ...packet, taskId, workspace: packet.workspace },
         baseline,
-        workerOutcome: input.workerOutcome ?? null,
-        commands: input.commands ?? packet?.acceptanceCommands ?? [],
+        workerOutcome: dispatch.terminalOutcome,
+        commands: packet.acceptanceCommands ?? [],
         stateDir: layout.coordinationDir,
         now: Date.now(),
       });
@@ -988,7 +1039,7 @@ export async function createSupervisor(options = {}) {
           taskId,
           payload: {
             taskId,
-            dispatchId,
+            dispatchId: dispatch.dispatchId,
             acceptance: receipt.verdict,
             workerClaimMatched: receipt.workerClaimMatched,
             testsRun: receipt.tests.length,
@@ -998,11 +1049,11 @@ export async function createSupervisor(options = {}) {
         // Indeterminate verification is evidence, never an acceptance state.
         commit({
           type: 'test_verdict_recorded',
-          dispatchId,
-          payload: { dispatchId, verdict: 'indeterminate', reason: 'verification-indeterminate' },
+          dispatchId: dispatch.dispatchId,
+          payload: { dispatchId: dispatch.dispatchId, verdict: 'indeterminate', reason: 'verification-indeterminate' },
         });
       }
-      return { receipt, verdict: receipt.verdict };
+      return { receipt, verdict: receipt.verdict, dispatchId: dispatch.dispatchId };
     },
     'decision-gate.create': async (input) => {
       const gateId = `gate_${randomUUID().slice(0, 8)}`;

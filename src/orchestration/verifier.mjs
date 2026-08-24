@@ -85,19 +85,30 @@ function cano(pathValue) {
 
 function parsePorcelainV2(stdout) {
   const out = [];
-  for (const record of stdout.split('\u0000')) {
+  const records = stdout.split('\u0000');
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
     if (!record) continue;
     if (record.startsWith('1 ')) {
       const fields = record.split(' ');
-      out.push({ x: fields[1]?.[0], y: fields[1]?.[1], path: fields[8] ?? '' });
+      out.push({ x: fields[1]?.[0], y: fields[1]?.[1], path: fields[8] ?? '', origPath: null });
     } else if (record.startsWith('2 ')) {
       const fields = record.split(' ');
-      out.push({ x: fields[1]?.[0], y: fields[1]?.[1], path: fields[9] ?? '' });
+      // In -z format a rename/copy record is followed by the ORIGINAL path as
+      // its own NUL-terminated token.
+      const isRenameOrCopy = fields[1]?.[0] === 'C' || fields[1]?.[0] === 'R';
+      out.push({
+        x: fields[1]?.[0],
+        y: fields[1]?.[1],
+        path: fields[9] ?? '',
+        origPath: isRenameOrCopy ? (records[index + 1] ?? null) : null,
+      });
+      if (isRenameOrCopy) index += 1;
     } else if (record.startsWith('u ')) {
       const fields = record.split(' ');
-      out.push({ x: 'u', y: 'u', path: fields[10] ?? '' });
+      out.push({ x: 'u', y: 'u', path: fields[10] ?? '', origPath: null });
     } else if (record.startsWith('?') || record.startsWith('!')) {
-      out.push({ x: record[0], y: record[0], path: record.slice(2) });
+      out.push({ x: record[0], y: record[0], path: record.slice(2), origPath: null });
     }
   }
   return out;
@@ -328,9 +339,28 @@ export async function verifyDispatch(context) {
       }
     }
     if (!isWorkerChange) continue;
-    if (existsSync(absolute)) {
+    const inAllowedWriteFor = (candidatePath) => (task.allowedWriteRoots ?? []).some(
+      (root) => isWithin(cano(candidatePath), cano(root)),
+    );
+    if (!existsSync(absolute)) {
+      // A tracked/known path disappeared: deletions are writes too and must
+      // never escape the declared write roots.
+      if (!inAllowedWriteFor(absolute)) {
+        violations.push({ kind: 'delete_outside_allowed_roots', path: entryPath });
+      }
+      // A rename whose ORIGINAL path sat outside the write roots moved
+      // content the worker was never allowed to touch.
+      if (entry.origPath) {
+        const origAbsolute = join(baseline.workspaceRoot, String(entry.origPath).replace(/^"|"$/g, ''));
+        if (!inAllowedWriteFor(origAbsolute)) {
+          violations.push({ kind: 'write_outside_allowed_roots', path: entry.origPath });
+        }
+      }
+      continue;
+    }
+    {
       const stats = lstatSync(absolute);
-      const inAllowedWrite = (task.allowedWriteRoots ?? []).some((root) => isWithin(cano(absolute), cano(root)));
+      const inAllowedWrite = inAllowedWriteFor(absolute);
       if (!inAllowedWrite) {
         violations.push({ kind: 'write_outside_allowed_roots', path: entryPath });
       } else if (stats.isSymbolicLink()) {
@@ -343,6 +373,13 @@ export async function verifyDispatch(context) {
         if (!target || !isWithin(target, baseline.workspaceRoot)) {
           violations.push({ kind: 'symlink_escape', path: entryPath });
         }
+      }
+    }
+    // Rename source check for surviving renames as well.
+    if (entry.origPath) {
+      const origAbsolute = join(baseline.workspaceRoot, String(entry.origPath).replace(/^"|"$/g, ''));
+      if (!inAllowedWriteFor(origAbsolute)) {
+        violations.push({ kind: 'write_outside_allowed_roots', path: entry.origPath });
       }
     }
   }
@@ -398,7 +435,10 @@ export async function verifyDispatch(context) {
     && testResults.length > 0
     && testResults.every((result) => result.verdict === 'intended_RED');
 
-  const workerClaimMatched = workerOutcome === 'completed'
+  // The durable worker outcome is supervisor-owned evidence: independent
+  // acceptance requires the worker to have ACTUALLY completed.
+  const workerCompleted = workerOutcome === 'completed';
+  const workerClaimMatched = workerCompleted
     && violations.length === 0
     && protectedPathViolations.length === 0
     && allGreen;
@@ -406,6 +446,11 @@ export async function verifyDispatch(context) {
   let verdict = 'indeterminate';
   if (violations.length > 0 || protectedPathViolations.length > 0 || anyFailed) {
     verdict = 'rejected';
+  } else if (!workerCompleted) {
+    // Green tests over a failed/cancelled worker are a mismatch, never an
+    // acceptance. Truthful resolution: rejected for failed workers,
+    // indeterminate when the worker was cancelled or lost.
+    verdict = workerOutcome === 'failed' ? 'rejected' : 'indeterminate';
   } else if (onlyIntendedRed) {
     verdict = 'indeterminate';
   } else if (allGreen) {

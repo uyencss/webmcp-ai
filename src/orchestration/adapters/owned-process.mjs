@@ -249,6 +249,11 @@ export function createOwnedProcessAdapter(options = {}) {
         });
         child.stderr.on('data', (chunk) => {
           accumulators.set('stderr', (accumulators.get('stderr') ?? '') + chunk.toString('utf8'));
+          // Bounded memory: stderr drains at the same inline threshold as
+          // stdout instead of accumulating until close.
+          if (Buffer.byteLength(accumulators.get('stderr'), 'utf8') >= ORCHESTRATION_LIMITS.maxInlinePayloadBytes * 2) {
+            drain('stderr');
+          }
         });
 
         // 'close' fires after all stdio streams flushed — the only safe

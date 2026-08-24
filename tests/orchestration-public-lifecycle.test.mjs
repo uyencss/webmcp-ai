@@ -281,6 +281,7 @@ test('worker success plus independently failing verification can never become ac
     objective: 'work then fail verification',
     workspace,
     allowedWriteRoots: [workspace],
+    acceptanceCommands: [[process.execPath, '-e', 'process.exit(3)']],
     commandPolicy: { allowedExecutables: [process.execPath] },
   });
   const start = await call('dispatch.start', { taskId, adapterId: 'owned-process' });
@@ -295,10 +296,11 @@ test('worker success plus independently failing verification can never become ac
     if (Date.now() > vDeadline) break;
   }
 
+  // Evidence comes from the trusted Task packet; the request cannot inject
+  // commands anymore (strict contract).
   const verify = await call('dispatch.verify', {
     taskId,
     dispatchId,
-    commands: [[process.execPath, '-e', 'process.exit(3)']],
   }, 'req_verify_fail');
   assert.equal(verify.ok, true, JSON.stringify(verify.error ?? {}));
   assert.equal(verify.result.receipt.verdict, 'rejected');
@@ -319,6 +321,7 @@ test('accepted verification records the canonical acceptance payload and survive
     objective: 'work that passes',
     workspace,
     allowedWriteRoots: [workspace],
+    acceptanceCommands: [[process.execPath, '-e', 'process.exit(0)']],
     commandPolicy: { allowedExecutables: [process.execPath] },
   });
   const start = await call('dispatch.start', { taskId, adapterId: 'owned-process' });
@@ -334,7 +337,6 @@ test('accepted verification records the canonical acceptance payload and survive
 
   const verify = await call('dispatch.verify', {
     taskId,
-    commands: [[process.execPath, '-e', 'process.exit(0)']],
   }, 'req_verify_ok');
   assert.equal(verify.ok, true, JSON.stringify(verify.error ?? {}));
   assert.equal(verify.result.receipt.verdict, 'accepted');

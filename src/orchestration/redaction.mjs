@@ -102,9 +102,14 @@ export function sanitizeValue(value, policy = {}) {
         continue;
       }
       if (SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(key))) {
-        // Only textual values can carry credential material; numbers/booleans
-        // such as token counts pass through untouched.
-        output[key] = typeof entry === 'string' ? REDACTED : entry;
+        // Fail-closed: every value that could carry credential material
+        // collapses to REDACTED. Objects and arrays carried nested secrets
+        // verbatim before (credentials.password, token.value, authorization
+        // arrays); only non-sensitive scalars such as numeric token COUNTS
+        // survive under their own key names.
+        output[key] = typeof entry === 'string' || Array.isArray(entry) || isPlainObject(entry)
+          ? REDACTED
+          : entry;
         continue;
       }
       output[key] = sanitizeValue(entry, policy);
@@ -120,22 +125,29 @@ export function sanitizeEvent(event, context = {}) {
 }
 
 /**
- * Explicit, deterministic text bounding. Oversized values truncate at a byte
- * budget and carry an auditable marker: original size + sha256 digest.
+ * Explicit, deterministic text bounding with a HARD byte cap. The returned
+ * text never exceeds maxBytes — the truncation marker lives INSIDE the
+ * budget, not on top of it.
  */
 export function boundText(text, { maxBytes = 2_000, label = 'text' } = {}) {
-  const originalBytes = Buffer.byteLength(String(text), 'utf8');
+  const source = String(text);
+  const originalBytes = Buffer.byteLength(source, 'utf8');
   if (originalBytes <= maxBytes) {
-    return { text: String(text), truncated: false, originalBytes, digest: digestOfText(text) };
+    return { text: source, truncated: false, originalBytes, digest: digestOfText(text) };
   }
-  let sliced = String(text);
-  // Slice by characters until under the byte budget (UTF-8 safe enough for a
-  // preview; the digest above covers the exact original bytes).
-  sliced = sliced.slice(0, maxBytes);
-  while (Buffer.byteLength(sliced, 'utf8') > maxBytes) sliced = sliced.slice(0, Math.floor(sliced.length / 2));
   const digest = digestOfText(text);
-  const marker = `\n[TRUNCATED ${label} originalBytes=${originalBytes} sha256=${digest}]`;
-  return { text: `${sliced}${marker}`, truncated: true, originalBytes, digest };
+  let marker = `\n[TRUNCATED ${label} originalBytes=${originalBytes} sha256=${digest}]`;
+  if (Buffer.byteLength(marker, 'utf8') > maxBytes) {
+    // Degenerate budgets: keep a minimal honest marker inside the cap.
+    marker = `\n[TRUNCATED ${originalBytes}b ${digest.slice(0, 8)}]`;
+  }
+  const markerBytes = Buffer.byteLength(marker, 'utf8');
+  const keepBudget = Math.max(0, maxBytes - markerBytes);
+  let sliced = source.slice(0, keepBudget);
+  while (Buffer.byteLength(sliced, 'utf8') > keepBudget) sliced = sliced.slice(0, Math.floor(sliced.length / 2));
+  let final = `${sliced}${marker}`;
+  while (Buffer.byteLength(final, 'utf8') > maxBytes) final = final.slice(0, -1);
+  return { text: final, truncated: true, originalBytes, digest };
 }
 
 /**
