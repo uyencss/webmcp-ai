@@ -29,6 +29,8 @@ import {
 import { acquireSupervisorLock, releaseSupervisorLock } from './lock.mjs';
 import { createPlatformIdentityDeps } from './process-identity.mjs';
 import { commitDelivery, openCoordinationStore, persistAck } from './store.mjs';
+import { createWorkerCallbackHandlers } from './worker-callback.mjs';
+import { validateWorkerCallback } from './contracts.mjs';
 import { verifyDispatch as defaultVerifyDispatch } from './verifier.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
@@ -741,6 +743,83 @@ export async function createSupervisor(options = {}) {
     return { ok: true, persisted: true };
   }
 
+  function callbackBindingsMap() {
+    const map = new Map();
+    for (const [dispatchId, entry] of runtimeBindings) {
+      if (entry.record.callbackCapability === undefined) continue;
+      map.set(entry.record.bindingId, {
+        dispatchId,
+        taskId: entry.record.taskId,
+        capabilityToken: entry.record.callbackCapability,
+      });
+    }
+    return map;
+  }
+
+  function workerCallbackOptions() {
+    return {
+      fenceEpoch: () => store.state.fenceEpoch,
+      bindings: callbackBindingsMap(),
+      activeDispatches: () => {
+        const live = new Set();
+        for (const dispatch of Object.values(store.state.dispatches)) {
+          if (NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) live.add(dispatch.dispatchId);
+        }
+        return live;
+      },
+      knownDispatchIds: () => new Set(Object.keys(store.state.dispatches)),
+      dispatchOutcomeOf: (dispatchId) => store.state.dispatches[dispatchId]?.terminalOutcome ?? null,
+      appendDelivery: (type, payload, callbackRef) => {
+        // Duplicates must bypass the generic commit wrapper: they return the
+        // prior durable acknowledgement and never touch the journal.
+        const result = commitDelivery(store, { type, payload, ...(callbackRef ? { callbackRef } : {}) });
+        if (result.duplicate) {
+          return { duplicate: true, acknowledgedSequence: result.acknowledgedSequence };
+        }
+        journal.push(result.delivery);
+        return { sequence: result.delivery.sequence };
+      },
+    };
+  }
+
+  /**
+   * Owner-controlled worker callback ingress. The envelope is validated
+   * against the v0 contract, routed through the handler table and committed
+   * by the single-writer path; duplicates replay the prior durable
+   * acknowledgement without appending.
+   */
+  async function processWorkerCallback(rawCallback, meta = {}) {
+    let callback;
+    try {
+      callback = validateWorkerCallback(rawCallback ?? {});
+    } catch (error) {
+      return {
+        ok: false,
+        error: { code: error.code ?? 'ORCHESTRATION_INVALID_INPUT', message: error.message },
+      };
+    }
+    const handlers = createWorkerCallbackHandlers(workerCallbackOptions());
+    const handler = handlers[callback.operation];
+    if (!handler) {
+      return { ok: false, error: { code: 'UNSUPPORTED_CAPABILITY', message: `no worker callback route for ${callback.operation}` } };
+    }
+    const response = await handler({
+      callback,
+      presentedCapability: meta.presentedCapability ?? callbackBindingsMap().get(callback.bindingId)?.capabilityToken,
+      presentingBindingId: meta.presentingBindingId,
+    });
+    if (!response.ok && response.error) return response;
+    if (response.duplicate) {
+      return {
+        ok: true,
+        duplicate: true,
+        acknowledgedSequence: response.acknowledgedSequence,
+        ...(response.sequence !== undefined ? { sequence: response.sequence } : {}),
+      };
+    }
+    return { ...response, acknowledgedSequence: response.acknowledgedSequence ?? response.sequence };
+  }
+
   return {
     coordinationId,
     endpoint,
@@ -749,5 +828,6 @@ export async function createSupervisor(options = {}) {
     stop,
     __store: store,
     __recordRuntimeBinding,
+    processWorkerCallback,
   };
 }

@@ -315,6 +315,7 @@ const WORKER_CALLBACK_FIELDS = new Set([
   'bindingId',
   'fenceEpoch',
   'operation',
+  'callbackSeq',
   'input',
 ]);
 
@@ -336,6 +337,9 @@ export function validateWorkerCallback(value) {
     dispatchId: requireId(callback.dispatchId, ID_PREFIXES.dispatch, 'callback dispatchId'),
     bindingId: requireId(callback.bindingId, ID_PREFIXES.worker, 'callback bindingId'),
     fenceEpoch: requireInteger(callback.fenceEpoch, 'callback fenceEpoch', { min: 0 }),
+    // Stable per-binding monotonic event identity: the owner's dedupe ledger
+    // is keyed on (bindingId, callbackSeq); content digests detect conflicts.
+    callbackSeq: requireInteger(callback.callbackSeq ?? null, 'callback callbackSeq', { min: 1 }),
     operation: callback.operation,
     input,
   });

@@ -130,14 +130,23 @@ test('adversarial outputs are sanitized: tokens, auth headers, env keys, reasoni
   assert.equal(hostile.reasoning, undefined);
 });
 
-test('worker callbacks cannot inject acceptance commands or acceptance deliveries', async () => {
-  const events = [];
+test('worker callbacks cannot inject acceptance commands or acceptance deliveries', async (t) => {
+  const { layout, store } = seedStore(t, 'cbinject');
+  commitDelivery(store, { type: 'task_created', payload: { taskId: 'task_w' } });
+  commitDelivery(store, { type: 'dispatch_created', payload: { dispatchId: 'disp_w', taskId: 'task_w' } });
+  commitDelivery(store, { type: 'dispatch_state_changed', payload: { dispatchId: 'disp_w', taskId: 'task_w', state: 'active' } });
   const handlers = createWorkerCallbackHandlers({
     coordinationId: 'coord_cb',
-    fenceEpoch: () => 1,
+    fenceEpoch: () => store.state.fenceEpoch,
     bindings: new Map([['worker_w', { dispatchId: 'disp_w', taskId: 'task_w', capabilityToken: 'cap' }]]),
-    activeDispatches: new Set(['disp_w']),
-    appendDelivery: (type, payload) => events.push({ type, payload }),
+    activeDispatches: () => new Set(['disp_w']),
+    knownDispatchIds: () => new Set(Object.keys(store.state.dispatches)),
+    dispatchOutcomeOf: (dispatchId) => store.state.dispatches[dispatchId]?.terminalOutcome ?? null,
+    appendDelivery: (type, payload, callbackRef) => {
+      const result = commitDelivery(store, { type, payload, ...(callbackRef ? { callbackRef } : {}) });
+      if (result.duplicate) return { duplicate: true, acknowledgedSequence: result.acknowledgedSequence };
+      return { sequence: result.delivery.sequence };
+    },
   });
   await handlers['worker.terminal']({
     callback: {
@@ -148,12 +157,13 @@ test('worker callbacks cannot inject acceptance commands or acceptance deliverie
       dispatchId: 'disp_w',
       bindingId: 'worker_w',
       fenceEpoch: 1,
+      callbackSeq: 1,
       operation: 'worker.terminal',
       input: { outcome: 'done', acceptanceCommands: [['curl', 'evil']], verdict: 'GREEN' },
     },
     presentedCapability: 'cap',
   });
-  const serialized = JSON.stringify(events);
+  const serialized = readFileSync(layout.journalPath, 'utf8');
   assert.equal(serialized.includes('acceptance_recorded'), false);
   assert.equal(serialized.includes('curl'), false, 'provider-supplied commands never persist');
 });
@@ -593,28 +603,37 @@ async function require_ocserver() {
   return await import('../src/orchestration/adapters/opencode-server.mjs');
 }
 
-test('worker callback dedupe rejects id reuse with different content', async () => {
+test('worker callback dedupe rejects id reuse with different content', async (t) => {
   const wc = await import('../src/orchestration/worker-callback.mjs');
-  const events = [];
+  const { layout, store } = seedStore(t, 'cbdedupe');
+  commitDelivery(store, { type: 'task_created', payload: { taskId: 'task_d' } });
+  commitDelivery(store, { type: 'dispatch_created', payload: { dispatchId: 'disp_d', taskId: 'task_d' } });
+  commitDelivery(store, { type: 'dispatch_state_changed', payload: { dispatchId: 'disp_d', taskId: 'task_d', state: 'active' } });
   const handlers = wc.createWorkerCallbackHandlers({
     coordinationId: 'coord_d',
-    fenceEpoch: () => 1,
+    fenceEpoch: () => store.state.fenceEpoch,
     bindings: new Map([['worker_d', { dispatchId: 'disp_d', taskId: 'task_d', capabilityToken: 'cap-d' }]]),
-    activeDispatches: new Set(['disp_d']),
-    appendDelivery: (type, payload) => events.push({ type, payload }),
+    activeDispatches: () => new Set(['disp_d']),
+    knownDispatchIds: () => new Set(Object.keys(store.state.dispatches)),
+    dispatchOutcomeOf: (dispatchId) => store.state.dispatches[dispatchId]?.terminalOutcome ?? null,
+    appendDelivery: (type, payload, callbackRef) => {
+      const result = commitDelivery(store, { type, payload, ...(callbackRef ? { callbackRef } : {}) });
+      if (result.duplicate) return { duplicate: true, acknowledgedSequence: result.acknowledgedSequence };
+      return { sequence: result.delivery.sequence };
+    },
   });
   const base = {
     schema: 'webmcp.ai-worker-callback/v0', callbackId: 'cbk_dup', coordinationId: 'coord_d',
     taskId: 'task_d', dispatchId: 'disp_d', bindingId: 'worker_d', fenceEpoch: 1,
-    operation: 'worker.progress', input: { summary: 'first' },
+    operation: 'worker.progress', callbackSeq: 1, input: { summary: 'first' },
   };
   assert.equal((await handlers['worker.progress']({ callback: base, presentedCapability: 'cap-d' })).ok, true);
   const reused = await handlers['worker.progress']({ callback: { ...base, input: { summary: 'different' } }, presentedCapability: 'cap-d' });
   assert.equal(reused.ok, false);
   assert.equal(reused.error.code, 'WORKER_CALLBACK_UNAUTHORIZED');
 
-  await handlers['worker.question']({ callback: { ...base, callbackId: 'cbk_q', operation: 'worker.question', input: { question: 'why' } }, presentedCapability: 'cap-d' });
-  assert.equal(events.some((entry) => entry.type === 'question'), true);
+  await handlers['worker.question']({ callback: { ...base, callbackId: 'cbk_q', operation: 'worker.question', callbackSeq: 2, input: { question: 'why' } }, presentedCapability: 'cap-d' });
+  assert.equal(readFileSync(layout.journalPath, 'utf8').includes('"type":"question"'), true);
 });
 
 test('linux identity probes fail safe to null off-platform', async () => {

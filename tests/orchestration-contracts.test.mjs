@@ -251,9 +251,19 @@ test('worker callbacks reject coordinator operations and unknown envelope fields
     bindingId: 'worker_one',
     fenceEpoch: 1,
     operation: 'worker.heartbeat',
+    callbackSeq: 1,
     input: {},
   };
   assert.deepEqual(validateWorkerCallback(valid).operation, 'worker.heartbeat');
+  assert.throws(
+    () => validateWorkerCallback({ ...valid, callbackSeq: undefined }),
+    (error) => error.code === 'ORCHESTRATION_INVALID_INPUT',
+    'callbacks require a monotonic per-binding callbackSeq',
+  );
+  assert.throws(
+    () => validateWorkerCallback({ ...valid, callbackSeq: 0 }),
+    (error) => error.code === 'ORCHESTRATION_INVALID_INPUT',
+  );
 
   assert.throws(
     () => validateWorkerCallback({ ...valid, operation: 'task.create' }),

@@ -13,7 +13,7 @@ import {
   SNAPSHOT_SCHEMA,
 } from './constants.mjs';
 import { appendDeliveryLine, journalSizeBytes, recoverJournal } from './journal.mjs';
-import { acknowledgeThrough, applyDelivery, createInitialState } from './state-machine.mjs';
+import { acknowledgeThrough, applyDelivery, classifyCallback, createInitialState } from './state-machine.mjs';
 
 const REF_RETENTION_MS = 24 * 60 * 60 * 1000;
 
@@ -30,6 +30,7 @@ function snapshotFromState(state) {
     tasks: state.tasks,
     dispatches: state.dispatches,
     workers: state.workers,
+    workerCallbacks: state.workerCallbacks,
     gates: state.gates,
     escalations: state.escalations,
     interruptEffects: state.interruptEffects,
@@ -137,6 +138,15 @@ export function commitDelivery(store, draft, { clock = () => Date.now(), waiters
   if (!draft || typeof draft.type !== 'string' || !draft.type) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'delivery draft requires a type', { exitCode: 2 });
   }
+  // Durable callback identity is validated BEFORE any journal mutation:
+  // duplicates replay the prior acknowledgement, everything invalid fails
+  // closed without touching durable history.
+  if (draft.callbackRef !== undefined) {
+    const classification = classifyCallback(store.state, draft.callbackRef);
+    if (classification.kind === 'duplicate') {
+      return { delivery: null, duplicate: true, acknowledgedSequence: classification.acknowledgedSequence };
+    }
+  }
   const sequence = store.state.lastSequence + 1;
   const payload = spillLargePayload(store, sequence, draft.payload ?? {}, clock);
 
@@ -148,6 +158,7 @@ export function commitDelivery(store, draft, { clock = () => Date.now(), waiters
     ...(draft.taskId !== undefined ? { taskId: draft.taskId } : {}),
     ...(draft.dispatchId !== undefined ? { dispatchId: draft.dispatchId } : {}),
     ...(draft.bindingId !== undefined ? { bindingId: draft.bindingId } : {}),
+    ...(draft.callbackRef !== undefined ? { callbackRef: draft.callbackRef } : {}),
     type: draft.type,
     time: typeof draft.time === 'string' ? draft.time : new Date(clock()).toISOString(),
     payload,

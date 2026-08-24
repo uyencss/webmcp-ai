@@ -14,6 +14,14 @@ import { createOwnedProcessAdapter } from '../src/orchestration/adapters/owned-p
 import { buildWorkerPacket, createWorkerCallbackHandlers } from '../src/orchestration/worker-callback.mjs';
 import { sanitizeValue } from '../src/orchestration/redaction.mjs';
 import { modeRequiresTierSatisfied } from '../src/orchestration/contracts.mjs';
+import { MANIFEST_SCHEMA } from '../src/orchestration/constants.mjs';
+import { openCoordinationStore, commitDelivery } from '../src/orchestration/store.mjs';
+import {
+  resolveOrchestrationRoots,
+  ensureOrchestrationRoots,
+  createCoordinationLayout,
+} from '../src/orchestration/paths.mjs';
+import { writeAtomicJson } from '../src/orchestration/atomic-file.mjs';
 
 const fakeWorker = fileURLToPath(new URL('./fixtures/orchestration/fake-worker.mjs', import.meta.url));
 
@@ -185,33 +193,43 @@ test('worker packets carry bounded digests and never the prompt or callback secr
 
 test('worker callbacks authorize only their own dispatch and dedupe terminals', async (t) => {
   const stateDir = tempDir(t, 'cb');
-  const events = [];
-  let seq = 0;
-  const append = (type, payload, meta = {}) => {
-    seq += 1;
-    const envelope = {
-      schema: 'webmcp.ai-orchestration-delivery/v0',
-      deliveryId: `del_${seq}`,
-      sequence: seq,
-      coordinationId: 'coord_cb',
-      type,
-      time: new Date().toISOString(),
-      payload,
-      ...meta,
-    };
-    events.push(envelope);
-    return envelope;
+  const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir } });
+  ensureOrchestrationRoots(roots);
+  const layout = createCoordinationLayout(roots.stateRoot, 'coord_cb');
+  writeAtomicJson(layout.manifestPath, {
+    schema: MANIFEST_SCHEMA,
+    coordinationId: 'coord_cb',
+    fenceEpoch: 2,
+    processGeneration: 1,
+    createdAt: new Date().toISOString(),
+    owner: null,
+  });
+  const store = openCoordinationStore(layout);
+  for (const [taskId, dispatchId] of [['task_ok', 'disp_ok'], ['task_other', 'disp_other']]) {
+    commitDelivery(store, { type: 'task_created', payload: { taskId } });
+    commitDelivery(store, { type: 'dispatch_created', payload: { dispatchId, taskId } });
+    commitDelivery(store, { type: 'dispatch_state_changed', payload: { dispatchId, taskId, state: 'active' } });
+  }
+
+  // Callbacks flow through the owner's durable single-writer commit path so
+  // acknowledgement watermarks and exactly-once terminals are real.
+  const appendDelivery = (type, payload, callbackRef) => {
+    const result = commitDelivery(store, { type, payload, ...(callbackRef ? { callbackRef } : {}) });
+    if (result.duplicate) return { duplicate: true, acknowledgedSequence: result.acknowledgedSequence };
+    return { sequence: result.delivery.sequence };
   };
 
   const handlers = createWorkerCallbackHandlers({
     coordinationId: 'coord_cb',
-    fenceEpoch: () => 2,
+    fenceEpoch: () => store.state.fenceEpoch,
     bindings: new Map([
       ['worker_ok', { dispatchId: 'disp_ok', taskId: 'task_ok', capabilityToken: 'cap-ok-token' }],
       ['worker_other', { dispatchId: 'disp_other', taskId: 'task_other', capabilityToken: 'cap-other' }],
     ]),
-    activeDispatches: new Set(['disp_ok']),
-    appendDelivery: append,
+    activeDispatches: () => new Set(['disp_ok']),
+    knownDispatchIds: () => new Set(Object.keys(store.state.dispatches)),
+    dispatchOutcomeOf: (dispatchId) => store.state.dispatches[dispatchId]?.terminalOutcome ?? null,
+    appendDelivery,
   });
 
   const baseCallback = {
@@ -223,6 +241,7 @@ test('worker callbacks authorize only their own dispatch and dedupe terminals', 
     bindingId: 'worker_ok',
     fenceEpoch: 2,
     operation: 'worker.progress',
+    callbackSeq: 1,
     input: { summary: 'working' },
   };
   const ok = await handlers['worker.progress']({
@@ -260,6 +279,7 @@ test('worker callbacks authorize only their own dispatch and dedupe terminals', 
     bindingId: 'worker_ok',
     fenceEpoch: 2,
     operation: 'worker.terminal',
+    callbackSeq: 2,
     input: { outcome: 'done' },
   };
   const firstTerminal = await handlers['worker.terminal']({ callback: terminal, presentedCapability: 'cap-ok-token' });
@@ -271,11 +291,13 @@ test('worker callbacks authorize only their own dispatch and dedupe terminals', 
   const conflictTerminal = {
     ...terminal,
     callbackId: 'cbk_term_conflict',
+    callbackSeq: 3,
     input: { outcome: 'failed' },
   };
   const conflicted = await handlers['worker.terminal']({ callback: conflictTerminal, presentedCapability: 'cap-ok-token' });
   assert.equal(conflicted.ok, true);
-  assert.equal(events.some((entry) => entry.type === 'escalation'), true, 'conflicting terminal appends escalation');
+  assert.equal(conflicted.escalated, true, 'conflicting terminal journals escalation evidence');
+  assert.equal(store.state.dispatches.disp_ok.terminalOutcome, 'completed', 'settled outcome never overwritten');
 
   // Worker terminals may only propose done|failed|cancelled — never acceptance.
   const illegalOutcome = await handlers['worker.terminal']({
@@ -283,7 +305,7 @@ test('worker callbacks authorize only their own dispatch and dedupe terminals', 
     presentedCapability: 'cap-ok-token',
   });
   assert.equal(illegalOutcome.ok, false);
-  assert.equal(events.some((entry) => entry.type === 'acceptance_recorded'), false);
+  assert.equal(readFileSync(layout.journalPath, 'utf8').includes('acceptance_recorded'), false);
 });
 
 function workerEnv(mode, extra = {}) {

@@ -51,6 +51,10 @@ export const COORDINATION_TRANSITIONS = Object.freeze({
 const MAX_RECEIPT_JSON_BYTES = 4096;
 const MAX_ESCALATIONS = 256;
 const MAX_INTERRUPT_EFFECTS = 256;
+// Bounded per-binding dedupe window. Compaction below the window is safe:
+// any replay at seq <= lastSeq without a retained digest classifies as stale
+// and can never mutate committed (terminal) history.
+export const CALLBACK_DEDUPE_WINDOW = 128;
 
 function invalid(message, code = 'ORCHESTRATION_INVALID_INPUT') {
   return new AiCliError(code, message, { exitCode: 2 });
@@ -99,6 +103,7 @@ export function createInitialState(manifest) {
     tasks: Object.freeze({}),
     dispatches: Object.freeze({}),
     workers: Object.freeze({}),
+    workerCallbacks: Object.freeze({}),
     gates: Object.freeze({}),
     escalations: Object.freeze([]),
     interruptEffects: Object.freeze([]),
@@ -399,6 +404,67 @@ export function acknowledgeThrough(state, sequence) {
   return deepFreeze({ ...state, acknowledgedThrough: sequence });
 }
 
+function callbackRecordFor(state, bindingId) {
+  const record = state.workerCallbacks?.[bindingId];
+  if (!record) return { lastSeq: 0, recent: [] };
+  return record;
+}
+
+/**
+ * Pure pre-append classification of a worker callback's durable identity.
+ * The commit path consults this BEFORE any journal write:
+ * - valid-next  -> safe to append and advance the watermark atomically;
+ * - duplicate   -> replay the prior committed acknowledgement verbatim;
+ * - conflict    -> same identity, different content: fail closed;
+ * - stale       -> below the retained window without a comparable digest;
+ * - gap         -> out-of-order future event.
+ */
+export function classifyCallback(state, callbackRef) {
+  if (!isPlainObject(callbackRef)) throw invalid('callbackRef must be an object');
+  const bindingId = requireId(callbackRef.bindingId, ID_PREFIXES.worker, 'callbackRef.bindingId');
+  const seq = requireInteger(callbackRef.seq ?? null, 'callbackRef.seq', { min: 1 });
+  const digest = typeof callbackRef.digest === 'string' && callbackRef.digest.length > 0
+    ? callbackRef.digest
+    : null;
+  if (!digest) throw invalid('callbackRef requires a content digest');
+  const record = callbackRecordFor(state, bindingId);
+  if (seq === record.lastSeq + 1) return { kind: 'valid-next', bindingId, seq };
+  if (seq > record.lastSeq + 1) {
+    throw invalid(
+      `callback sequence gap for ${bindingId}: expected ${record.lastSeq + 1}, received ${seq}`,
+      'ORCHESTRATION_EVENT_GAP',
+    );
+  }
+  // seq <= lastSeq: a committed identity is being replayed.
+  const retained = record.recent.find((entry) => entry.seq === seq);
+  if (retained) {
+    if (retained.digest === digest) {
+      return { kind: 'duplicate', bindingId, seq, acknowledgedSequence: retained.atSequence };
+    }
+    throw invalid(`callback id reused with different content at ${bindingId}:${seq}`, 'WORKER_CALLBACK_UNAUTHORIZED');
+  }
+  throw invalid(`stale callback replay for ${bindingId} at ${seq}`, 'ORCHESTRATION_EVENT_GAP');
+}
+
+/** Advance the durable per-binding watermark inside the same transaction. */
+function applyCallbackAdvance(next, callbackRef) {
+  const classification = classifyCallback(next, callbackRef);
+  if (classification.kind !== 'valid-next') {
+    throw invalid('callback advance attempted for a non-valid-next classification', 'ORCHESTRATION_EVENT_GAP');
+  }
+  const record = callbackRecordFor(next, classification.bindingId);
+  const recent = [
+    ...record.recent,
+    { seq: classification.seq, digest: callbackRef.digest, atSequence: next.lastSequence },
+  ].slice(-1 * CALLBACK_DEDUPE_WINDOW);
+  return withMutations(next, {
+    workerCallbacks: {
+      ...next.workerCallbacks,
+      [classification.bindingId]: Object.freeze({ lastSeq: classification.seq, recent }),
+    },
+  });
+}
+
 export function applyDelivery(state, delivery) {
   if (!isPlainObject(delivery)) throw invalid('delivery must be an object');
   if (!DELIVERY_TYPES.includes(delivery.type)) {
@@ -423,8 +489,7 @@ export function applyDelivery(state, delivery) {
   const base = { ...state, lastSequence: sequence };
 
   let next;
-  switch (delivery.type) {
-    case 'coordination_created':
+  switch (delivery.type) {    case 'coordination_created':
     case 'heartbeat':
     case 'progress':
     case 'worker_started':
@@ -565,5 +630,11 @@ export function applyDelivery(state, delivery) {
       throw invalid(`unhandled delivery type: ${delivery.type}`);
   }
 
+  // Worker callback identity advances the durable watermark in the SAME
+  // transaction that appends the event, so retries and restarts observe one
+  // committed acknowledgement per (bindingId, seq).
+  if (delivery.callbackRef !== undefined) {
+    next = applyCallbackAdvance(next ?? base, delivery.callbackRef);
+  }
   return deepFreeze({ ...next, updatedAt: time });
 }

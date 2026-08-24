@@ -13,16 +13,37 @@
     "bindingId",
     "fenceEpoch",
     "operation",
-    "input"
+    "input",
+    "callbackSeq"
   ],
   "properties": {
-    "schema": { "const": "webmcp.ai-worker-callback/v0" },
-    "callbackId": { "type": "string", "pattern": "^cbk_" },
-    "coordinationId": { "type": "string", "pattern": "^coord_" },
-    "taskId": { "type": "string", "pattern": "^task_" },
-    "dispatchId": { "type": "string", "pattern": "^disp_" },
-    "bindingId": { "type": "string", "pattern": "^worker_" },
-    "fenceEpoch": { "type": "integer", "minimum": 0 },
+    "schema": {
+      "const": "webmcp.ai-worker-callback/v0"
+    },
+    "callbackId": {
+      "type": "string",
+      "pattern": "^cbk_"
+    },
+    "coordinationId": {
+      "type": "string",
+      "pattern": "^coord_"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^task_"
+    },
+    "dispatchId": {
+      "type": "string",
+      "pattern": "^disp_"
+    },
+    "bindingId": {
+      "type": "string",
+      "pattern": "^worker_"
+    },
+    "fenceEpoch": {
+      "type": "integer",
+      "minimum": 0
+    },
     "operation": {
       "enum": [
         "worker.heartbeat",
@@ -32,6 +53,12 @@
         "worker.terminal"
       ]
     },
-    "input": { "type": "object" }
+    "input": {
+      "type": "object"
+    },
+    "callbackSeq": {
+      "type": "integer",
+      "minimum": 1
+    }
   }
 }

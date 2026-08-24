@@ -63,20 +63,45 @@ export function generateDispatchCapabilityToken() {
   return randomBytes(24).toString('hex');
 }
 
+function requireCallbackSeq(callback) {
+  if (!Number.isInteger(callback?.callbackSeq) || callback.callbackSeq < 1) {
+    throw new AiCliError(
+      'ORCHESTRATION_INVALID_INPUT',
+      'worker callbacks require a positive integer callbackSeq (per-binding monotonic identity)',
+      { exitCode: 2 },
+    );
+  }
+  return callback.callbackSeq;
+}
+
+function callbackRefFor(bindingId, callback) {
+  const seq = requireCallbackSeq(callback);
+  const digestValue = digest({ operation: callback.operation, input: callback.input ?? null });
+  return { bindingId, seq, digest: digestValue };
+}
+
 /**
  * The exact internal worker handler table. Each entry verifies callback
  * identity/digest, Dispatch capability, active binding and epoch before
- * mapping onto the closed Delivery registry.
+ * delegating to the owner's single-writer commit path. Every commit carries a
+ * verified callbackRef so acknowledgement watermarks persist durably:
+ *
+ * - duplicate (any seq <= lastSeq with matching retained digest) returns the
+ *   PRIOR committed acknowledgement without appending;
+ * - stale/gap/conflicting replays fail closed through the classifier;
+ * - terminal settlement is exactly-once across retries and supervisor
+ *   restarts; conflicting outcomes escalate without overwriting history.
  */
 export function createWorkerCallbackHandlers(options) {
-  const seenCallbacks = new Map(); // callbackId -> digest
-  const terminalOutcomes = new Map(); // dispatchId -> proposed outcome
-
-  function authorize(callback, presentedCapability, presentingBindingId) {
+  function resolveBinding(callback) {
     if (!options.bindings.has(callback.bindingId)) {
       throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', 'unknown worker binding');
     }
-    const binding = options.bindings.get(callback.bindingId);
+    return options.bindings.get(callback.bindingId);
+  }
+
+  function authorize(callback, presentedCapability, presentingBindingId) {
+    const binding = resolveBinding(callback);
     if (presentingBindingId !== undefined && presentingBindingId !== callback.bindingId) {
       throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', 'callback identity does not match the presenting binding');
     }
@@ -89,40 +114,63 @@ export function createWorkerCallbackHandlers(options) {
     if (callback.fenceEpoch !== options.fenceEpoch()) {
       throw new AiCliError('STALE_COORDINATOR_EPOCH', 'worker used a stale fence epoch');
     }
-    if (typeof options.activeDispatches === 'function'
-      ? !options.activeDispatches().has(binding.dispatchId)
-      : !options.activeDispatches.has(binding.dispatchId)) {
+    return binding;
+  }
+
+  function requireLiveDispatch(binding) {
+    const isActive = typeof options.activeDispatches === 'function'
+      ? options.activeDispatches().has(binding.dispatchId)
+      : options.activeDispatches.has(binding.dispatchId);
+    if (!isActive) {
       throw new AiCliError('DISPATCH_NOT_FOUND', 'dispatch is no longer active for callbacks');
     }
     return binding;
   }
 
-  function dedupeOrThrow(callback) {
-    const contentDigest = digest({ operation: callback.operation, input: callback.input });
-    const previous = seenCallbacks.get(callback.callbackId);
-    if (previous) {
-      if (previous !== contentDigest) {
-        throw new AiCliError(
-          'WORKER_CALLBACK_UNAUTHORIZED',
-          'callback id reused with different content',
-        );
-      }
-      return true; // duplicate
+  /**
+   * Terminal reports must stay idempotent even when the dispatch already
+   * settled: the durable watermark replays prior acks for identical retries,
+   * unknown dispatches are typed rejections, conflicting outcomes escalate in
+   * the reducer without overwriting settled history.
+   */
+  function authorizeTerminal(callback, presentedCapability) {
+    const binding = resolveBinding(callback);
+    if (presentedCapability !== binding.capabilityToken) {
+      throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', 'dispatch capability unproven');
     }
-    seenCallbacks.set(callback.callbackId, contentDigest);
-    return false;
+    if (callback.dispatchId !== binding.dispatchId || callback.taskId !== binding.taskId) {
+      throw new AiCliError('WORKER_CALLBACK_UNAUTHORIZED', 'callback does not match its recorded dispatch');
+    }
+    if (callback.fenceEpoch !== options.fenceEpoch()) {
+      throw new AiCliError('STALE_COORDINATOR_EPOCH', 'worker used a stale fence epoch');
+    }
+    const isActive = typeof options.activeDispatches === 'function'
+      ? options.activeDispatches().has(binding.dispatchId)
+      : options.activeDispatches.has(binding.dispatchId);
+    const knownDispatches = typeof options.knownDispatchIds === 'function'
+      ? options.knownDispatchIds()
+      : null;
+    if (!isActive && !(knownDispatches?.has?.(binding.dispatchId))) {
+      throw new AiCliError('DISPATCH_NOT_FOUND', 'terminal report references an unknown or terminally incompatible dispatch');
+    }
+    return binding;
   }
 
   async function recordActivity(operationType, callback, presentedCapability, presentingBindingId) {
     const binding = authorize(callback, presentedCapability, presentingBindingId);
-    const duplicate = dedupeOrThrow(callback);
-    const envelope = options.appendDelivery(operationType, {
+    requireLiveDispatch(binding);
+    const callbackRef = callbackRefFor(callback.bindingId, callback);
+    const outcome = options.appendDelivery(operationType, {
       summary: String(callback.input?.summary ?? '').slice(0, 2000),
       activity: callback.input?.activity ?? null,
+      eventId: `${callback.bindingId}:${callbackRef.seq}`,
       bindingId: callback.bindingId,
       dispatchId: binding.dispatchId,
-    });
-    return { ok: true, sequence: envelope.sequence, duplicate };
+    }, callbackRef);
+    if (outcome.duplicate) {
+      return { ok: true, duplicate: true, acknowledgedSequence: outcome.acknowledgedSequence };
+    }
+    return { ok: true, sequence: outcome.sequence, duplicate: false, acknowledgedSequence: outcome.sequence };
   }
 
   function guarded(handlerFn) {
@@ -143,28 +191,31 @@ export function createWorkerCallbackHandlers(options) {
     'worker.progress': guarded(async (request) => recordActivity('progress', request.callback, request.presentedCapability, request.presentingBindingId)),
     'worker.question': guarded(async (request) => {
       const binding = authorize(request.callback, request.presentedCapability, request.presentingBindingId);
-      const duplicate = dedupeOrThrow(request.callback);
-      const envelope = options.appendDelivery('question', {
+      requireLiveDispatch(binding);
+      const callbackRef = callbackRefFor(request.callback.bindingId, request.callback);
+      const outcome = options.appendDelivery('question', {
         question: String(request.callback.input?.question ?? '').slice(0, 4000),
+        eventId: `${request.callback.bindingId}:${callbackRef.seq}`,
         bindingId: request.callback.bindingId,
         dispatchId: binding.dispatchId,
-      });
-      void duplicate;
-      return { ok: true, sequence: envelope.sequence };
+      }, callbackRef);
+      if (outcome.duplicate) return { ok: true, duplicate: true, acknowledgedSequence: outcome.acknowledgedSequence };
+      return { ok: true, sequence: outcome.sequence, acknowledgedSequence: outcome.sequence };
     }),
     'worker.escalation': guarded(async (request) => {
       const binding = authorize(request.callback, request.presentedCapability, request.presentingBindingId);
-      const duplicate = dedupeOrThrow(request.callback);
-      const envelope = options.appendDelivery('escalation', {
+      requireLiveDispatch(binding);
+      const callbackRef = callbackRefFor(request.callback.bindingId, request.callback);
+      const outcome = options.appendDelivery('escalation', {
         reason: String(request.callback.input?.reason ?? '').slice(0, 4000),
+        eventId: `${request.callback.bindingId}:${callbackRef.seq}`,
         bindingId: request.callback.bindingId,
         dispatchId: binding.dispatchId,
-      });
-      void duplicate;
-      return { ok: true, sequence: envelope.sequence };
+      }, callbackRef);
+      if (outcome.duplicate) return { ok: true, duplicate: true, acknowledgedSequence: outcome.acknowledgedSequence };
+      return { ok: true, sequence: outcome.sequence, acknowledgedSequence: outcome.sequence };
     }),
     'worker.terminal': guarded(async ({ callback, presentedCapability }) => {
-      const binding = authorize(callback, presentedCapability);
       const proposed = TERMINAL_OUTCOME_MAP[callback.input?.outcome];
       if (!proposed) {
         throw new AiCliError(
@@ -173,34 +224,42 @@ export function createWorkerCallbackHandlers(options) {
           { exitCode: 2 },
         );
       }
-      const duplicate = dedupeOrThrow(callback);
+      const binding = authorizeTerminal(callback, presentedCapability);
+      const callbackRef = callbackRefFor(callback.bindingId, callback);
 
-      // One logical terminal settlement per Dispatch: identical replays are
-      // no-ops, conflicting proposals escalate and never overwrite.
-      const existingOutcome = terminalOutcomes.get(binding.dispatchId);
-      if (existingOutcome === proposed.outcome) {
-        return { ok: true, duplicate: true };
-      }
-      if (existingOutcome !== undefined && existingOutcome !== proposed.outcome) {
-        options.appendDelivery('escalation', {
-          reason: `conflicting terminal outcome ${existingOutcome} vs ${proposed.outcome}`,
+      // Conflicting outcomes are journaled as escalation evidence and never
+      // overwrite the settled history of the dispatch.
+      const settledOutcome = typeof options.dispatchOutcomeOf === 'function'
+        ? options.dispatchOutcomeOf(binding.dispatchId)
+        : null;
+      if (settledOutcome && settledOutcome !== proposed.outcome) {
+        const escalated = options.appendDelivery('escalation', {
+          reason: `conflicting terminal outcome ${settledOutcome} vs ${proposed.outcome}`,
+          eventId: `${callback.bindingId}:${callbackRef.seq}`,
           bindingId: callback.bindingId,
           dispatchId: binding.dispatchId,
-        });
-        return { ok: true, escalated: true };
+        }, callbackRef);
+        if (escalated.duplicate) {
+          return { ok: true, duplicate: true, acknowledgedSequence: escalated.acknowledgedSequence };
+        }
+        return { ok: true, escalated: true, sequence: escalated.sequence, acknowledgedSequence: escalated.sequence };
       }
 
-      if (!duplicate) {
-        terminalOutcomes.set(binding.dispatchId, proposed.outcome);
-        options.appendDelivery(proposed.deliveryType, {
-          taskId: callback.taskId,
-          dispatchId: callback.dispatchId,
-          outcome: proposed.outcome,
-          summary: String(callback.input?.summary ?? '').slice(0, 4000),
-          source: 'worker-callback',
-        });
+      // Exactly-once settlement: identical replays (including across restart)
+      // hit the durable watermark and replay the prior acknowledgement.
+      const settled = options.appendDelivery(proposed.deliveryType, {
+        taskId: callback.taskId,
+        dispatchId: callback.dispatchId,
+        outcome: proposed.outcome,
+        summary: String(callback.input?.summary ?? '').slice(0, 4000),
+        source: 'worker-callback',
+        eventId: `${callback.bindingId}:${callbackRef.seq}`,
+      }, callbackRef);
+      if (settled.duplicate) {
+        return { ok: true, duplicate: true, acknowledgedSequence: settled.acknowledgedSequence };
       }
-      return { ok: true };
+      void binding;
+      return { ok: true, sequence: settled.sequence, acknowledgedSequence: settled.sequence };
     }),
   });
 }
