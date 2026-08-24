@@ -447,4 +447,3 @@ export async function verifyDispatch(context) {
 export function receiptOutputPath(stateDir, digest) {
   return join(stateDir ?? '.', 'receipts', digest.slice(0, 16));
 }
-

@@ -91,4 +91,3 @@ if (mode === 'busy-followup') {
   process.stderr.write(`unsupported FAKE_CLAUDE_MODE: ${mode}\n`);
   process.exit(4);
 }
-

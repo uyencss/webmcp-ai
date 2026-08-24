@@ -44,7 +44,8 @@
     "install:gemini": "node scripts/install-agent.mjs gemini",
     "install:claude": "node scripts/install-agent.mjs claude",
     "pack:dry-run": "npm pack --dry-run",
-    "prepublishOnly": "npm run test:coverage",
+    "release:gate:diff-check": "git diff --check 47bfccee8f5d6b1c944908cfb9903d87a4b6014b..HEAD",
+    "prepublishOnly": "node --test tests/*.test.mjs && node --experimental-test-coverage --test-coverage-include='src/**/*.mjs' --test-coverage-include='bin/*.mjs' --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 --test tests/*.test.mjs && node scripts/orchestration-package-closure.mjs && npm pack --dry-run && git diff --check 47bfccee8f5d6b1c944908cfb9903d87a4b6014b..HEAD",
     "test:package-closure": "node scripts/orchestration-package-closure.mjs",
     "canary": "node scripts/orchestration-live-canary.mjs"
   },
