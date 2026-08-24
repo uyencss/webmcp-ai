@@ -1152,6 +1152,25 @@ export async function createSupervisor(options = {}) {
       stateRoot: roots.stateRoot,
     }),
     'coordination.transfer': async (input) => {
+      // A transfer fences EVERYTHING authenticated against the current epoch:
+      // runtime bindings, per-dispatch worker capabilities and every worker
+      // callback. With live work in flight that fencing would orphan running
+      // workers behind STALE_COORDINATOR_EPOCH forever, so transfer refuses
+      // until no nonterminal dispatch and no retained runtime binding
+      // remains. The refusal itself mutates nothing — no epoch bump, no token
+      // rotation, no owner change, no lost control worker.
+      const activeDispatchIds = Object.values(store.state.dispatches)
+        .filter((dispatch) => dispatch && NONTERMINAL_DISPATCH_STATES.has(dispatch.state))
+        .map((dispatch) => dispatch.dispatchId)
+        .sort();
+      const liveBindingIds = [...runtimeBindings.keys()].sort();
+      if (activeDispatchIds.length > 0 || liveBindingIds.length > 0) {
+        throw new AiCliError(
+          'TRANSFER_BLOCKED_ACTIVE_DISPATCHES',
+          'ownership transfer refused while nonterminal dispatches or runtime bindings remain',
+          { details: { activeDispatches: activeDispatchIds, liveBindings: liveBindingIds } },
+        );
+      }
       const receipt = await transferAuthority(store, input.owner ?? null);
       capabilityToken = receipt.token;
       return {
