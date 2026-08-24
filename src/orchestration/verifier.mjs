@@ -44,15 +44,17 @@ export function canonicalizeWorkspacePath(rootPath, candidate) {
   }
   const rel = relative(resolve(rootPath), absolute);
   const missingTail = [];
+  // `cursor` only ever advances over VERIFIED existing segments; not-yet-
+  // existing tail segments accumulate separately and are appended exactly
+  // once at the end.
   let cursor = realpathSync(rootPath);
   for (const segment of rel.split(/[\\/]/).filter(Boolean)) {
-    cursor = join(cursor, segment);
+    const next = join(cursor, segment);
     let stats;
     try {
-      stats = lstatSync(cursor);
+      stats = lstatSync(next);
     } catch {
-      // Not-yet-existing tail segments are acceptable (worker-created files);
-      // keep appending them purely lexically.
+      // Not-yet-existing tail segments are acceptable (worker-created files).
       missingTail.push(segment);
       continue;
     }
@@ -63,6 +65,7 @@ export function canonicalizeWorkspacePath(rootPath, candidate) {
         { exitCode: 2 },
       );
     }
+    cursor = next;
   }
   return join(cursor, ...missingTail);
 }
@@ -81,6 +84,37 @@ function cano(pathValue) {
   } catch {
     return pathValue;
   }
+}
+
+function probeSucceeded(result) {
+  return result?.status === 0 && !result?.error && !result?.signal;
+}
+
+/**
+ * Canonicalize an absolute path's EXISTING prefix segment by segment
+ * (resolving symlinks like realpath would) while keeping any missing tail
+ * purely lexical, so comparisons never mix two spellings of one directory
+ * (e.g. /var vs /private/var).
+ */
+function canonicalExistingPrefix(pathValue) {
+  const absolute = resolve(pathValue);
+  let cursor = isAbsolute(absolute) ? '/' : '.';
+  for (const segment of absolute.split(/[\\/]/).filter(Boolean)) {
+    const next = join(cursor, segment);
+    try {
+      cursor = realpathSync(next);
+    } catch {
+      cursor = next;
+    }
+  }
+  return cursor;
+}
+
+/** True when two paths overlap in EITHER containment direction. */
+export function pathsOverlap(firstPath, secondPath) {
+  const left = canonicalExistingPrefix(firstPath);
+  const right = canonicalExistingPrefix(secondPath);
+  return isWithin(left, right) || isWithin(right, left);
 }
 
 function parsePorcelainV2(stdout) {
@@ -121,13 +155,18 @@ function parsePorcelainV2(stdout) {
 export function captureWorkspaceBaseline(task) {
   const workspace = task.workspace;
   const toplevel = git(workspace, ['rev-parse', '--show-toplevel']);
-  if (toplevel.status !== 0) {
-    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `workspace is not inside a Git repository: ${toplevel.stderr.slice(0, 200)}`, { exitCode: 2 });
+  if (!probeSucceeded(toplevel)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `workspace is not inside a Git repository: ${String(toplevel.stderr ?? '').slice(0, 200)}`, { exitCode: 2 });
   }
   const head = git(workspace, ['rev-parse', 'HEAD']);
-  const startingRevision = head.status === 0 ? head.stdout.trim() : null;
+  const startingRevision = head.status === 0 && !head.error && !head.signal ? head.stdout.trim() : null;
 
   const status = git(workspace, ['status', '--porcelain=v2', '-z', '--untracked-files=all']);
+  if (!probeSucceeded(status)) {
+    // A failed status probe would silently produce an EMPTY baseline; that
+    // fabrication is worse than refusing to dispatch at all.
+    throw new AiCliError('ORCHESTRATION_INDETERMINATE', `workspace status probe failed: ${String(status.stderr ?? '').slice(0, 200)}`, { exitCode: 2 });
+  }
   const entries = parsePorcelainV2(status.stdout);
 
   const dirtyFiles = {};
@@ -297,8 +336,39 @@ export async function verifyDispatch(context) {
   const violations = [];
   let currentRevision = baseline.startingRevision;
 
+  // ---- Required Git evidence, re-proven NOW (fail closed) ----------------
+  // Every probe below MUST succeed for acceptance to remain reachable; any
+  // failure downgrades the receipt to indeterminate/rejected and never to a
+  // fabricated pass over missing evidence.
+  let gitEvidence = 'reproven';
+  let repositoryIdentityReproven = false;
+
+  const toplevelNow = git(baseline.workspaceRoot, ['rev-parse', '--show-toplevel']);
+  if (!probeSucceeded(toplevelNow)) {
+    gitEvidence = 'unavailable';
+  } else {
+    const topLevelPath = toplevelNow.stdout.trim();
+    // Canonical Git top-level identity must still be THE baseline repository.
+    if (cano(topLevelPath) !== cano(baseline.workspaceRoot)
+      || baseline.repository !== `sha256:${sha256(topLevelPath)}`) {
+      violations.push({
+        kind: 'repository_identity_changed',
+        detail: `baseline ${baseline.workspaceRoot} (${baseline.repository}) -> current ${topLevelPath}`,
+      });
+      gitEvidence = 'identity-changed';
+    } else {
+      repositoryIdentityReproven = true;
+    }
+  }
+
   const head = git(baseline.workspaceRoot, ['rev-parse', 'HEAD']);
-  if (head.status === 0) currentRevision = head.stdout.trim();
+  if (probeSucceeded(head)) {
+    currentRevision = head.stdout.trim();
+  } else if (baseline.startingRevision) {
+    // A repo that HAD commits at baseline but cannot answer rev-parse now has
+    // lost required evidence (metadata hidden/corrupt mid-flight).
+    gitEvidence = gitEvidence === 'reproven' ? 'unavailable' : gitEvidence;
+  }
   if (
     baseline.startingRevision
     && currentRevision !== baseline.startingRevision
@@ -311,10 +381,29 @@ export async function verifyDispatch(context) {
   }
 
   const statusNow = git(baseline.workspaceRoot, ['status', '--porcelain=v2', '-z', '--untracked-files=all']);
-  const currentEntries = parsePorcelainV2(statusNow.stdout);
+  const statusUsable = probeSucceeded(statusNow);
+  if (!statusUsable) {
+    gitEvidence = gitEvidence === 'reproven' ? 'unavailable' : gitEvidence;
+  }
+  const currentEntries = statusUsable ? parsePorcelainV2(statusNow.stdout) : [];
   const baselineByPath = new Map(baseline.entries.map((entry) => [entry.path, entry]));
   const changedPaths = [];
   const protectedPathViolations = [];
+
+  // Policy contradiction check in BOTH containment directions: a protected
+  // path inside a writable root (or a writable root inside a protected path)
+  // can never be verified honestly, whatever the worker actually did.
+  const overlapPairs = [];
+  for (const guarded of task.protectedPaths ?? []) {
+    for (const writeRoot of task.allowedWriteRoots ?? []) {
+      if (pathsOverlap(guarded, writeRoot)) {
+        overlapPairs.push({ protectedPath: guarded, writeRoot });
+      }
+    }
+  }
+  if (overlapPairs.length > 0) {
+    violations.push({ kind: 'protected_write_overlap', pairs: overlapPairs });
+  }
 
   for (const entry of currentEntries) {
     const entryPath = entry.path;
@@ -457,6 +546,14 @@ export async function verifyDispatch(context) {
     verdict = 'accepted';
   }
 
+  // Fail-closed post-classification: unavailable Git evidence can never be
+  // accepted, and a changed repository identity is tamper evidence.
+  if (gitEvidence === 'identity-changed') {
+    verdict = 'rejected';
+  } else if (gitEvidence === 'unavailable' && verdict === 'accepted') {
+    verdict = 'indeterminate';
+  }
+
   return {
     schema: RECEIPT_SCHEMA,
     coordinationId: context.coordinationId,
@@ -470,6 +567,8 @@ export async function verifyDispatch(context) {
       changedPaths,
       protectedPathViolations: [...new Set(protectedPathViolations)],
       violations,
+      gitEvidence,
+      repositoryIdentityReproven,
     },
     tests: testResults.map(({
       argvDigest, verdict: label, exitCode, signal, timedOut, denied, outputRef, durationMs, reason,
