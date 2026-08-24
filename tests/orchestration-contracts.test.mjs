@@ -51,6 +51,7 @@ test('numeric limits match the locked alpha contract exactly', () => {
     maxBatchDeliveries: 256,
     maxWaitMs: 60_000,
     maxRefBytes: 32 * 1024 * 1024,
+    maxRefsTotalBytes: 64 * 1024 * 1024,
     journalBackpressureBytes: 480 * 1024 * 1024,
     journalHardLimitBytes: 512 * 1024 * 1024,
     defaultConcurrentDispatches: 4,

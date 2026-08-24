@@ -353,7 +353,11 @@ export async function createSupervisor(options = {}) {
             outcome: live ? 'reattached' : 'lost',
             reason: live
               ? 'binding-identity-reproven-after-restart'
-              : 'no-live-binding-provable-after-restart',
+              : record?.controlOnly === true
+                ? 'telemetry-binding-degraded-lost-unattachable'
+                : record && record.capability === 'opencode-server'
+                  ? 'provider-stream-unattachable-degraded-lost'
+                  : 'no-live-binding-provable-after-restart',
           },
         });
       }
@@ -948,6 +952,11 @@ export async function createSupervisor(options = {}) {
           guaranteeTier: 'owned-process',
           capabilityFile,
           workerPacket,
+          // Durable evidence namespace: spilled output lands under THIS
+          // coordination's canonical refsDir, namespaced per dispatch so no
+          // two dispatches can ever overwrite each other's evidence.
+          refsDir: layout.refsDir,
+          refNamespace: `${coordinationId}__${dispatchId}`,
         },
         emit,
         resumeSessionId: null,

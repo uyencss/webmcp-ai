@@ -11,7 +11,7 @@ test('package publication runs tests and includes release notes', () => {
   // The permanent publish lifecycle: unit suite, coverage thresholds,
   // installed-package closure and pack dry-run — no nested npm lifecycles and
   // NO fixed-SHA git gate (one-time remediation checks never block releases).
-  assert.match(gate, /node --test tests\/\*\.test\.mjs/);
+  assert.match(gate, /node --test --test-force-exit tests\/\*\.test\.mjs/);
   assert.match(gate, /--test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80/);
   assert.match(gate, /node scripts\/orchestration-package-closure\.mjs/);
   assert.match(gate, /npm pack --dry-run/);

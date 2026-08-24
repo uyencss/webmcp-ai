@@ -235,6 +235,8 @@ export function createPublicLifecycle(kind, adapter, config) {
             args,
             env: childEnv,
             preamble: context.dispatch?.workerPacket ? renderWorkerPreamble(context.dispatch.workerPacket) : null,
+            refsDir: context.dispatch?.refsDir ?? null,
+            refNamespace: context.dispatch?.refNamespace ?? null,
           });
         },
         // Interrupt control routes through the adapter's own graceful ladder

@@ -377,8 +377,8 @@ export async function runPackageClosure({
     WEBMCP_AI_ORCHESTRATION_STATE_DIR: disabledStateDir,
   };
 
-  const runDisabled = (args, { input } = {}) => spawnSync(process.execPath, [join(repoRoot, 'bin/webmcp-ai.mjs'), ...args], {
-    cwd: repoRoot,
+  const runDisabled = (args, { input } = {}) => spawnSync(process.execPath, [join(installedPkgDir, 'bin/webmcp-ai.mjs'), ...args], {
+    cwd: consumerRoot,
     shell: false,
     encoding: 'utf8',
     timeout: 60_000,

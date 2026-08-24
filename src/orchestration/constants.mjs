@@ -9,6 +9,7 @@ export const ORCHESTRATION_LIMITS = Object.freeze({
   maxBatchDeliveries: 256,
   maxWaitMs: 60_000,
   maxRefBytes: 32 * 1024 * 1024,
+  maxRefsTotalBytes: 64 * 1024 * 1024,
   journalBackpressureBytes: 480 * 1024 * 1024,
   journalHardLimitBytes: 512 * 1024 * 1024,
   defaultConcurrentDispatches: 4,

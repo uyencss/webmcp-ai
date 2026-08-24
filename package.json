@@ -37,14 +37,14 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
-    "test:coverage": "node --experimental-test-coverage --test-coverage-include='src/**/*.mjs' --test-coverage-include='bin/*.mjs' --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 --test tests/*.test.mjs",
+    "test": "node --test --test-force-exit tests/*.test.mjs",
+    "test:coverage": "node --test-force-exit --experimental-test-coverage --test-coverage-include='src/**/*.mjs' --test-coverage-include='bin/*.mjs' --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 --test tests/*.test.mjs",
     "install:agent": "node scripts/install-agent.mjs all",
     "install:codex": "node scripts/install-agent.mjs codex",
     "install:gemini": "node scripts/install-agent.mjs gemini",
     "install:claude": "node scripts/install-agent.mjs claude",
     "pack:dry-run": "npm pack --dry-run",
-    "prepublishOnly": "node --test tests/*.test.mjs && node --experimental-test-coverage --test-coverage-include='src/**/*.mjs' --test-coverage-include='bin/*.mjs' --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 --test tests/*.test.mjs && node scripts/orchestration-package-closure.mjs && npm pack --dry-run",
+"prepublishOnly": "node --test --test-force-exit tests/*.test.mjs && node --test-force-exit --experimental-test-coverage --test-coverage-include='src/**/*.mjs' --test-coverage-include='bin/*.mjs' --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 --test tests/*.test.mjs && node scripts/orchestration-package-closure.mjs && npm pack --dry-run",
     "test:package-closure": "node scripts/orchestration-package-closure.mjs",
     "canary": "node scripts/orchestration-live-canary.mjs"
   },

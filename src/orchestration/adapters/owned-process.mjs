@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { ORCHESTRATION_LIMITS } from '../constants.mjs';
 import { createPlatformIdentityDeps } from '../process-identity.mjs';
-import { writeAtomicFile } from '../atomic-file.mjs';
+import { createAtomicExclusiveFile } from '../atomic-file.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 import { validateAdapter } from './index.mjs';
 
@@ -26,6 +26,7 @@ export function createOwnedProcessAdapter(options = {}) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'owned-process adapter requires a machine-local state dir', { exitCode: 2 });
   }
   const refsDir = join(stateDir, 'refs');
+  const thisRefsDir = () => refsDir;
   const signalGraceMs = options.signalGraceMs ?? 400;
 
   async function gracefulKill(child, recordSignal) {
@@ -172,18 +173,38 @@ export function createOwnedProcessAdapter(options = {}) {
     /**
      * Spawn one shell-disabled worker. Returns a binding with proven process
      * identity plus a `done` promise settling at terminal evidence.
+     *
+     * Spilled output refs are namespaced per coordination+dispatch+stream and
+     * land in the COORDINATION's refsDir (passed via launch context), so two
+     * dispatches can never overwrite each other's durable evidence and every
+     * ref resolves exactly where receipts look. Creation is exclusive; total
+     * spilled bytes stay under ORCHESTRATION_LIMITS.maxRefsTotalBytes.
      */
-    async spawn({ task, dispatch, emit, command, args, env, preamble }) {
+    async spawn({ task, dispatch, emit, command, args, env, preamble, refsDir, refNamespace }) {
       if (typeof command !== 'string' || (args !== undefined && (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string')))) {
         throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'spawn requires a command string and an argv array, never a shell string', { exitCode: 2 });
       }
       const resolvedCommand = command ?? process.execPath;
       const argv = args ?? [task?.workerScript].filter(Boolean);
+      const activeRefsDir = refsDir ?? thisRefsDir();
+      const ns = typeof refNamespace === 'string' && /^[A-Za-z0-9_.-]{1,160}$/.test(refNamespace)
+        ? refNamespace
+        : 'unnamed';
       let sequence = 0;
       const nextSeq = () => {
         sequence += 1;
         return sequence;
       };
+
+      // Bounded retention: count THIS namespace's already-spilled bytes once.
+      let namespaceBytes = 0;
+      try {
+        for (const name of readdirSync(activeRefsDir)) {
+          if (name.includes(ns) || name.startsWith(`ref_${ns}`)) {
+            try { namespaceBytes += statSync(join(activeRefsDir, name)).size; } catch { /* raced */ }
+          }
+        }
+      } catch { /* empty or missing refs dir */ }
 
       emit('worker_started', { dispatchId: dispatch.dispatchId });
       // A not-yet-existing (canonicalized-safe) workspace tail is legal under
@@ -235,10 +256,23 @@ export function createOwnedProcessAdapter(options = {}) {
             });
             return;
           }
-          mkdirSync(refsDir, { recursive: true, mode: 0o700 });
-          const name = `ref_${String(nextSeq()).padStart(6, '0')}_${streamLabel}.txt`;
+          mkdirSync(activeRefsDir, { recursive: true, mode: 0o700 });
+          const name = `ref_${ns}__${String(nextSeq()).padStart(6, '0')}__${streamLabel}.txt`;
+          if (namespaceBytes + bytes > ORCHESTRATION_LIMITS.maxRefsTotalBytes) {
+            emit('progress', {
+              summary: `${streamLabel} output dropped: refs retention bound reached for this dispatch`,
+              stream: streamLabel,
+              bytes,
+              retentionOverflow: true,
+            });
+            return;
+          }
           const sanitizedSpill = sanitizeValue(buffered);
-          writeAtomicFile(join(refsDir, name), typeof sanitizedSpill === 'string' ? sanitizedSpill : JSON.stringify(sanitizedSpill));
+          createAtomicExclusiveFile(
+            join(activeRefsDir, name),
+            typeof sanitizedSpill === 'string' ? sanitizedSpill : JSON.stringify(sanitizedSpill),
+          );
+          namespaceBytes += bytes;
           spilledCount += 1;
           emit('progress', {
             summary: `${streamLabel} output spilled to bounded ref`,
