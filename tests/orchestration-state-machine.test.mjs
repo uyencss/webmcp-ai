@@ -69,11 +69,11 @@ test('transition maps freeze the exact independent axes', () => {
   assert.deepEqual(
     Object.fromEntries(Object.entries(DISPATCH_TRANSITIONS).map(([k, v]) => [k, [...v]])),
     {
-      created: ['assigned', 'active', 'cancelled', 'failed'],
-      assigned: ['active', 'cancelled', 'failed'],
+      created: ['assigned', 'active', 'cancelled', 'failed', 'lost'],
+      assigned: ['active', 'cancelled', 'failed', 'lost'],
       active: ['waiting', 'settling', 'cancelled', 'failed', 'lost'],
-      waiting: ['active', 'settling', 'cancelled', 'failed'],
-      settling: ['settled', 'failed'],
+      waiting: ['active', 'settling', 'cancelled', 'failed', 'lost'],
+      settling: ['settled', 'failed', 'lost'],
       settled: [],
       failed: [],
       cancelled: [],

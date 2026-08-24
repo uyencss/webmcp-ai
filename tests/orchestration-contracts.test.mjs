@@ -70,6 +70,7 @@ test('delivery registry is the closed v0 set with terminal worker types', () => 
     'task_state_changed',
     'dispatch_created',
     'dispatch_state_changed',
+    'dispatch_reconciled',
     'worker_binding_recorded',
     'worker_started',
     'heartbeat',

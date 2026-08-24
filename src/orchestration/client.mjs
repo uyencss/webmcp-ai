@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { AiCliError } from '../errors.mjs';
-import { readClientCapability, recoverAuthority } from './authority.mjs';
+import { readClientCapability } from './authority.mjs';
 import {
   GUARANTEE_TIERS,
   OPERATIONS,
@@ -21,6 +21,97 @@ import { evaluateRetention, pruneCoordination } from './retention.mjs';
 
 const ENTRY_PATH = fileURLToPath(new URL('./supervisor-entry.mjs', import.meta.url));
 const PACKAGE_JSON_PATH = fileURLToPath(new URL('../../package.json', import.meta.url));
+
+const BOOTSTRAP_TIMEOUT_MS = 15_000;
+
+/**
+ * Production supervisor handshake. Establishes the channel, exposes the child
+ * immediately so the caller can send validated bootstrap input BEFORE waiting,
+ * then enforces a bounded, typed ready acknowledgement.
+ */
+function startSupervisorProcess(entryArgs, childEnv) {
+  const child = spawn(process.execPath, [ENTRY_PATH, ...entryArgs], {
+    env: childEnv,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
+  });
+  let buffered = '';
+  let settled = false;
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolvePromise, rejectPromise) => {
+    resolveReady = resolvePromise;
+    rejectReady = rejectPromise;
+  });
+  const settle = (fn, value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(bootstrapTimer);
+    // Release the bootstrap pipes so a detached supervisor never keeps the
+    // launching CLI process alive waiting on inherited stdio.
+    try { child.stdout.destroy(); } catch { /* already gone */ }
+    try { child.stderr.destroy(); } catch { /* already gone */ }
+    fn(value);
+  };
+  // Bounded bootstrap: an owner that never emits a valid ready line is killed
+  // and reported as a typed failure, never left as an orphan or deadlock.
+  // Deliberately NOT unref'd: the caller awaits this handshake, so the bound
+  // must be deliverable even when no other handle keeps the loop alive.
+  const bootstrapTimer = setTimeout(() => {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    settle(rejectReady, new AiCliError(
+      'ORCHESTRATION_INDETERMINATE',
+      `supervisor bootstrap timed out after ${BOOTSTRAP_TIMEOUT_MS} ms without a valid ready line`,
+    ));
+  }, BOOTSTRAP_TIMEOUT_MS);
+  child.stdout.on('data', (chunk) => {
+    buffered += chunk.toString('utf8');
+    if (!buffered.includes('\n')) return;
+    const line = buffered.slice(0, buffered.indexOf('\n')).trim();
+    let readyEnvelope;
+    try {
+      readyEnvelope = JSON.parse(line);
+    } catch {
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      settle(rejectReady, new AiCliError('ORCHESTRATION_INDETERMINATE', 'supervisor bootstrap produced no valid ready line'));
+      return;
+    }
+    if (readyEnvelope?.ok === true) {
+      if (
+        readyEnvelope.protocol === ORCHESTRATION_PROTOCOL
+        && typeof readyEnvelope.coordinationId === 'string'
+        && Number.isInteger(readyEnvelope.fenceEpoch)
+        && Number.isInteger(readyEnvelope.processGeneration)
+      ) {
+        settle(resolveReady, readyEnvelope);
+        return;
+      }
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      settle(rejectReady, new AiCliError(
+        'ORCHESTRATION_INDETERMINATE',
+        'supervisor ready line failed envelope validation',
+      ));
+      return;
+    }
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    settle(rejectReady, Object.assign(
+      new AiCliError(
+        readyEnvelope?.error?.code ?? 'ORCHESTRATION_INDETERMINATE',
+        readyEnvelope?.error?.message ?? 'supervisor bootstrap failed',
+        { exitCode: 1 },
+      ),
+      { payload: readyEnvelope },
+    ));
+  });
+  child.stderr.on('data', (chunk) => {
+    // Bootstrap diagnostics stay bounded; never echoed into Deliveries.
+    void chunk.toString('utf8').slice(0, 2000);
+  });
+  child.once('exit', (code) => {
+    settle(rejectReady, new AiCliError('WORKER_PROCESS_LOST', `supervisor exited during bootstrap (code ${code})`));
+  });
+  return { child, ready };
+}
 
 function readPackageVersion() {
   try {
@@ -82,52 +173,6 @@ export function getOrchestrationCapabilities(options = {}) {
  */
 export function createOrchestrationClient({ env = {}, spawnImpl } = {}) {
   const children = new Map();
-  const doSpawn = spawnImpl ?? ((entryArgs, childEnv) => new Promise((resolveSpawn, rejectSpawn) => {
-    const child = spawn(process.execPath, [ENTRY_PATH, ...entryArgs], {
-      env: childEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-    });
-    let buffered = '';
-    let settled = false;
-    const settle = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      // Release the bootstrap pipes so a detached supervisor never keeps the
-      // launching CLI process alive waiting on inherited stdio.
-      child.stdout.destroy();
-      child.stderr.destroy();
-      fn(value);
-    };
-    child.stdout.on('data', (chunk) => {
-      buffered += chunk.toString('utf8');
-      if (!buffered.includes('\n')) return;
-      const line = buffered.slice(0, buffered.indexOf('\n')).trim();
-      let ready;
-      try {
-        ready = JSON.parse(line);
-      } catch {
-        settle(rejectSpawn, new AiCliError('ORCHESTRATION_INDETERMINATE', 'supervisor bootstrap produced no valid ready line'));
-        return;
-      }
-      if (ready.ok) {
-        settle(resolveSpawn, { child, ready });
-      } else {
-        settle(rejectSpawn, Object.assign(
-          new AiCliError(ready.error?.code ?? 'ORCHESTRATION_INDETERMINATE', ready.error?.message ?? 'supervisor bootstrap failed', { exitCode: 1 }),
-          { payload: ready },
-        ));
-      }
-    });
-    child.stderr.on('data', (chunk) => {
-      // Bootstrap diagnostics stay bounded; never echoed into Deliveries.
-      void chunk.toString('utf8').slice(0, 2000);
-    });
-    child.once('exit', (code) => {
-      settle(rejectSpawn, new AiCliError('WORKER_PROCESS_LOST', `supervisor exited during bootstrap (code ${code})`));
-    });
-  }));
-
   function guardDisabled() {
     if (isOrchestrationDisabled(env)) {
       throw new AiCliError(
@@ -137,21 +182,43 @@ export function createOrchestrationClient({ env = {}, spawnImpl } = {}) {
     }
   }
 
+  /**
+   * Explicit bootstrap protocol: the parent establishes the channel and sends
+   * the validated payload BEFORE waiting for the ready acknowledgement. The
+   * child parses input under its own validation, takes ownership, restores
+   * durable state, then emits ready. Injected spawnImpl harnesses keep the
+   * legacy resolve-with-child contract.
+   */
   async function spawnSupervisor(mode, coordinationId, bootstrap = {}) {
     const args = ['--mode', mode];
     if (coordinationId) args.push('--coordination-id', coordinationId);
-    const { child, ready } = await doSpawn(args, env);
+    let child;
+    let ready;
+    if (spawnImpl) {
+      ({ child, ready } = await spawnImpl(args, env));
+    } else {
+      const processHandles = startSupervisorProcess(args, env);
+      child = processHandles.child;
+      // Channel first: the validated payload precedes the ready wait so the
+      // child can parse input before taking ownership.
+      try {
+        if (bootstrap.stdinPayload !== undefined) {
+          child.stdin.write(`${JSON.stringify(bootstrap.stdinPayload)}\n`);
+        }
+      } catch { /* entry may have exited early */ } finally {
+        try { child.stdin.end(); } catch { /* already closed */ }
+      }
+      ready = await processHandles.ready;
+    }
     if (coordinationId) children.set(coordinationId, child);
     else if (ready.coordinationId) children.set(ready.coordinationId, child);
-    if (bootstrap.stdinPayload !== undefined) {
+    if (spawnImpl && bootstrap.stdinPayload !== undefined) {
       try {
         child.stdin.write(`${JSON.stringify(bootstrap.stdinPayload)}\n`);
         child.stdin.end();
-      } catch {
-        // Entry may have already closed stdin after reading EOF.
-      }
-    } else {
-      child.stdin.end();
+      } catch { /* already closed */ }
+    } else if (spawnImpl) {
+      try { child.stdin.end(); } catch { /* already closed */ }
     }
     child.unref();
     return ready;
@@ -213,10 +280,8 @@ export function createOrchestrationClient({ env = {}, spawnImpl } = {}) {
         if (!isConnectivityError(error)) throw error;
       }
       // Cold reattach: recovery receives only the Coordination ID and resolved
-      // state root context — no tokens or prompts on argv.
-      const roots = resolveOrchestrationRoots({ env });
-      const layout = layoutFor(roots, coordinationId);
-      recoverAuthority(layout, readSnapshot(layout));
+      // state root context — no tokens or prompts on argv. Authority crash
+      // windows are settled by the new owner itself, under its singleton lock.
       await spawnSupervisor('recover', coordinationId);
       return callOnce(coordinationId, normalized);
     },

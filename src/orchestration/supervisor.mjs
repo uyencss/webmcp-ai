@@ -11,6 +11,7 @@ import {
 } from './authority.mjs';
 import { writeAtomicJson } from './atomic-file.mjs';
 import {
+  ID_PREFIXES,
   MANIFEST_SCHEMA,
   OPERATIONS,
   ORCHESTRATION_LIMITS,
@@ -90,6 +91,107 @@ function recoverLayout(roots, coordinationId) {
   });
 }
 
+const GENERATION_SCHEMA = 'webmcp.ai-supervisor-generation/v0';
+const BINDINGS_SCHEMA = 'webmcp.ai-supervisor-runtime-bindings/v0';
+const BINDINGS_FILENAME = 'runtime-bindings.json';
+const NONTERMINAL_DISPATCH_STATES = new Set(['created', 'assigned', 'active', 'waiting', 'settling']);
+
+function generationPath(layout) {
+  return join(layout.coordinationDir, 'generation.json');
+}
+
+function bindingsPathFor(layout) {
+  return join(layout.coordinationDir, BINDINGS_FILENAME);
+}
+
+/**
+ * Read-only peek at every durable generation source. The authoritative
+ * increment happens only after the singleton lock is held.
+ */
+function readDurableGeneration(layout, manifestFallback = 0) {
+  let candidate = Number.isInteger(manifestFallback) ? manifestFallback : 0;
+  const consider = (value) => {
+    if (Number.isInteger(value) && value > candidate) candidate = value;
+  };
+  try {
+    if (existsSync(layout.lockPath)) {
+      consider(JSON.parse(readFileSync(layout.lockPath, 'utf8'))?.identity?.processGeneration);
+    }
+  } catch {
+    // Unreadable lock contributes nothing; the lock owner resolves it.
+  }
+  try {
+    if (existsSync(generationPath(layout))) {
+      consider(JSON.parse(readFileSync(generationPath(layout), 'utf8'))?.lastGeneration);
+    }
+  } catch {
+    // Corrupt generation sidecar falls back to lock/manifest sources.
+  }
+  return candidate;
+}
+
+/** Persist the strictly-monotonic generation watermark atomically (under lock). */
+function persistDurableGeneration(layout, generation) {
+  writeAtomicJson(generationPath(layout), { schema: GENERATION_SCHEMA, lastGeneration: generation });
+}
+
+/**
+ * Durable dispatch runtime bindings: adapter identity, trusted launch
+ * binding and proven process/group identity for every live owned worker.
+ * Mode-0600 machine-local; recovery reads it to reattach or reconcile.
+ */
+function loadRuntimeBindingRecords(layout) {
+  const path = bindingsPathFor(layout);
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (parsed?.schema !== BINDINGS_SCHEMA || typeof parsed.bindings !== 'object' || parsed.bindings === null) {
+      return {};
+    }
+    return parsed.bindings;
+  } catch {
+    // A corrupt sidecar never fabricates control proof; reconciliation fails
+    // closed to the typed lost state instead.
+    return {};
+  }
+}
+
+function persistRuntimeBindingRecords(layout, bindingsMap) {
+  const bindings = {};
+  for (const [dispatchId, entry] of bindingsMap) bindings[dispatchId] = entry.record;
+  writeAtomicJson(bindingsPathFor(layout), { schema: BINDINGS_SCHEMA, bindings });
+}
+
+function validateRuntimeBindingRecord(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding record must be an object', { exitCode: 2 });
+  }
+  if (typeof record.bindingId !== 'string' || !record.bindingId.startsWith(ID_PREFIXES.worker)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding bindingId must use the worker_ prefix', { exitCode: 2 });
+  }
+  if (typeof record.adapterId !== 'string' || record.adapterId.length === 0) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding adapterId must be a non-empty string', { exitCode: 2 });
+  }
+  if (typeof record.taskId !== 'string' || !record.taskId.startsWith(ID_PREFIXES.task)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding taskId must use the task_ prefix', { exitCode: 2 });
+  }
+  const processIdentity = record.processIdentity ?? {};
+  if (!Number.isInteger(processIdentity.pid) || processIdentity.pid <= 0) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding requires a positive integer pid', { exitCode: 2 });
+  }
+  if (typeof processIdentity.startIdentity !== 'string' || processIdentity.startIdentity.length === 0) {
+    throw new AiCliError(
+      'ORCHESTRATION_INDETERMINATE',
+      'runtime binding requires a proven startIdentity; indeterminate identity never authorizes control',
+      { exitCode: 2 },
+    );
+  }
+  if (!Number.isInteger(processIdentity.processGroupId) || processIdentity.processGroupId <= 1) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding requires a valid process group id', { exitCode: 2 });
+  }
+  return record;
+}
+
 /**
  * Single-writer supervisor: owns the lock, replays the journal, serves the
  * frozen operation table over authenticated local IPC.
@@ -116,57 +218,130 @@ export async function createSupervisor(options = {}) {
     ? createCoordinationLayout(roots.stateRoot, coordinationId)
     : recoverLayout(roots, coordinationId);
 
-  let store;
-  let capabilityToken;
-  if (freshCreate) {
-    const authority = createAuthority(layout);
-    capabilityToken = authority.token;
-    writeAtomicJson(layout.manifestPath, {
-      schema: MANIFEST_SCHEMA,
-      coordinationId,
-      fenceEpoch: 1,
-      processGeneration: 1,
-      createdAt: new Date().toISOString(),
-      owner: manifest.owner ?? null,
-    });
-    store = openCoordinationStore(layout);
-    commitDelivery(store, { type: 'coordination_created', payload: { owner: manifest.owner ?? null } });
-  } else {
-    // Settle authority crash windows before anything trusts client.cap.
-    const priorSnapshot = existsSync(layout.snapshotPath)
-      ? JSON.parse(readFileSync(layout.snapshotPath, 'utf8'))
-      : null;
-    recoverAuthority(layout, priorSnapshot);
-    capabilityToken = readClientCapability(layout);
-    store = openCoordinationStore(layout);
+  // Read-only generation peek BEFORE the gate; the authoritative increment is
+  // persisted atomically under the lock below.
+  let manifestGeneration = 0;
+  try {
+    manifestGeneration = JSON.parse(readFileSync(layout.manifestPath, 'utf8'))?.processGeneration ?? 0;
+  } catch {
+    manifestGeneration = 0;
   }
+  const previousGeneration = readDurableGeneration(layout, manifestGeneration);
+  const processGeneration = freshCreate ? 1 : previousGeneration + 1;
+  const identity = await buildSupervisorIdentity(processGeneration);
 
-  const journal = replayJournal(layout).deliveries.slice();
-  const taskPackets = loadTaskPackets(layout);
-
-  // Process generation: 1 on create; previous + 1 after takeover/recovery.
-  let previousGeneration = 0;
-  if (!freshCreate && existsSync(layout.lockPath)) {
-    try {
-      previousGeneration
-        = JSON.parse(readFileSync(layout.lockPath, 'utf8'))?.identity?.processGeneration ?? 0;
-    } catch {
-      previousGeneration = 0;
-    }
-  }
-  const identity = await buildSupervisorIdentity(Math.max(previousGeneration + 1, freshCreate ? 1 : 2));
+  // Singleton gate FIRST: no mutable recovery, generation allocation,
+  // endpoint publication or lifecycle reconciliation may run unowned.
   const lock = await acquireSupervisorLock(layout, identity);
 
-  const endpoint = deriveEndpoint({ ipcRoot: roots.ipcRoot, coordinationId, platform: process.platform });
-  if (process.platform !== 'win32' && existsSync(endpoint)) {
-    // The proven lock authorizes removing a stale socket inode.
-    unlinkSync(endpoint);
-  }
+  let store;
+  let capabilityToken;
+  let server = null;
+  let endpoint = null;
+  const runtimeBindings = new Map(); // dispatchId -> { record }
+  let journal = [];
+  const taskPackets = new Map();
+  let commit = () => {
+    throw new AiCliError('ORCHESTRATION_INDETERMINATE', 'supervisor commit path is not initialized');
+  };
 
-  function commit(draft) {
-    const { delivery } = commitDelivery(store, draft);
-    journal.push(delivery);
-    return delivery;
+  try {
+    persistDurableGeneration(layout, processGeneration);
+
+    if (freshCreate) {
+      const authority = createAuthority(layout);
+      capabilityToken = authority.token;
+      writeAtomicJson(layout.manifestPath, {
+        schema: MANIFEST_SCHEMA,
+        coordinationId,
+        fenceEpoch: 1,
+        processGeneration,
+        createdAt: new Date().toISOString(),
+        owner: manifest.owner ?? null,
+      });
+      store = openCoordinationStore(layout);
+      commitDelivery(store, { type: 'coordination_created', payload: { owner: manifest.owner ?? null } });
+    } else {
+      // Settle authority crash windows before anything trusts client.cap.
+      const priorSnapshot = existsSync(layout.snapshotPath)
+        ? JSON.parse(readFileSync(layout.snapshotPath, 'utf8'))
+        : null;
+      recoverAuthority(layout, priorSnapshot);
+      capabilityToken = readClientCapability(layout);
+      store = openCoordinationStore(layout);
+    }
+
+    journal = replayJournal(layout).deliveries.slice();
+    for (const [packetTaskId, packet] of loadTaskPackets(layout)) taskPackets.set(packetTaskId, packet);
+
+    commit = (draft) => {
+      const { delivery } = commitDelivery(store, draft);
+      journal.push(delivery);
+      return delivery;
+    };
+
+    // Restart reconciliation: every nonterminal dispatch must end this block
+    // either reattached under a reproven binding identity or typed lost.
+    {
+      const storedBindings = loadRuntimeBindingRecords(layout);
+      const identityDeps = createPlatformIdentityDeps();
+      for (const dispatch of [...Object.values(store.state.dispatches)]) {
+        if (!dispatch || !NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
+        const record = storedBindings[dispatch.dispatchId] ?? null;
+        let live = false;
+        if (record && typeof record === 'object') {
+          const pid = record.processIdentity?.pid;
+          if (Number.isInteger(pid) && pid > 0) {
+            try {
+              process.kill(pid, 0);
+              const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+              live = typeof record.processIdentity?.startIdentity === 'string'
+                && nowIdentity === record.processIdentity.startIdentity;
+            } catch {
+              live = false;
+            }
+          }
+        }
+        if (live) runtimeBindings.set(dispatch.dispatchId, { record });
+        commit({
+          type: 'dispatch_reconciled',
+          dispatchId: dispatch.dispatchId,
+          taskId: dispatch.taskId,
+          payload: {
+            dispatchId: dispatch.dispatchId,
+            taskId: dispatch.taskId,
+            outcome: live ? 'reattached' : 'lost',
+            reason: live
+              ? 'binding-identity-reproven-after-restart'
+              : 'no-live-binding-provable-after-restart',
+          },
+        });
+      }
+    }
+
+    endpoint = deriveEndpoint({ ipcRoot: roots.ipcRoot, coordinationId, platform: process.platform });
+    if (process.platform !== 'win32' && existsSync(endpoint)) {
+      // The proven lock authorizes removing a stale socket inode.
+      unlinkSync(endpoint);
+    }
+
+    server = await createIpcServer({
+      endpoint,
+      capability: () => capabilityToken,
+      handler: handleEnvelope,
+      protocol: ORCHESTRATION_PROTOCOL,
+    });
+  } catch (error) {
+    // A failed bootstrap must never orphan an owner: release the lock, close
+    // the server and remove any socket this attempt published.
+    if (server) {
+      try { await server.close(); } catch { /* best effort */ }
+    }
+    if (endpoint && process.platform !== 'win32' && existsSync(endpoint)) {
+      try { unlinkSync(endpoint); } catch { /* best effort */ }
+    }
+    try { await releaseSupervisorLock(lock, identity.runtimeNonce); } catch { /* audit trail retained */ }
+    throw error;
   }
 
   function assertMutationAllowed(operation) {
@@ -187,6 +362,86 @@ export async function createSupervisor(options = {}) {
       (gate) => gate.state === 'open'
         && (gate.taskId === taskId || gate.dependsOnTaskId === taskId),
     );
+  }
+
+  /**
+   * Restored-control interrupt ladder for a reattached owned worker. The
+   * durable binding's proven process/group identity is the only authority to
+   * signal; every attempted signal is recorded in a cleanup receipt.
+   */
+  async function interruptRuntimeBinding(dispatchId, record, reason = '') {
+    const signalsAttempted = [];
+    const pid = record.processIdentity?.pid;
+    const processGroupId = record.processIdentity?.processGroupId;
+    const isAlive = (targetPid) => {
+      try {
+        process.kill(targetPid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const graceMs = 400;
+    const awaitExit = async () => {
+      const deadline = Date.now() + graceMs;
+      while (Date.now() < deadline && isAlive(pid)) {
+        await new Promise((resolveTick) => setTimeout(resolveTick, 25));
+      }
+    };
+    if (Number.isInteger(pid) && pid > 0) {
+      if (process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1) {
+        for (const signal of ['SIGTERM', 'SIGKILL']) {
+          if (!isAlive(pid)) break;
+          try {
+            process.kill(-processGroupId, signal);
+            signalsAttempted.push(`GROUP_${signal}`);
+          } catch {
+            try {
+              process.kill(pid, signal);
+              signalsAttempted.push(signal);
+            } catch { /* already gone */ }
+          }
+          await awaitExit();
+        }
+      } else {
+        for (const signal of ['SIGTERM', 'SIGKILL']) {
+          if (!isAlive(pid)) break;
+          try {
+            process.kill(pid, signal);
+            signalsAttempted.push(signal);
+          } catch { /* already gone */ }
+          await awaitExit();
+        }
+      }
+    }
+    const stopped = !isAlive(pid);
+    commit({
+      type: 'cleanup_recorded',
+      payload: {
+        dispatchId,
+        disposition: stopped ? 'group-stopped' : 'group-signalled',
+        signalsAttempted: [...signalsAttempted],
+        processIdentity: { ...(record.processIdentity ?? {}) },
+      },
+    });
+    const current = store.state.dispatches[dispatchId];
+    if (current && ['active', 'waiting'].includes(current.state)) {
+      commit({
+        type: 'dispatch_state_changed',
+        dispatchId,
+        taskId: current.taskId,
+        payload: { dispatchId, taskId: current.taskId, state: 'cancelled' },
+      });
+    }
+    runtimeBindings.delete(dispatchId);
+    persistRuntimeBindingRecords(layout, runtimeBindings);
+    return {
+      ok: true,
+      interrupted: true,
+      reason: String(reason ?? ''),
+      signalsAttempted,
+      stopped,
+    };
   }
 
   async function waitForDeliveries(input) {
@@ -317,7 +572,16 @@ export async function createSupervisor(options = {}) {
     'dispatch.reply': async () => { throw unsupportedAdapterBoundary('dispatch.reply'); },
     'dispatch.guidance': async () => { throw unsupportedAdapterBoundary('dispatch.guidance'); },
     'dispatch.permission.resolve': async () => { throw unsupportedAdapterBoundary('dispatch.permission.resolve'); },
-    'dispatch.interrupt': async () => { throw unsupportedAdapterBoundary('dispatch.interrupt'); },
+    'dispatch.interrupt': async (input) => {
+      const dispatchId = input?.dispatchId;
+      const entry = typeof dispatchId === 'string' ? runtimeBindings.get(dispatchId) : null;
+      if (!entry) {
+        // Without a reproven runtime binding there is no ownership proof to
+        // signal against; the typed boundary stays honest.
+        throw unsupportedAdapterBoundary('dispatch.interrupt');
+      }
+      return interruptRuntimeBinding(dispatchId, entry.record, input?.reason);
+    },
     'dispatch.verify': async (input) => {
       const verify = verifyDispatch ?? defaultVerifyDispatch;
       if (!verify) throw unsupportedAdapterBoundary('dispatch.verify');
@@ -441,23 +705,40 @@ export async function createSupervisor(options = {}) {
     }
   }
 
-  const server = await createIpcServer({
-    endpoint,
-    capability: () => capabilityToken,
-    handler: handleEnvelope,
-    protocol: ORCHESTRATION_PROTOCOL,
-  });
-
   let stopped = false;
   async function stop() {
     if (stopped) return;
     stopped = true;
     await server.close();
+    runtimeBindings.clear();
     try {
       await releaseSupervisorLock(lock, identity.runtimeNonce);
     } catch {
       // A failed release leaves the audit lock in place; recovery archives it.
     }
+  }
+
+  /**
+   * Machine-local test/pipeline seam: durably record the trusted launch
+   * binding for a live dispatch so a restart can reattach or reconcile.
+   * Registration validates identity proof and persists atomically under the
+   * held singleton lock.
+   */
+  async function __recordRuntimeBinding(dispatchId, record) {
+    const dispatch = store.state.dispatches[dispatchId];
+    if (!dispatch) {
+      throw new AiCliError('DISPATCH_NOT_FOUND', `no dispatch ${dispatchId} for runtime binding`);
+    }
+    if (!NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `dispatch ${dispatchId} is terminal; no binding may be recorded`);
+    }
+    if (record.taskId !== dispatch.taskId) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding taskId does not match its dispatch');
+    }
+    validateRuntimeBindingRecord(record);
+    runtimeBindings.set(dispatchId, { record });
+    persistRuntimeBindingRecords(layout, runtimeBindings);
+    return { ok: true, persisted: true };
   }
 
   return {
@@ -467,5 +748,6 @@ export async function createSupervisor(options = {}) {
     processGeneration: identity.processGeneration,
     stop,
     __store: store,
+    __recordRuntimeBinding,
   };
 }

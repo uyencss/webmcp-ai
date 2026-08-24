@@ -195,7 +195,10 @@ export function requestIpc(endpoint, envelope, { timeoutMs = 5000 } = {}) {
     const timer = setTimeout(() => {
       finish(rejectPromise, new AiCliError('ORCHESTRATION_INDETERMINATE', 'orchestration IPC request timed out'));
     }, timeoutMs);
-    timer.unref?.();
+    // Deliberately NOT unref'd: a caller awaiting this request relies on the
+    // timeout rejection being delivered; draining the loop first would strand
+    // the promise and crash the awaiting owner.
+    void timer;
 
     socket.on('connect', () => {
       socket.write(`${JSON.stringify(envelope)}\n`);

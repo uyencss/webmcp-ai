@@ -1,4 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+import { AiCliError } from '../errors.mjs';
+import { ORCHESTRATION_PROTOCOL } from './constants.mjs';
 import { createSupervisor } from './supervisor.mjs';
+
+const BOOTSTRAP_OWNER_FIELDS = new Set(['host', 'instanceId']);
 
 function readArgValue(name) {
   const index = process.argv.indexOf(name);
@@ -6,54 +13,132 @@ function readArgValue(name) {
   return process.argv[index + 1];
 }
 
+/**
+ * Strict bootstrap contract: the only accepted payload is
+ * `{ "owner": { "host"?, "instanceId"? } | null }`. Anything else — invalid
+ * JSON, unknown fields, non-object shapes, wrong descriptor types — fails
+ * closed with a typed ORCHESTRATION_INVALID_INPUT before any state is touched.
+ */
+export function parseBootstrapInput(raw) {
+  if (raw === null || raw === undefined || !String(raw).trim()) {
+    return { owner: null };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'bootstrap input is not valid JSON', { exitCode: 2 });
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'bootstrap input must be a JSON object', { exitCode: 2 });
+  }
+  for (const key of Object.keys(parsed)) {
+    if (key !== 'owner') {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `bootstrap input has unknown field ${key}`, { exitCode: 2 });
+    }
+  }
+  let owner = null;
+  if (parsed.owner !== undefined && parsed.owner !== null) {
+    const candidate = parsed.owner;
+    if (typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'bootstrap owner must be an object or null', { exitCode: 2 });
+    }
+    owner = {};
+    for (const key of Object.keys(candidate)) {
+      if (!BOOTSTRAP_OWNER_FIELDS.has(key)) {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `bootstrap owner has unknown field ${key}`, { exitCode: 2 });
+      }
+      const value = candidate[key];
+      if (value !== undefined && value !== null && typeof value !== 'string') {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `bootstrap owner.${key} must be a string`, { exitCode: 2 });
+      }
+      if (typeof value === 'string') owner[key] = value.slice(0, 128);
+    }
+  }
+  return { owner };
+}
+
+function emit(payload) {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+// Signal handlers are installed before any ownership work so a terminate
+// racing bootstrap can never default-exit while the singleton lock is held.
+let activeSupervisor = null;
+let shuttingDown = false;
+let shutdownRequested = false;
+
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    if (activeSupervisor) await activeSupervisor.stop();
+  } catch {
+    // A failed release leaves the audit lock; recovery archives it.
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => {
+  shutdownRequested = true;
+  if (activeSupervisor) void shutdown();
+});
+process.on('SIGINT', () => {
+  shutdownRequested = true;
+  if (activeSupervisor) void shutdown();
+});
+
 async function main() {
   const mode = readArgValue('--mode') ?? 'create';
   const coordinationId = readArgValue('--coordination-id');
 
   // Bootstrap metadata arrives on stdin (owner descriptors only); tokens,
-  // prompts and passwords never enter argv.
-  let bootstrap = {};
+  // prompts and passwords never enter argv. The launching parent ends stdin
+  // immediately after the validated payload, so this read always terminates.
+  let rawBootstrap = '';
   try {
-    const raw = readFileSync(0, 'utf8').trim();
-    if (raw) bootstrap = JSON.parse(raw);
-  } catch {
-    bootstrap = {};
+    rawBootstrap = readFileSync(0, 'utf8');
+  } catch (error) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `bootstrap stdin is unreadable: ${error?.code ?? 'ERROR'}`, { exitCode: 2 });
   }
+  const bootstrap = parseBootstrapInput(rawBootstrap);
 
-  const supervisor = await createSupervisor({
+  activeSupervisor = await createSupervisor({
     env: process.env,
     mode,
     ...(coordinationId ? { coordinationId } : {}),
-    manifest: { owner: bootstrap.owner ?? null },
+    manifest: { owner: bootstrap.owner },
   });
 
-  process.stdout.write(`${JSON.stringify({
+  emit({
     ok: true,
-    protocol: 'webmcp.ai-orchestration/v0',
-    coordinationId: supervisor.coordinationId,
-    fenceEpoch: supervisor.fenceEpoch,
-    processGeneration: supervisor.processGeneration,
-  })}\n`);
+    protocol: ORCHESTRATION_PROTOCOL,
+    coordinationId: activeSupervisor.coordinationId,
+    fenceEpoch: activeSupervisor.fenceEpoch,
+    processGeneration: activeSupervisor.processGeneration,
+  });
 
-  let stopping = false;
-  const shutdown = async () => {
-    if (stopping) return;
-    stopping = true;
-    await supervisor.stop();
-    process.exit(0);
-  };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  if (shutdownRequested) {
+    await shutdown();
+  }
 }
 
-main().catch((error) => {
-  process.stdout.write(`${JSON.stringify({
-    ok: false,
-    protocol: 'webmcp.ai-orchestration/v0',
-    error: {
-      code: error.code ?? 'ORCHESTRATION_INDETERMINATE',
-      message: error.message,
-    },
-  })}\n`);
-  process.exit(1);
-});
+// The entry auto-executes only as the launched main module. Importing it for
+// unit inspection (bootstrap contract tests, harnesses) must never spawn a
+// supervisor as an import side effect.
+const invokedDirectly = process.argv[1]
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    emit({
+      ok: false,
+      protocol: ORCHESTRATION_PROTOCOL,
+      error: {
+        code: error.code ?? 'ORCHESTRATION_INDETERMINATE',
+        message: error.message,
+      },
+    });
+    process.exit(error.exitCode ?? 1);
+  });
+}

@@ -40,7 +40,11 @@ export async function acquireSupervisorLock(layout, identity, deps = {}) {
   }
   const inspectPid = deps.inspectPid ?? inspectPidLiveness;
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // An unreadable lock may be a peer's just-created-but-not-yet-written file
+  // racing this starter. Retry briefly before archiving so two simultaneous
+  // starters can never steal each other's fresh singleton claim.
+  let unreadableStreak = 0;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     let fd;
     try {
       fd = openSync(layout.lockPath, 'wx', 0o600);
@@ -49,9 +53,15 @@ export async function acquireSupervisorLock(layout, identity, deps = {}) {
 
       const existing = readLockFile(layout.lockPath);
       if (!existing?.identity?.pid) {
+        unreadableStreak += 1;
+        if (unreadableStreak < 6) {
+          await new Promise((resolveTick) => setTimeout(resolveTick, 50));
+          continue;
+        }
         renameSync(layout.lockPath, `${layout.lockPath}.stale`);
         continue;
       }
+      unreadableStreak = 0;
       const proof = await inspectPid(existing.identity.pid);
       if (proof == null) {
         throw new AiCliError(

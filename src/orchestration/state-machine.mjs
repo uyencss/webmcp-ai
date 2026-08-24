@@ -23,11 +23,11 @@ export const TASK_TRANSITIONS = Object.freeze({
 });
 
 export const DISPATCH_TRANSITIONS = Object.freeze({
-  created: new Set(['assigned', 'active', 'cancelled', 'failed']),
-  assigned: new Set(['active', 'cancelled', 'failed']),
+  created: new Set(['assigned', 'active', 'cancelled', 'failed', 'lost']),
+  assigned: new Set(['active', 'cancelled', 'failed', 'lost']),
   active: new Set(['waiting', 'settling', 'cancelled', 'failed', 'lost']),
-  waiting: new Set(['active', 'settling', 'cancelled', 'failed']),
-  settling: new Set(['settled', 'failed']),
+  waiting: new Set(['active', 'settling', 'cancelled', 'failed', 'lost']),
+  settling: new Set(['settled', 'failed', 'lost']),
   settled: new Set(),
   failed: new Set(),
   cancelled: new Set(),
@@ -481,6 +481,35 @@ export function applyDelivery(state, delivery) {
     }
     case 'dispatch_state_changed': {
       next = applyDispatchStateChange(base, payload);
+      break;
+    }
+    case 'dispatch_reconciled': {
+      const dispatch = base.dispatches[
+        requireId(payload.dispatchId, ID_PREFIXES.dispatch, 'dispatchId')
+      ];
+      if (!dispatch) throw invalid('reconciliation references an unknown dispatch', 'DISPATCH_NOT_FOUND');
+      const reconciledTaskId = requireId(payload.taskId, ID_PREFIXES.task, 'reconcile taskId');
+      if (dispatch.taskId !== reconciledTaskId) {
+        throw invalid('reconciliation task does not match its dispatch');
+      }
+      if (!['lost', 'reattached'].includes(payload.outcome)) {
+        throw invalid('dispatch reconciliation outcome must be lost or reattached');
+      }
+      if (typeof payload.reason !== 'string' || payload.reason.length === 0) {
+        throw invalid('dispatch reconciliation requires a typed reason');
+      }
+      if (payload.outcome === 'reattached') {
+        // Control was reproven; the lifecycle continues truthfully unchanged.
+        next = base;
+        break;
+      }
+      assertDispatchTransition(dispatch.state, 'lost');
+      next = withMutations(base, {
+        dispatches: {
+          ...base.dispatches,
+          [payload.dispatchId]: Object.freeze({ ...dispatch, state: 'lost' }),
+        },
+      });
       break;
     }
     case 'worker_binding_recorded': {

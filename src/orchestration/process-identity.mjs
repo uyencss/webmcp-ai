@@ -1,11 +1,20 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
+const execFileAsyncBound = (file, args, timeoutMs) => new Promise((resolvePromise, rejectPromise) => {
+  const child = execFile(file, args, { shell: false, timeout: timeoutMs }, (error, stdout, stderr) => {
+    // Deterministically release every stdio pipe: a settled-but-unreferenced
+    // probe child must never leave an open handle that pins the owner loop.
+    for (const stream of [child.stdin, child.stdout, child.stderr]) {
+      try { stream?.destroy(); } catch { /* already gone */ }
+    }
+    if (error) rejectPromise(error);
+    else resolvePromise({ stdout, stderr });
+  });
+});
 
 function execBounded(file, args, timeoutMs = 2000) {
-  return execFileAsync(file, args, { shell: false, timeout: timeoutMs });
+  return execFileAsyncBound(file, args, timeoutMs);
 }
 
 async function darwinProbes(pid) {
