@@ -905,6 +905,10 @@ export async function createSupervisor(options = {}) {
       canaryReceipts: receipts,
       adapterDigest: computeAdapterDigest(adapter),
       executablePathDigest: executable?.digest ?? null,
+      // The CANONICAL path is part of dispatch-time identity: identical
+      // bytes/version at a different location are STALE here, exactly as the
+      // pure receipt evaluator treats them.
+      executablePath: executable?.path ?? undefined,
       installedVersion: probeExecutableVersion(adapter.id, { env }),
       runtimeVersion: process.version,
     };
@@ -1393,16 +1397,24 @@ export async function createSupervisor(options = {}) {
         );
       }
       const taskNow = store.state.tasks[taskId].state;
-      // A worker that already reported its own terminal state moves the task
-      // to awaiting_acceptance through the bridge; cancelling then is a no-op
-      // over an already-post-terminal task, never a state regression.
-      if (taskNow !== 'cancelled' && taskNow !== 'awaiting_acceptance') {
-        commit({
-          type: 'task_state_changed',
-          taskId,
-          payload: { taskId, state: 'cancelled', reason: String(input.reason ?? ''), actor: envelope.requestId },
-        });
+      // Truthfulness over the state machine: a task that already received its
+      // worker's terminal report (awaiting_acceptance) or reached an accepted/
+      // rejected/cancelled end can NEVER truthfully answer cancelled:true.
+      // These answers are idempotent, typed and commit NOTHING.
+      if (['awaiting_acceptance', 'accepted', 'rejected', 'cancelled'].includes(taskNow)) {
+        return {
+          cancelled: false,
+          alreadyTerminal: true,
+          state: taskNow,
+          interruptEffects: store.state.interruptEffects.filter((effect) => effect.taskId === taskId),
+          stops,
+        };
       }
+      commit({
+        type: 'task_state_changed',
+        taskId,
+        payload: { taskId, state: 'cancelled', reason: String(input.reason ?? ''), actor: envelope.requestId },
+      });
       return {
         cancelled: true,
         interruptEffects: store.state.interruptEffects.filter((effect) => effect.taskId === taskId),

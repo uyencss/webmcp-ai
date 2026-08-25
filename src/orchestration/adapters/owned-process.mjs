@@ -28,6 +28,32 @@ export function createOwnedProcessAdapter(options = {}) {
   const refsDir = join(stateDir, 'refs');
   const thisRefsDir = () => refsDir;
   const signalGraceMs = options.signalGraceMs ?? 400;
+  // Test seam only: production always uses the shared ORCHESTRATION_LIMITS
+  // bound. Kept as an option so the quota contract is testable at realistic
+  // byte sizes.
+  const maxRefsTotalBytes = options.maxRefsTotalBytesForTest ?? ORCHESTRATION_LIMITS.maxRefsTotalBytes;
+
+  /**
+   * COORDINATION-TOTAL accounting, rebuilt from the durable refs directory on
+   * every decision: the bound applies to the WHOLE coordination's evidence
+   * (every dispatch namespace AND acceptance-command spills), never to a
+   * single dispatch. Each drain runs synchronously on the event loop, so the
+   * scan -> decide -> exclusive-create sequence below is atomic within the
+   * single-writer supervisor process — safe under sequential and concurrent
+   * spills alike, and trivially rebuilt after recovery.
+   */
+  const durableRefsBytes = (dir) => {
+    let total = 0;
+    try {
+      for (const name of readdirSync(dir)) {
+        try {
+          const stats = statSync(join(dir, name));
+          if (stats.isFile()) total += stats.size;
+        } catch { /* raced removal contributes nothing */ }
+      }
+    } catch { /* empty or missing refs dir */ }
+    return total;
+  };
 
   async function gracefulKill(child, recordSignal) {
     for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -196,16 +222,6 @@ export function createOwnedProcessAdapter(options = {}) {
         return sequence;
       };
 
-      // Bounded retention: count THIS namespace's already-spilled bytes once.
-      let namespaceBytes = 0;
-      try {
-        for (const name of readdirSync(activeRefsDir)) {
-          if (name.includes(ns) || name.startsWith(`ref_${ns}`)) {
-            try { namespaceBytes += statSync(join(activeRefsDir, name)).size; } catch { /* raced */ }
-          }
-        }
-      } catch { /* empty or missing refs dir */ }
-
       emit('worker_started', { dispatchId: dispatch.dispatchId });
       // A not-yet-existing (canonicalized-safe) workspace tail is legal under
       // preventive confinement; create it so the child has a real cwd.
@@ -258,9 +274,10 @@ export function createOwnedProcessAdapter(options = {}) {
           }
           mkdirSync(activeRefsDir, { recursive: true, mode: 0o700 });
           const name = `ref_${ns}__${String(nextSeq()).padStart(6, '0')}__${streamLabel}.txt`;
-          if (namespaceBytes + bytes > ORCHESTRATION_LIMITS.maxRefsTotalBytes) {
+          // Coordination-TOTAL bound, recounted from durable state right now.
+          if (durableRefsBytes(activeRefsDir) + bytes > maxRefsTotalBytes) {
             emit('progress', {
-              summary: `${streamLabel} output dropped: refs retention bound reached for this dispatch`,
+              summary: `${streamLabel} output dropped: coordination refs retention bound reached`,
               stream: streamLabel,
               bytes,
               retentionOverflow: true,
@@ -272,7 +289,6 @@ export function createOwnedProcessAdapter(options = {}) {
             join(activeRefsDir, name),
             typeof sanitizedSpill === 'string' ? sanitizedSpill : JSON.stringify(sanitizedSpill),
           );
-          namespaceBytes += bytes;
           spilledCount += 1;
           emit('progress', {
             summary: `${streamLabel} output spilled to bounded ref`,

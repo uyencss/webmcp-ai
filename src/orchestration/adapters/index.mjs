@@ -130,6 +130,7 @@ export function computeAdapterMaturity(adapter, evidence = null) {
       ? evidence.adapterDigest
       : computeAdapterDigest(adapter),
     executablePathDigest: evidence.executablePathDigest,
+    executablePath: evidence.executablePath,
     installedVersion: evidence.installedVersion ?? null,
     runtimeVersion: evidence.runtimeVersion ?? process.version,
     requiredCapabilities: evidence.requiredCapabilities,
