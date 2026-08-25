@@ -459,11 +459,27 @@ export async function createSupervisor(options = {}) {
     }
     for (const [packetTaskId, packet] of loadTaskPackets(layout)) taskPackets.set(packetTaskId, packet);
 
+    let droppedDuringStop = 0;
     commit = (draft) => {
+      // SINGLE choke-point teardown guard: once stop() begins, NO further
+      // durable journal writes may originate from this owner — a stale owner
+      // must never append events after its lock is released. The next owner
+      // completes everything from durable truth.
+      if (stopping) {
+        droppedDuringStop += 1;
+        return null;
+      }
       const { delivery } = commitDelivery(store, draft);
       journal.push(delivery);
       return delivery;
     };
+
+    /** Ownership-guarded binding persistence for runtime (post-boot) paths. */
+    function persistRuntimeBindingsIfOwned() {
+      if (stopping) return false;
+      persistRuntimeBindingRecords(layout, runtimeBindings);
+      return true;
+    }
 
     // Restart reconciliation is TRANSACTIONAL. Phase A loads every durable
     // record ONCE; phase B classifies every nonterminal dispatch against
@@ -1929,9 +1945,13 @@ export async function createSupervisor(options = {}) {
     // Finalization belongs to the OWNER lifetime, not to the start call:
     // after provider terminal state AND resource reconciliation the dispatch
     // settles DURABLY and its runtime binding is released.
-    void (async () => {
+    // The launch-time finalizer is REGISTERED in the same lifecycle registry
+    // the supervisor drains during stop() — it can never outlive ownership.
+    const launchFinalizer = (async () => {
       try {
+        if (stopping) return; // teardown won the race before terminal work began
         const terminal = started.done ? await started.done : await serverDone;
+        if (stopping) return;
         // Terminal results that arrive only through the done promise (e.g. a
         // provider closing its stream without a result event) must still
         // become a terminal Delivery — otherwise the reducer never leaves
@@ -1961,6 +1981,7 @@ export async function createSupervisor(options = {}) {
         // its runtime binding and capability retained for retry.
         let settlement = null;
         for (let attempt = 1; attempt <= FINALIZE_MAX_ATTEMPTS; attempt += 1) {
+          if (stopping) break; // convert to durable retryable state immediately
           let receipt = null;
           let finalizeError = null;
           try {
@@ -1970,7 +1991,7 @@ export async function createSupervisor(options = {}) {
           }
           settlement = normalizeSettlementReceipt(receipt, finalizeError);
           if (isSettlementProven(settlement.proof)) break;
-          if (attempt < FINALIZE_MAX_ATTEMPTS) {
+          if (attempt < FINALIZE_MAX_ATTEMPTS && !stopping) {
             await new Promise((resolveTick) => setTimeout(resolveTick, FINALIZE_RETRY_DELAY_MS));
           }
         }
@@ -1984,7 +2005,7 @@ export async function createSupervisor(options = {}) {
               signalsAttempted: settlement.signalsAttempted ?? undefined,
             },
           });
-        } else {
+        } else if (!stopping) {
           commit({
             type: 'cleanup_recorded',
             payload: {
@@ -1997,13 +2018,18 @@ export async function createSupervisor(options = {}) {
             },
           });
           // Retain binding + capability file: the retry surface stays intact.
-          persistRuntimeBindingRecords(layout, runtimeBindings);
+          // NEVER re-persist an emptied map (stale-owner clobber guard).
+          if (runtimeBindings.has(dispatchId)) {
+            persistRuntimeBindingsIfOwned();
+          }
         }
       } catch {
         // The owner process is shutting down or the wait was cancelled;
         // recovery reconciliation records the truthful outcome instead.
       }
     })();
+    pendingFinalizations.add(launchFinalizer);
+    launchFinalizer.finally(() => pendingFinalizations.delete(launchFinalizer));
 
     return {
       dispatchId,
@@ -2457,6 +2483,8 @@ export async function createSupervisor(options = {}) {
   async function stop() {
     if (stopped) return;
     stopped = true;
+    // LATCH FIRST: every commit/persist path checks this flag, so from this
+    // moment this owner can no longer mutate durable state.
     stopping = true;
     try {
       // Bounded shutdown: an orphaned half-open client socket must never wedge
@@ -2469,13 +2497,21 @@ export async function createSupervisor(options = {}) {
     } catch {
       // Best-effort teardown; recovery reconciles anything left behind.
     }
+    // Drain EVERY registered finalizer — recovered-terminal settlements AND
+    // launch-time finalizations — before releasing ownership. A finalizer
+    // still parked on provider work converts to its durable retryable state
+    // via the stopping guards; the bound below only caps pathological waits,
+    // and safety never depends on it.
+    if (pendingFinalizations.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...pendingFinalizations]),
+        new Promise((resolveTick) => setTimeout(resolveTick, 4_000).unref?.()),
+      ]);
+    }
+    // Maps are cleared ONLY after the drain so in-flight finalizers always
+    // observed their own records (never an emptied view).
     runtimeBindings.clear();
     liveBindingObjects.clear();
-    // Drain any in-flight recovered settlement BEFORE releasing ownership so
-    // no journal write races teardown.
-    if (pendingFinalizations.size > 0) {
-      await Promise.allSettled([...pendingFinalizations]);
-    }
     try {
       await releaseSupervisorLock(lock, identity.runtimeNonce);
     } catch {
@@ -2564,6 +2600,12 @@ export async function createSupervisor(options = {}) {
       knownDispatchIds: () => new Set(Object.keys(store.state.dispatches)),
       dispatchOutcomeOf: (dispatchId) => store.state.dispatches[dispatchId]?.terminalOutcome ?? null,
       appendDelivery: (type, payload, callbackRef) => {
+        // Teardown: never append past ownership. Reply with the DURABLE
+        // acknowledgement watermark — truthful, no fabricated sequence — so
+        // the worker retries against the next owner.
+        if (stopping) {
+          return { duplicate: true, acknowledgedSequence: store.state.acknowledgedThrough };
+        }
         // Duplicates must bypass the generic commit wrapper: they return the
         // prior durable acknowledgement and never touch the journal.
         const result = commitDelivery(store, { type, payload, ...(callbackRef ? { callbackRef } : {}) });
