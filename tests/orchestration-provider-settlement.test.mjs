@@ -405,12 +405,27 @@ test('R12A-R2: close() group sweep authority comes from recorded identity, not c
   };
   const realKill = process.kill;
   const origPlatform = process.platform;
+  let groupDead = false;
   Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
   process.kill = (pidOrGroup, signal) => {
     killed.push(`${pidOrGroup < 0 ? 'GROUP' : 'PID'}:${signal}`);
-    if (pidOrGroup === -groupChild.pid && signal === 'SIGKILL') {
-      groupChild.signalCode = 'SIGKILL';
-      groupChild.emitExit?.();
+    if (pidOrGroup === -groupChild.pid) {
+      // Signal 0 is the emptiness PROBE the fixed close() ladder now uses to
+      // authorize `group-stopped`: it must throw ESRCH once (and only once)
+      // the group has actually been killed, exactly like a real kernel.
+      if (signal === 0) {
+        if (groupDead) {
+          const err = new Error('No such process');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        return;
+      }
+      if (signal === 'SIGKILL') {
+        groupChild.signalCode = 'SIGKILL';
+        groupDead = true;
+        groupChild.emitExit?.();
+      }
     }
   };
   t.after(() => { process.kill = realKill; Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true }); });
@@ -443,9 +458,22 @@ test('R12A-R2: codex close() uses the recorded group id for the SIGKILL sweep', 
     kill() {},
   };
   const realKill = process.kill;
-  process.kill = (pidOrGroup) => {
+  let groupDead = false;
+  process.kill = (pidOrGroup, signal) => {
     if (pidOrGroup === -(child.pid)) {
+      // Signal 0 is the emptiness PROBE the fixed close() ladder now uses to
+      // authorize `group-stopped`: it must throw ESRCH once (and only once)
+      // the group has actually been killed, exactly like a real kernel.
+      if (signal === 0) {
+        if (groupDead) {
+          const err = new Error('No such process');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        return;
+      }
       sawGroup = true;
+      groupDead = true;
       child.exitCode = 0;
       child.__fn?.();
     }

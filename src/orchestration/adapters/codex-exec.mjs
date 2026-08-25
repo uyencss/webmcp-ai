@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { validateAdapter } from './index.mjs';
-import { createPlatformIdentityDeps } from '../process-identity.mjs';
+import { createPlatformIdentityDeps, proveProcessGroupEmpty } from '../process-identity.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 
 /**
@@ -230,8 +230,15 @@ export function createCodexExecAdapter(options = {}) {
     },
     /**
      * Proof-driven close: SIGKILL the owned group, then WAIT for the exit.
-     * `group-stopped` is claimed only with an observed exit; a surviving
-     * child yields `group-signalled` — never a bare `killed`.
+     * When a real process group is recorded, `group-stopped` is claimed
+     * ONLY once `proveProcessGroupEmpty` independently proves the WHOLE
+     * group is gone (`kill(-pgid, 0)` -> ESRCH) — the leader's own `exit`
+     * event proves nothing about grandchildren that were spawned outside
+     * this single SIGKILL's reach if the group-level kill itself had to
+     * fall back to a pid-only signal. Without a usable group id, the
+     * ladder falls back to pid-only proof of the single owned child. A
+     * surviving group/child yields `group-signalled` — never a bare
+     * `killed`.
      */
     async close({ binding }) {
       const child = binding?.__child;
@@ -242,7 +249,8 @@ export function createCodexExecAdapter(options = {}) {
       // Group authority comes from the RECORDED process identity, never a
       // runtime `.detached` flag (ChildProcess exposes none).
       const groupId = binding?.processIdentity?.processGroupId;
-      if (process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1) {
+      const hasGroup = process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1;
+      if (hasGroup) {
         try {
           process.kill(-groupId, 'SIGKILL');
           signalsAttempted.push('GROUP_SIGKILL');
@@ -258,7 +266,7 @@ export function createCodexExecAdapter(options = {}) {
           signalsAttempted.push('SIGKILL');
         } catch { /* already gone */ }
       }
-      const exited = await new Promise((resolveExit) => {
+      await new Promise((resolveExit) => {
         if (gone()) { resolveExit(true); return; }
         const timer = setTimeout(() => {
           child.off('exit', onExit);
@@ -270,7 +278,8 @@ export function createCodexExecAdapter(options = {}) {
         };
         child.once('exit', onExit);
       });
-      if (!exited && !gone()) {
+      const done = hasGroup ? proveProcessGroupEmpty(groupId) === 'empty' : gone();
+      if (!done) {
         // The kill was delivered but death is unproven. Never claim killed/absent.
         return { ok: true, disposition: 'group-signalled', signalsAttempted: [...signalsAttempted] };
       }

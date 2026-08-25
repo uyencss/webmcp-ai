@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { ORCHESTRATION_LIMITS } from '../constants.mjs';
-import { createPlatformIdentityDeps } from '../process-identity.mjs';
+import { createPlatformIdentityDeps, proveProcessGroupEmpty } from '../process-identity.mjs';
 import { createAtomicExclusiveFile } from '../atomic-file.mjs';
 import { reserveRefsBytes } from '../refs-quota.mjs';
 import { sanitizeValue } from '../redaction.mjs';
@@ -109,6 +109,17 @@ export function createOwnedProcessAdapter(options = {}) {
       // ABSENCE IS THE ONLY no-op TICKET: a live child must never be skipped
       // because of a platform check. Where group signalling is unavailable
       // (win32 / no group), the pid-level ladder still runs to completion.
+      //
+      // NOTE on the pid-only branch below: this platform/identity has no
+      // POSIX process-group primitive to prove emptiness with (win32 has no
+      // process groups and this runtime has not wired up a Job Object
+      // substitute yet; `!groupId || groupId <= 1` means no group was even
+      // recorded). `group-stopped` here therefore means "the single owned
+      // pid provably exited", NOT "the whole process group is provably
+      // empty" — see the settlement.mjs contract doc for the platform
+      // caveat. It is the best proof available in the absence of a group,
+      // and is a deliberate, documented degrade (see R13 handoff), not an
+      // oversight.
       const settled = () => !child || child.exitCode !== null || child.signalCode !== null;
       if (platform === 'win32' || !groupId || groupId <= 1) {
         if (settled()) return { ok: true, disposition: 'no-op', signalsAttempted: [] };
@@ -146,25 +157,49 @@ export function createOwnedProcessAdapter(options = {}) {
         }
         signalsAttempted.push(signal);
       };
-      const waitForExit = () =>
-        child
-          ? Promise.race([
-              new Promise((resolveExit) => child.once('exit', () => resolveExit(true))),
-              new Promise((resolveTick) => setTimeout(() => resolveTick(false), signalGraceMs).unref?.()),
-            ])
-          : Promise.resolve(false);
-      // Group-level interrupt ladder: no grandchild may outlive a closed worker.
+      // A dead child's 'exit' event has ALREADY fired once and will never
+      // fire again: attaching a listener AFTER the fact — which the group
+      // escalation below can legitimately do, since the leader may already
+      // be gone while the group still has live members — would otherwise
+      // resolve ONLY through the unref'd fallback timer below, which by
+      // definition never keeps the loop alive on its own. The settled()
+      // check up front is what makes this a real, always-resolving wait
+      // rather than a leak that only happened not to be hit before this
+      // ladder started calling it a second time.
+      const waitForExit = () => new Promise((resolveExit) => {
+        if (!child || settled()) { resolveExit(true); return; }
+        const timer = setTimeout(() => {
+          child.off('exit', onExit);
+          resolveExit(settled());
+        }, signalGraceMs);
+        const onExit = () => {
+          clearTimeout(timer);
+          resolveExit(true);
+        };
+        child.once('exit', onExit);
+      });
+      // Group-level interrupt ladder: no grandchild may outlive a closed
+      // worker. PROOF, not the leader's own `exit` event, gates escalation
+      // and the terminal disposition: a leader that comply-exits after
+      // SIGTERM says NOTHING about grandchildren that ignored the same
+      // signal and are still parented inside the group. `waitForExit()` is
+      // used only to pace each rung (an early-exit optimisation when the
+      // leader happens to die quickly); the actual decision to stop
+      // escalating — and the only thing allowed to authorize
+      // `group-stopped` + `exitProven: true` — is an independent
+      // `kill(-pgid, 0)` probe of the WHOLE group.
       signalGroup('SIGTERM');
-      let stopped = await waitForExit();
-      if (!stopped) {
+      await waitForExit();
+      let groupProof = proveProcessGroupEmpty(groupId, platform);
+      if (groupProof !== 'empty') {
         signalGroup('SIGKILL');
-        stopped = await waitForExit();
+        await waitForExit();
+        groupProof = proveProcessGroupEmpty(groupId, platform);
       }
-      return {
-        ok: true,
-        disposition: stopped ? 'group-stopped' : 'group-signalled',
-        signalsAttempted: [...signalsAttempted],
-      };
+      if (groupProof === 'empty') {
+        return { ok: true, disposition: 'group-stopped', exitProven: true, signalsAttempted: [...signalsAttempted] };
+      }
+      return { ok: true, disposition: 'group-signalled', signalsAttempted: [...signalsAttempted] };
     },
     async interrupt({ binding, reason }) {
       if (!binding?.__child) {

@@ -310,6 +310,133 @@ test('R10B: a live provider-session binding after restart types LOST instead of 
   await waitFor(() => !pidAlive(sleeper.pid), 8000, 'orphaned provider process to be stopped by recovery');
 }, { timeout: 60_000 });
 
+test('R13-BUG1: restoredSignalLadder never leaves a signal-ignoring grandchild alive just because the leader died first', async (t) => {
+  // Reproduces BUG1 at the SUPERVISOR layer (restoredSignalLadder /
+  // stopOrphanedByProvenIdentity), using REAL processes only — no
+  // process.kill monkeypatch, no stub child object. The leader installs NO
+  // signal handlers of its own, so it dies from the very first rung's
+  // default disposition (SIGINT). A ladder that stops escalating merely
+  // because the LEADER's own pid went away (the pre-fix bug) would leave
+  // the grandchild — which explicitly ignores SIGINT and SIGTERM — running
+  // forever, since SIGKILL would never be sent to the group.
+  const stateDir = tempStateDir(t, 'p1grp');
+  const coordinationId = 'coord_r13_grp';
+
+  const kidFile = join(stateDir, 'kid.pid');
+  const leaderFixture = join(stateDir, 'leader.mjs');
+  // The grandchild writes ITS OWN pid file, only AFTER installing its
+  // SIGINT/SIGTERM handlers — a parent-writes-immediately pid file is a
+  // real race (the new node process has not even parsed its script yet),
+  // which can let a signal kill the "stubborn" grandchild via default
+  // disposition and produce a false negative that looks like a pass.
+  const kidScript = [
+    "process.on('SIGINT', () => {});",
+    "process.on('SIGTERM', () => {});",
+    'require("fs").writeFileSync(process.env.KID_FILE, String(process.pid));',
+    'setInterval(() => {}, 1000);',
+  ].join(' ');
+  writeFileSync(leaderFixture, [
+    "import { spawn } from 'node:child_process';",
+    `spawn(process.execPath, ['-e', ${JSON.stringify(kidScript)}], { stdio: 'ignore' });`,
+    "// The leader itself installs NO handlers: it dies from the very first",
+    "// default-disposition signal sent to the group (SIGINT).",
+    "setInterval(() => {}, 1000);",
+  ].join('\n'));
+
+  const leader = spawn(process.execPath, [leaderFixture], {
+    detached: process.platform !== 'win32',
+    stdio: 'ignore',
+    env: { ...process.env, KID_FILE: kidFile },
+  });
+  leader.unref();
+  const killAll = () => {
+    try { process.kill(-leader.pid, 'SIGKILL'); } catch { try { leader.kill('SIGKILL'); } catch { /* gone */ } }
+    try {
+      const kidPidNow = Number.parseInt(readFileSync(kidFile, 'utf8').trim(), 10);
+      if (Number.isFinite(kidPidNow)) process.kill(kidPidNow, 'SIGKILL');
+    } catch { /* file absent or already gone */ }
+  };
+  t.after(killAll);
+  registerCloser(killAll);
+
+  await waitFor(() => pidAlive(leader.pid), 3000, 'leader to spawn');
+  // writeFileSync is open+write+close: a poll can observe the file between
+  // open() and the write landing, reading an empty string (NaN pid). Require
+  // non-empty content, not just existence, before trusting it.
+  await waitFor(() => existsSync(kidFile) && readFileSync(kidFile, 'utf8').trim().length > 0,
+    3000, 'grandchild pid file to appear');
+  const kidPid = Number.parseInt(readFileSync(kidFile, 'utf8').trim(), 10);
+  await waitFor(() => pidAlive(kidPid), 3000, 'grandchild to spawn');
+
+  const identityDeps = createPlatformIdentityDeps();
+  const startIdentity = await identityDeps.getStartIdentity(leader.pid);
+  const processGroupId = await identityDeps.getProcessGroupId(leader.pid);
+  assert.equal(typeof startIdentity, 'string', 'leader identity must be provable');
+
+  const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir } });
+  ensureOrchestrationRoots(roots);
+  const layoutLayout = createCoordinationLayout(roots.stateRoot, coordinationId);
+  writeAtomicJson(layoutLayout.manifestPath, {
+    schema: MANIFEST_SCHEMA,
+    coordinationId,
+    fenceEpoch: 1,
+    processGeneration: 1,
+    createdAt: new Date().toISOString(),
+    owner: null,
+  });
+  createAuthority(layoutLayout);
+  const store = openCoordinationStore(layoutLayout);
+  commitDelivery(store, { type: 'task_created', payload: { taskId: 'task_r13' } });
+  commitDelivery(store, { type: 'dispatch_created', payload: { dispatchId: 'disp_r13', taskId: 'task_r13' } });
+  commitDelivery(store, {
+    type: 'dispatch_state_changed',
+    payload: { dispatchId: 'disp_r13', taskId: 'task_r13', state: 'active' },
+  });
+  writeAtomicJson(join(roots.stateRoot, 'coordinations', coordinationId, 'runtime-bindings.json'), {
+    schema: 'webmcp.ai-supervisor-runtime-bindings/v0',
+    bindings: {
+      disp_r13: {
+        bindingId: 'worker_r13',
+        adapterId: 'opencode-server',
+        capability: 'opencode-server',
+        taskId: 'task_r13',
+        fenceEpoch: 1,
+        callbackCapabilityDigest: 'sha256:seeded',
+        processIdentity: { pid: leader.pid, startIdentity, processGroupId },
+      },
+    },
+  });
+
+  // The crashed owner leaves its lock behind; recovery must archive it.
+  const deadOwner = spawnSync(process.execPath, ['-e', '']);
+  await waitFor(() => !pidAlive(deadOwner.pid), 3000, 'fake owner pid to die');
+  writeAtomicJson(layoutLayout.lockPath, {
+    schema: 'webmcp.ai-supervisor-lock/v0',
+    identity: {
+      pid: deadOwner.pid,
+      startIdentity: `${process.platform}:fabricated-r13`,
+      processGroupId: deadOwner.pid,
+      processGeneration: 1,
+      runtimeNonce: 'nonce_r13_seed',
+    },
+    acquiredAt: new Date().toISOString(),
+  });
+
+  // Recovery happens in a SECOND, entirely separate OS process, exercising
+  // the real restoredSignalLadder / stopOrphanedByProvenIdentity code path.
+  const recovered = startSupervisorProcess(t, { stateDir, mode: 'recover', coordinationId });
+  const ready = await recovered.ready;
+  assert.equal(ready.ok, true);
+
+  // THE INVARIANT under test: the ladder must not stop escalating (and
+  // settlement must not claim exit-proven) merely because the LEADER died
+  // from an early rung — a grandchild that ignores the same signals must
+  // still be reached by SIGKILL before recovery is allowed to settle.
+  await waitFor(() => !pidAlive(kidPid), 10_000,
+    'orphaned grandchild to be stopped by recovery, not just its leader');
+  await waitFor(() => !pidAlive(leader.pid), 1000, 'leader to be gone too');
+}, { timeout: 60_000 });
+
 test('R10B: crash before terminal -> reattach -> worker reconnects -> terminal commits exactly once -> settled -> revoked', async (t) => {
   const stateDir = tempStateDir(t, 'reconn');
   const coordinationId = 'coord_r10b_reconn';

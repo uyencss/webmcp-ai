@@ -29,7 +29,7 @@ import {
   resolveOrchestrationRoots,
 } from './paths.mjs';
 import { acquireSupervisorLock, releaseSupervisorLock } from './lock.mjs';
-import { createPlatformIdentityDeps } from './process-identity.mjs';
+import { createPlatformIdentityDeps, proveProcessGroupEmpty } from './process-identity.mjs';
 import { commitDelivery, openCoordinationStore, persistAck } from './store.mjs';
 import { createWorkerCallbackHandlers, buildWorkerPacket, DISPATCH_CAPABILITY_DIRNAME } from './worker-callback.mjs';
 import {
@@ -1270,6 +1270,17 @@ export async function createSupervisor(options = {}) {
    * pid reuse between steps aborts the ladder immediately so a recycled
    * holder can never receive a single byte of our signalling. A surviving
    * worker yields 'group-signalled', which NEVER counts as group-stopped.
+   *
+   * The leader pid's OWN exit is used only for identity drift detection
+   * (`reproveOriginalIdentity`) and to decide when signalling the leader
+   * pid itself is pointless — it is NEVER, by itself, proof that the ladder
+   * may stop or that `group-stopped` may be claimed. A leader that exited
+   * (or complied with an early signal) says nothing about grandchildren
+   * that ignored the same signal and are still parented inside its
+   * recorded process group. Escalation and the terminal disposition are
+   * gated on `proveProcessGroupEmpty` (`kill(-pgid, 0)` -> ESRCH) whenever
+   * a real POSIX group id was recorded; only then does the ladder stop
+   * early or authorize exit proof from the leader's death alone.
    */
   async function restoredSignalLadder(record, identityDeps) {
     const pid = record?.processIdentity?.pid;
@@ -1284,11 +1295,18 @@ export async function createSupervisor(options = {}) {
         await new Promise((resolveTick) => setTimeout(resolveTick, 25));
       }
     };
+    const hasGroup = process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1;
+    const groupProven = () => proveProcessGroupEmpty(processGroupId, process.platform);
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
       const proof = await reproveOriginalIdentity(pid, startIdentity, identityDeps);
-      if (proof === 'exited') break; // original gone: nothing left to signal
       if (proof === 'drift') { driftAborted = true; break; }
-      if (process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1) {
+      if (proof === 'exited') {
+        // The leader itself is gone, but descendants may still hold its
+        // pgid; only stop escalating early once the GROUP is proven empty
+        // (or there is no group primitive available to prove it with).
+        if (!hasGroup || groupProven() !== 'alive') break;
+      }
+      if (hasGroup) {
         try {
           process.kill(-processGroupId, signal);
           signalsAttempted.push(`GROUP_${signal}`);
@@ -1311,11 +1329,23 @@ export async function createSupervisor(options = {}) {
     }
     // Terminal classification requires FRESH proof, not assumption.
     const finalProof = await reproveOriginalIdentity(pid, startIdentity, identityDeps);
-    if (finalProof === 'exited') {
-      return { signalsAttempted, disposition: 'group-stopped', exitProven: true };
-    }
     if (finalProof === 'drift') {
       return { signalsAttempted, disposition: 'identity-drift-aborted', driftAborted: true };
+    }
+    if (hasGroup) {
+      if (groupProven() === 'empty') {
+        return { signalsAttempted, disposition: 'group-stopped', exitProven: true };
+      }
+      return {
+        signalsAttempted,
+        disposition: signalsAttempted.length > 0 ? 'group-signalled' : 'untouched-alive',
+      };
+    }
+    // No POSIX group primitive to prove emptiness with: the leader pid's
+    // own proven death is the strongest available proof (see decision (a)
+    // in the R13 handoff / settlement.mjs contract doc for the caveat).
+    if (finalProof === 'exited') {
+      return { signalsAttempted, disposition: 'group-stopped', exitProven: true };
     }
     return {
       signalsAttempted,

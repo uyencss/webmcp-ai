@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { validateAdapter } from './index.mjs';
-import { createPlatformIdentityDeps } from '../process-identity.mjs';
+import { createPlatformIdentityDeps, proveProcessGroupEmpty } from '../process-identity.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 
 /**
@@ -403,9 +403,16 @@ export function createClaudeStreamAdapter(options = {}) {
 
     /**
      * Proof-driven close: the ladder is SIGTERM -> SIGKILL with a bounded
-     * exit wait after every step. The receipt claims `group-stopped` ONLY
-     * when the child's exit was actually observed; a surviving child yields
-     * `group-signalled` (pending retry), never `stopped`.
+     * exit wait after every step. When a real process group is recorded,
+     * the receipt claims `group-stopped` ONLY once the WHOLE group is
+     * proven empty via `proveProcessGroupEmpty` (`kill(-pgid, 0)` -> ESRCH)
+     * — the leader's own `exit` event is used only to pace each rung, never
+     * to authorize the claim, because a leader that complies with SIGTERM
+     * proves nothing about grandchildren that ignored the same signal and
+     * are still parented inside the group. Without a usable group id (no
+     * group recorded, or win32 — see process-identity.mjs), the ladder
+     * falls back to pid-only proof of the single owned child. A surviving
+     * group/child yields `group-signalled` (pending retry), never `stopped`.
      */
     async close({ binding }) {
       const child = binding?.__child;
@@ -419,8 +426,9 @@ export function createClaudeStreamAdapter(options = {}) {
       // objects expose no `.detached` flag at runtime, so that must never be
       // the gate.
       const groupId = binding?.processIdentity?.processGroupId;
+      const hasGroup = process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1;
       const signalOnce = (signal) => {
-        if (process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1) {
+        if (hasGroup) {
           try {
             process.kill(-groupId, signal);
             signalsAttempted.push(`GROUP_${signal}`);
@@ -444,13 +452,16 @@ export function createClaudeStreamAdapter(options = {}) {
         };
         child.once('exit', onExit);
       });
+      const proven = () => (hasGroup ? proveProcessGroupEmpty(groupId) === 'empty' : gone());
       signalOnce('SIGTERM');
-      let exited = await awaitExit(graceMs);
-      if (!exited && !gone()) {
+      await awaitExit(graceMs);
+      let done = proven();
+      if (!done) {
         signalOnce('SIGKILL');
-        exited = await awaitExit(forceGraceMs);
+        await awaitExit(forceGraceMs);
+        done = proven();
       }
-      if (!exited && !gone()) {
+      if (!done) {
         // Signals were sent but survival remains possible. NEVER claim stopped.
         return { ok: true, disposition: 'group-signalled', signalsAttempted: [...signalsAttempted] };
       }

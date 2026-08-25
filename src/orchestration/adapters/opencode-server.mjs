@@ -9,7 +9,7 @@ import { AiCliError } from '../../errors.mjs';
 import { writeAtomicJson } from '../atomic-file.mjs';
 import { validateAdapter } from './index.mjs';
 import { normalizeOpenCodeEvent, createEventDeduper } from './opencode-events.mjs';
-import { createPlatformIdentityDeps } from '../process-identity.mjs';
+import { createPlatformIdentityDeps, proveProcessGroupEmpty } from '../process-identity.mjs';
 import { resolveOpencodeCliDb } from '../../providers/opencode.mjs';
 
 function sha256(value) {
@@ -984,14 +984,27 @@ export function createOpenCodeServerAdapter(options = {}) {
         });
       };
       if (isChildLive(child)) {
+        // Group authority comes from the child's own pid: `detached: true`
+        // at spawn time made it its own process-group leader.
+        const groupId = child.pid;
+        const hasGroup = process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1;
+        // PROOF, not the leader's own settled state, gates escalation and
+        // `exitProven`: a leader that dies (or complies with SIGTERM) says
+        // nothing about grandchildren that ignored the same signal and are
+        // still parented inside the group. Only an independent
+        // `kill(-pgid, 0)` probe of the WHOLE group may authorize it.
         sweepProcessGroup(child, 'SIGTERM');
         await awaitChildExit(1500);
-        if (isChildLive(child)) sweepProcessGroup(child, 'SIGKILL');
-        // PROOF, not assumption: the child must actually be dead before any
-        // destructive cleanup is authorized. SIGKILL cannot be trapped, so a
-        // trapped SIGTERM still terminates here.
-        await awaitChildExit(2000);
-        exitProven = !isChildLive(child);
+        let groupEmpty = hasGroup ? proveProcessGroupEmpty(groupId) === 'empty' : !isChildLive(child);
+        if (!groupEmpty) {
+          sweepProcessGroup(child, 'SIGKILL');
+          // PROOF, not assumption: the child must actually be dead before any
+          // destructive cleanup is authorized. SIGKILL cannot be trapped, so a
+          // trapped SIGTERM still terminates here.
+          await awaitChildExit(2000);
+          groupEmpty = hasGroup ? proveProcessGroupEmpty(groupId) === 'empty' : !isChildLive(child);
+        }
+        exitProven = groupEmpty;
         stopped = true;
       }
       let released = false;

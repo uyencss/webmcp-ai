@@ -99,3 +99,41 @@ export async function readProcessIdentity(pid, deps = {}) {
   }
   return { pid, startIdentity, processGroupId, runtimeNonce };
 }
+
+/**
+ * Prove whether a POSIX process group is EMPTY via a signal-0 probe against
+ * the negated group id (`kill(-pgid, 0)`). This is the ONLY proof strong
+ * enough to authorize a "the group is gone" disposition: a group LEADER
+ * that exited honestly (or was itself the only signalled member) proves
+ * NOTHING about grandchildren that ignored the same signal and are still
+ * parented inside the group. A ladder that stops escalating merely because
+ * the leader's own `exit` event fired is exactly the bug this probe closes.
+ *
+ * Return values:
+ *   'empty'       - ESRCH: no process anywhere shares this group id. The
+ *                   group is PROVEN EMPTY; this is the only value that may
+ *                   authorize an exit-proven, group-level disposition.
+ *   'alive'       - either the kernel found at least one live member (no
+ *                   throw), or the probe threw EPERM. EPERM means the group
+ *                   EXISTS but signalling was refused — that is NOT
+ *                   evidence of absence, so it is folded into 'alive' and
+ *                   must be treated exactly like "still alive": escalate
+ *                   or park for retry, never settle.
+ *   'unsupported' - there is no POSIX process-group primitive to probe:
+ *                   win32 (no process groups; no Job Object wired up yet
+ *                   in this runtime), or no valid group id was ever
+ *                   recorded. Callers must fall back to pid-only proof and
+ *                   must NEVER read 'unsupported' as evidence of emptiness.
+ */
+export function proveProcessGroupEmpty(groupId, platform = process.platform) {
+  if (platform === 'win32') return 'unsupported';
+  if (!Number.isInteger(groupId) || groupId <= 1) return 'unsupported';
+  try {
+    process.kill(-groupId, 0);
+    return 'alive';
+  } catch (error) {
+    if (error && error.code === 'ESRCH') return 'empty';
+    // EPERM or any other unexpected errno: never proof of absence.
+    return 'alive';
+  }
+}

@@ -15,6 +15,21 @@ import { AiCliError } from '../errors.mjs';
  *                       unproven (`group-signalled`, retained resources).
  *   - failed-unproven:  the finalizer threw, refused, or produced no usable
  *                       evidence; nothing about release is proven.
+ *
+ * PLATFORM CAVEAT (`group-stopped` / PROVEN_EXIT): the "process group"
+ * guarantee above is POSIX-only. It is proven by an independent
+ * `kill(-pgid, 0)` probe (ESRCH) AFTER the interrupt ladder — never merely
+ * by observing the group LEADER's own `exit` event, because a leader that
+ * complies with SIGTERM proves nothing about grandchildren that ignored the
+ * same signal and are still parented inside the group. On win32 (no POSIX
+ * process groups) or whenever no valid group id was ever recorded, this
+ * runtime has no Job Object substitute wired up yet: `group-stopped` there
+ * degrades to proof of the single owned pid's death only, which is the best
+ * available evidence but carries NO process-group-emptiness guarantee. This
+ * is a deliberate, accepted alpha limitation (see the R13 remediation
+ * handoff), not an oversight — a future revision may replace it with a
+ * real Windows Job Object and reinstate the full guarantee on that
+ * platform.
  */
 export const SETTLEMENT_PROOF = Object.freeze({
   PROVEN_EXIT: 'proven-exit',
