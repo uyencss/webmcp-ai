@@ -11,8 +11,9 @@
 // Usage:
 //   node scripts/orchestration-live-canary.mjs <adapter-id> [--prompt] [--public] [--timeout-ms N]
 //
-// Exit codes: 0 pass (receipt recorded) · 2 usage · 3 gate closed ·
-// 4 provider not ready · 5 scenario failed.
+// Exit codes: 0 pass (receipt recorded & promoted) · 2 usage ·
+// 3 gate closed · 4 provider not ready · 5 scenario failed/timed out ·
+// 6 CANARY_EVIDENCE_RECORDED (evidence kept, promotion refused).
 
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -96,6 +97,18 @@ function capabilityScaffold() {
   return Object.fromEntries(canaryMod.CANARY_CAPABILITIES.map((capability) => [capability, 'unsupported']));
 }
 
+/**
+ * EXACT success contract: the scenario passes only when EVERY REQUIRED
+ * capability for this adapter reads 'pass'. Capabilities outside the required
+ * set may stay 'unsupported' without failing the scenario — but a receipt
+ * whose required set is not fully green can never promote (it is recorded as
+ * truthful partial evidence instead).
+ */
+function requiredCapabilitiesSatisfied(capabilities) {
+  return canaryMod.requiredCapabilitiesFor(adapterId)
+    .every((capability) => capabilities?.[capability] === 'pass');
+}
+
 async function boundedVersionProbe(binPath, versionArgs) {
   const run = spawnSync(binPath, versionArgs, {
     cwd: root,
@@ -144,10 +157,13 @@ async function scenarioOwnedProcess() {
   const terminal = await spawned.done;
   capabilities.launch = spawned.binding?.processIdentity?.startIdentity ? 'pass' : 'fail';
   capabilities.progressStream = events.some((entry) => entry.type === 'progress') ? 'pass' : 'fail';
-  // A trivial canary cannot honestly claim interactive control evidence.
-  const ok = terminal.terminalType === 'worker_done' && terminal.exitCode === 0;
+  // Success is the EXACT required-capability verdict, never a blanket guess.
+  let ok = terminal.terminalType === 'worker_done' && terminal.exitCode === 0
+    && capabilities.launch === 'pass';
   if (!ok) {
-    capabilities.progressStream = 'fail';
+    capabilities.progressStream = terminal.terminalType === 'worker_done' && terminal.exitCode === 0
+      ? capabilities.progressStream
+      : 'fail';
     return {
       ok,
       evidence: { terminalType: terminal.terminalType, exitCode: terminal.exitCode },
@@ -165,10 +181,13 @@ async function scenarioOwnedProcess() {
   capabilities.cleanup = cleanupProven ? 'pass' : 'fail';
 
   if (withPublicPhase) {
-    const publicPhase = await runPublicSupervisorPhase();
+    // The public phase MUST target this adapter kind: it drives a REAL
+    // supervisor through task.create -> dispatch.start -> delivery.wait ->
+    // coordination.inspect for the owned-process fixture.
+    const publicPhase = await runPublicSupervisorPhase('owned-process');
     capabilities.publicSupervisorLifecycle = publicPhase.pass ? 'pass' : 'fail';
     return {
-      ok: publicPhase.pass,
+      ok: requiredCapabilitiesSatisfied(capabilities),
       evidence: { terminalType: terminal.terminalType, exitCode: terminal.exitCode, ...publicPhase.evidence },
       capabilities,
       executableVersion: process.version,
@@ -176,7 +195,7 @@ async function scenarioOwnedProcess() {
   }
 
   return {
-    ok: true,
+    ok: requiredCapabilitiesSatisfied(capabilities),
     evidence: {
       terminalType: terminal.terminalType,
       exitCode: terminal.exitCode,
@@ -213,9 +232,15 @@ async function runPublicSupervisorPhase(targetKind, { objective = 'Reply with ex
   const supEnv = { ...env, WEBMCP_AI_ORCHESTRATION_STATE_DIR: publicStateRoot };
   const rootsLocal = stateMod.resolveOrchestrationRoots({ env: supEnv });
   const isOwnedFixture = targetKind === 'owned-process';
+  // The public phase runs under VALID disposable confinement: the whole
+  // phase state root IS the disposable workspace and every task workspace
+  // lives inside it. Preventive confinement is part of what the canary
+  // proves — a dispatch that cannot be confined honestly must fail here.
   const config = publicAdaptersMod.createTrustedCoordinatorConfig({
     stateDir: join(publicStateRoot, 'trusted'),
     allowFixtureDispatch: isOwnedFixture,
+    confinement: 'disposable-workspace',
+    disposableRoot: publicStateRoot,
     openCodeBin: env.OPENCODE_BIN ?? 'opencode',
     claudeBin: env.CLAUDE_BIN ?? 'claude',
     codexBin: env.CODEX_BIN ?? 'codex',
@@ -259,6 +284,8 @@ async function runPublicSupervisorPhase(targetKind, { objective = 'Reply with ex
       adapters: [adapter],
       trustedCoordinatorConfig: {
         allowFixtureDispatch: isOwnedFixture,
+        confinement: 'disposable-workspace',
+        disposableRoot: publicStateRoot,
         ...(isOwnedFixture ? {} : { allowUnprovenProviderDispatch: true }),
       },
     });
@@ -303,7 +330,10 @@ async function runPublicSupervisorPhase(targetKind, { objective = 'Reply with ex
         }
         cursor = Math.max(cursor, delivery.sequence);
       }
-      if (seen.has('worker_done') && seen.has('cleanup_recorded')) break;
+      if (
+        (seen.has('worker_done') || seen.has('worker_failed') || seen.has('worker_cancelled'))
+        && seen.has('cleanup_recorded')
+      ) break;
       if (Date.now() > deadline) break;
     }
 
@@ -369,7 +399,7 @@ async function scenarioOpenCodeServer() {
     capabilities.cleanup = stopReceipt.released ? 'pass' : 'fail';
 
     return {
-      ok: Object.values(capabilities).every((verdict) => verdict === 'pass'),
+      ok: requiredCapabilitiesSatisfied(capabilities),
       evidence: {
         healthOk: true,
         databaseIdentity: started.runtime.databaseIdentity.slice(0, 16),
@@ -452,7 +482,7 @@ async function scenarioClaudeStream() {
   capabilities.cleanup = ['worker_done', 'worker_failed'].includes(terminal2.terminalType) ? 'pass' : 'fail';
 
   return {
-    ok: Object.values(capabilities).every((verdict) => verdict === 'pass'),
+    ok: requiredCapabilitiesSatisfied(capabilities),
     evidence: {
       turnOne: { doneSummary: phase.doneSummary, progressEvents: phase.progressEvents },
       turnTwo: { terminalType: terminal2.terminalType, resultTexts: secondTexts },
@@ -486,7 +516,7 @@ async function scenarioCodexExec() {
   capabilities.publicSupervisorLifecycle = phase.pass ? 'pass' : 'fail';
 
   return {
-    ok: Object.values(capabilities).every((verdict) => verdict === 'pass'),
+    ok: requiredCapabilitiesSatisfied(capabilities),
     evidence: {
       doneSummary: phase.doneSummary,
       progressEvents: phase.progressEvents,
@@ -515,9 +545,15 @@ if (scenario.notReady) {
   await flushCleanup();
   fail(4, 'CANARY_PROVIDER_NOT_READY', scenario.reason, { adapterId });
 }
-if (!scenario.ok || !scenario.capabilities) {
+if (!scenario.capabilities || typeof scenario.capabilities !== 'object') {
   await flushCleanup();
-  fail(5, 'CANARY_SCENARIO_FAILED', 'scenario finished without its success invariant', { adapterId, evidence: scenario.evidence });
+  fail(5, 'CANARY_SCENARIO_FAILED', 'scenario finished without a capability verdict map', { adapterId, evidence: scenario.evidence });
+}
+// A scenario that finished but did not satisfy EVERY required capability
+// still produced honest evidence: it is RECORDED truthfully and promotion is
+// refused below (exit 6) — never silently discarded as a hard failure.
+if (!scenario.ok) {
+  await flushCleanup();
 }
 
 const resolvedExecutable = canaryMod.resolveExecutableDigest(adapterId, { env });
