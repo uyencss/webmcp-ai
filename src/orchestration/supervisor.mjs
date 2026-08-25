@@ -416,6 +416,15 @@ export async function createSupervisor(options = {}) {
   // the next owner completes them from durable state. Declared early because
   // boot-time recovery paths reference it.
   let stopping = false;
+  /**
+   * Ownership-guarded binding persistence for runtime (post-boot) paths:
+   * once stop() latches, a stale owner must never re-persist bindings.
+   */
+  function persistRuntimeBindingsIfOwned() {
+    if (stopping) return false;
+    persistRuntimeBindingRecords(layout, runtimeBindings);
+    return true;
+  }
   const runtimeBindings = new Map(); // dispatchId -> { record }
   const liveBindingObjects = new Map(); // dispatchId -> live adapter binding object
   const reattachedAtBoot = new Set(); // dispatchIds reattached during THIS boot
@@ -498,13 +507,6 @@ export async function createSupervisor(options = {}) {
       journal.push(delivery);
       return delivery;
     };
-
-    /** Ownership-guarded binding persistence for runtime (post-boot) paths. */
-    function persistRuntimeBindingsIfOwned() {
-      if (stopping) return false;
-      persistRuntimeBindingRecords(layout, runtimeBindings);
-      return true;
-    }
 
     // Restart reconciliation is TRANSACTIONAL. Phase A loads every durable
     // record ONCE; phase B classifies every nonterminal dispatch against
@@ -689,7 +691,7 @@ export async function createSupervisor(options = {}) {
           }
           if (dbUnresolved) {
             runtimeBindings.set(dispatch.dispatchId, { record });
-            persistRuntimeBindingRecords(layout, runtimeBindings);
+            persistRuntimeBindingsIfOwned();
             parkRetainedDispatch(dispatch, orphanStop, 'recovery-db-cleanup-unproven-retained');
             continue;
           }
@@ -775,7 +777,8 @@ export async function createSupervisor(options = {}) {
       for (const [dispatchId, plan] of residualSweeps.entries()) {
         const key = `${dispatchId}:residual`;
         if (residualSweptKeys.has(key)) continue;
-        residualSweptKeys.add(key);
+        // NOTE: the key is consumed ONLY after this plan resolves with
+        // NOTHING retained — a retention outcome must stay retryable.
         // Prove-stop any lingering worker BEFORE deleting its last durable
         // pointer (bound launch intent behind a terminal journal entry).
         let intentStop = null;
@@ -810,13 +813,14 @@ export async function createSupervisor(options = {}) {
           residualDbUnresolved = !dbReleaseCompleted(dispatchId);
           if (residualDbUnresolved) {
             runtimeBindings.set(dispatchId, { record: plan.record });
-            persistRuntimeBindingRecords(layout, runtimeBindings);
+            persistRuntimeBindingsIfOwned();
           }
         }
         if (plan.record && !residualDbUnresolved) revokeDispatchCapabilityFile(plan.record);
         for (const capPath of plan.capPaths) {
           try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
         }
+        const anythingRetained = boundIntentUnresolved || residualDbUnresolved;
         let retainedLaunchIntents = 0;
         for (const intentFile of plan.intentFiles) {
           if (boundIntentUnresolved) {
@@ -825,6 +829,26 @@ export async function createSupervisor(options = {}) {
           }
           try { rmSync(intentFile, { force: true }); } catch { /* best effort */ }
         }
+        if (anythingRetained) {
+          // NON-CONSUMING retention evidence: later recoveries re-run this
+          // plan from the same durable truth until nothing needs retaining.
+          commit({
+            type: 'cleanup_recorded',
+            payload: {
+              dispatchId,
+              ...(store.state.dispatches[dispatchId]?.taskId
+                ? { taskId: store.state.dispatches[dispatchId].taskId }
+                : {}),
+              disposition: 'residual-artifacts-retained',
+              idempotencyKey: `${key}:attempt`,
+              ...(intentStop ? { launchIntentStop: intentStop } : {}),
+              retainedLaunchIntents,
+              ...(residualDbUnresolved ? { retainedRuntimeBinding: true } : {}),
+            },
+          });
+          continue;
+        }
+        residualSweptKeys.add(key);
         commit({
           type: 'cleanup_recorded',
           payload: {
@@ -997,7 +1021,7 @@ export async function createSupervisor(options = {}) {
     const effectiveRecord = record ?? entry?.record ?? null;
     runtimeBindings.delete(dispatchId);
     liveBindingObjects.delete(dispatchId);
-    if (entry) persistRuntimeBindingRecords(layout, runtimeBindings);
+    if (entry) persistRuntimeBindingsIfOwned();
     // Revoke the capability ONLY after settled is durable; retention of this
     // file is what keeps callback auth alive for unproven (parked) retries.
     if (effectiveRecord) revokeDispatchCapabilityFile(effectiveRecord);
@@ -1116,7 +1140,7 @@ export async function createSupervisor(options = {}) {
         }
         if (!runtimeBindings.has(dispatchId)) {
           runtimeBindings.set(dispatchId, { record });
-          persistRuntimeBindingRecords(layout, runtimeBindings);
+          persistRuntimeBindingsIfOwned();
         }
         return;
       }
@@ -1144,7 +1168,7 @@ export async function createSupervisor(options = {}) {
     await attemptRecoveredDbRelease(dispatchId, taskId, record);
     if (record && !runtimeBindings.has(dispatchId)) {
       runtimeBindings.set(dispatchId, { record });
-      persistRuntimeBindingRecords(layout, runtimeBindings);
+      persistRuntimeBindingsIfOwned();
     }
   }
 
@@ -1365,7 +1389,7 @@ export async function createSupervisor(options = {}) {
     }
     runtimeBindings.delete(dispatchId);
     liveBindingObjects.delete(dispatchId);
-    persistRuntimeBindingRecords(layout, runtimeBindings);
+    persistRuntimeBindingsIfOwned();
   }
 
   /**
@@ -2575,7 +2599,7 @@ export async function createSupervisor(options = {}) {
       validateRuntimeBindingRecord(record);
     }
     runtimeBindings.set(dispatchId, { record });
-    persistRuntimeBindingRecords(layout, runtimeBindings);
+    persistRuntimeBindingsIfOwned();
     return { ok: true, persisted: true };
   }
 

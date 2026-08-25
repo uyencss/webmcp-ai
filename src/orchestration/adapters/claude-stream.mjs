@@ -414,11 +414,15 @@ export function createClaudeStreamAdapter(options = {}) {
       const graceMs = options.closeGraceMsForTest ?? 800;
       const forceGraceMs = options.forceCloseGraceMsForTest ?? 2000;
       const signalsAttempted = [];
-      // Group sweep applies only to detached group leaders we spawned.
+      // Group sweep authority comes from the RECORDED process identity (the
+      // detached spawn made this child its own group leader) — ChildProcess
+      // objects expose no `.detached` flag at runtime, so that must never be
+      // the gate.
+      const groupId = binding?.processIdentity?.processGroupId;
       const signalOnce = (signal) => {
-        if (process.platform !== 'win32' && child.detached === true) {
+        if (process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1) {
           try {
-            process.kill(-child.pid, signal);
+            process.kill(-groupId, signal);
             signalsAttempted.push(`GROUP_${signal}`);
             return;
           } catch { /* fall back to pid-only signalling */ }

@@ -239,9 +239,12 @@ export function createCodexExecAdapter(options = {}) {
       if (gone()) return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
       const forceGraceMs = options.forceCloseGraceMsForTest ?? 2000;
       const signalsAttempted = [];
-      if (process.platform !== 'win32' && child.detached === true) {
+      // Group authority comes from the RECORDED process identity, never a
+      // runtime `.detached` flag (ChildProcess exposes none).
+      const groupId = binding?.processIdentity?.processGroupId;
+      if (process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1) {
         try {
-          process.kill(-child.pid, 'SIGKILL');
+          process.kill(-groupId, 'SIGKILL');
           signalsAttempted.push('GROUP_SIGKILL');
         } catch {
           try {

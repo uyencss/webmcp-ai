@@ -55,8 +55,10 @@ test('R11F-1: a never-loaded production file lowers the overall lines ratio', ()
   const neverRow = rows.find((row) => row.file === 'src/never.mjs');
   assert.equal(neverRow.loaded, false, 'the untouched file must be reported as never loaded');
   assert.equal(neverRow.lines[0], 0);
-  assert.equal(neverRow.lines[1], 4, 'its whole line table counts in the denominator');
-  // 3 code lines of full.mjs covered out of a 7-line universe denominator.
+  // R12I: blank/zero-length lines hold no code and sit OUT of both sides;
+  // only the file's 3 code lines enter the denominator.
+  assert.equal(neverRow.lines[1], 3, 'its code-line table counts in the denominator');
+  // 3 code lines of full.mjs covered out of a 6-code-line universe.
   assert.ok(overall.lines < 100, `unloaded files must drag coverage down, got ${overall.lines}`);
 });
 

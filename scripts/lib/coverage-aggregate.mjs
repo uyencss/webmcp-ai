@@ -64,7 +64,10 @@ export function buildLineTable(sourceText) {
     const startOffset = offset;
     const endOffset = startOffset + text.length - newlineLength;
     offset += text.length;
-    return { startOffset, endOffset, count: startOffset === endOffset ? 1 : 0 };
+    // A zero-length line holds NO code: it is neither covered nor uncovered
+    // and must stay out of both numerator and denominator (count 0 and the
+    // aggregator filters empty rows out of the ratio math).
+    return { startOffset, endOffset, count: 0 };
   });
 }
 
@@ -201,8 +204,8 @@ export function aggregateCoverage({
     const functions = loadedByPath.get(normalizeRealpathSafe(filePath));
 
     if (!functions) {
-      // NEVER-LOADED production file: entire line table counts, zero hit.
-      const total = lineRows.length;
+      // NEVER-LOADED production file: every CODE line counts, zero hit.
+      const total = lineRows.filter((row) => row.endOffset > row.startOffset).length;
       totals.lines[1] += total;
       rows.push({
         file: relative(rootPath, filePath),
@@ -272,12 +275,13 @@ export function aggregateCoverage({
     lineRows.forEach((row, index) => {
       if (row.count <= 0 && row.endOffset > row.startOffset) uncoveredLineNumbers.push(index + 1);
     });
-    const linesHit = lineRows.filter((row) => row.count > 0).length;
-    const linesPct = lineRows.length === 0 ? 100 : (linesHit / lineRows.length) * 100;
+    const codeLines = lineRows.filter((row) => row.endOffset > row.startOffset);
+    const linesHit = codeLines.filter((row) => row.count > 0).length;
+    const linesPct = codeLines.length === 0 ? 100 : (linesHit / codeLines.length) * 100;
     const funcsPct = functionsTotal === 0 ? 100 : (functionsHit / functionsTotal) * 100;
     const branchesPct = branchesTotal === 0 ? 100 : (branchesHit / branchesTotal) * 100;
     totals.lines[0] += linesHit;
-    totals.lines[1] += lineRows.length;
+    totals.lines[1] += codeLines.length;
     totals.functions[0] += functionsHit;
     totals.functions[1] += functionsTotal;
     totals.branches[0] += branchesHit;

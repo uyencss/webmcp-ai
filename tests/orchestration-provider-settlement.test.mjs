@@ -390,3 +390,72 @@ test('R12A: production launch paths contain no fabricated indeterminate identiti
     assert.doesNotMatch(text, /indeterminate-\d/, `${url.pathname} hardcodes an indeterminate identity`);
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* Review round-2 pins                                                 */
+/* ------------------------------------------------------------------ */
+
+test('R12A-R2: close() group sweep authority comes from recorded identity, not child.detached', async (t) => {
+  // A live stub child WITH a recorded group id must receive GROUP_* signals.
+  let killed = [];
+  const groupChild = {
+    exitCode: null, signalCode: null, pid: process.pid + 102_000,
+    once() {}, off() {}, on() {},
+    kill(signal) { if (signal === 'SIGKILL') { this.exitCode = null; } },
+  };
+  const realKill = process.kill;
+  const origPlatform = process.platform;
+  Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+  process.kill = (pidOrGroup, signal) => {
+    killed.push(`${pidOrGroup < 0 ? 'GROUP' : 'PID'}:${signal}`);
+    if (pidOrGroup === -groupChild.pid && signal === 'SIGKILL') {
+      groupChild.signalCode = 'SIGKILL';
+      groupChild.emitExit?.();
+    }
+  };
+  t.after(() => { process.kill = realKill; Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true }); });
+
+  const stateDir = tempDir(t, 'claude-close-group');
+  const adapter = createClaudeStreamAdapter({
+    stateDir,
+    claudeBin: process.execPath,
+    claudeArgs: ['-e', ''],
+    closeGraceMsForTest: 30,
+    forceCloseGraceMsForTest: 40,
+  });
+  const receipt = await adapter.close({
+    binding: {
+      __child: groupChild,
+      processIdentity: { pid: groupChild.pid, processGroupId: groupChild.pid },
+    },
+  });
+  assert.equal(receipt.disposition, 'group-stopped');
+  assert.equal(killed.some((k) => k.startsWith('GROUP:')), true,
+    `group signals expected (${killed})`);
+});
+
+test('R12A-R2: codex close() uses the recorded group id for the SIGKILL sweep', async (t) => {
+  let sawGroup = false;
+  const child = {
+    exitCode: null, signalCode: null, pid: process.pid + 103_000,
+    once(event, fn) { if (event === 'exit') this.__fn = fn; },
+    off() {},
+    kill() {},
+  };
+  const realKill = process.kill;
+  process.kill = (pidOrGroup) => {
+    if (pidOrGroup === -(child.pid)) {
+      sawGroup = true;
+      child.exitCode = 0;
+      child.__fn?.();
+    }
+  };
+  t.after(() => { process.kill = realKill; });
+  const stateDir = tempDir(t, 'codex-close-group');
+  const adapter = createCodexExecAdapter({ stateDir, codexBin: process.execPath, codexArgs: ['-e', ''] });
+  const receipt = await adapter.close({
+    binding: { __child: child, processIdentity: { pid: child.pid, processGroupId: child.pid } },
+  });
+  assert.equal(sawGroup, true, 'GROUP kill expected against the RECORDED pgid');
+  assert.equal(receipt.disposition, 'group-stopped');
+});
