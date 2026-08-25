@@ -3,13 +3,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, readdirSync, rmSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { writeAtomicJson } from '../atomic-file.mjs';
 import { validateAdapter } from './index.mjs';
 import { normalizeOpenCodeEvent, createEventDeduper } from './opencode-events.mjs';
 import { createPlatformIdentityDeps } from '../process-identity.mjs';
+import { resolveOpencodeCliDb } from '../../providers/opencode.mjs';
 
 function sha256(value) {
   return createHash('sha256').update(String(value)).digest('hex');
@@ -320,6 +321,147 @@ function runBounded(binPath, binArgs, env, timeoutMs = 15_000) {
 function sanitizeValueText(text) {
   // Preflight stderr stays in memory only and never carries auth material.
   return text.replace(/authorization:[^\n]*/gi, '[REDACTED]').slice(0, 2000);
+}
+
+/**
+ * Recovery-side release of a runtime-owned database via the durable cleanup
+ * lease persisted in the runtime binding record. Every step fails closed and
+ * RETAINS the tree when anything is unprovable:
+ *
+ *   1. the lease must exist, name ownership mode `runtime-owned` and carry a
+ *      canonical path + matching sha256 identity;
+ *   2. a HARD canonical denylist runs BEFORE any filesystem mutation: the
+ *      user default `<dataRoot>/opencode.db` and the shared one-shot CLI db
+ *      are refused no matter what the lease claims;
+ *   3. the full structural proof (worker_* dir, webmcp-ai-runtime parent,
+ *      opencode.db filename, isolated real directory) is re-run;
+ *   4. death of the leased process/group must be PROVEN (ESRCH, or a
+ *      successful identity probe proving the pid now belongs to someone
+ *      else). A still-alive original or an unavailable probe retains.
+ *   5. only then is the exact binding tree removed and absence proven over
+ *      every known sidecar.
+ */
+export async function releaseRecoveredRuntimeDatabase(record, {
+  env = {},
+  homeDir = undefined,
+} = {}) {
+  const unproven = (reason) => ({
+    released: false,
+    retained: true,
+    disposition: 'recovered-runtime-database-cleanup-unproven',
+    reason,
+    absenceProven: false,
+  });
+  const lease = record?.cleanupLease;
+  if (!lease || typeof lease !== 'object') return unproven('no cleanup lease in the durable record');
+  if (lease.ownershipMode !== 'runtime-owned') return unproven('lease ownershipMode is not runtime-owned');
+  const dbPath = typeof lease.canonicalRuntimeDbPath === 'string' ? lease.canonicalRuntimeDbPath : null;
+  if (!dbPath || !isAbsolute(dbPath)) return unproven('lease database path is missing or not absolute');
+
+  // ---- HARD denylist FIRST: never mutate user-owned trees ---------------
+  let defaultRoot = null;
+  let sharedCliDb = null;
+  try {
+    defaultRoot = resolveOpencodeDataRoot({ env, ...(homeDir ? { homeDir } : {}) });
+    sharedCliDb = resolveOpencodeCliDb(env, { homeDir: homeDir ?? homedir() });
+  } catch {
+    return unproven('protected canonical roots could not be resolved; refusing to delete anything');
+  }
+  const canonOf = (pathValue) => {
+    try {
+      return realpathSync(pathValue);
+    } catch {
+      return resolve(pathValue);
+    }
+  };
+  const targetCanonical = canonOf(dbPath);
+  const protectedTargets = [join(defaultRoot, 'opencode.db'), sharedCliDb, defaultRoot];
+  for (const guarded of protectedTargets) {
+    const guardedCanonical = canonOf(guarded);
+    const relA = relative(guardedCanonical, targetCanonical);
+    const relB = relative(targetCanonical, guardedCanonical);
+    const insideOrEqual = (rel) => rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    if (insideOrEqual(relA) || insideOrEqual(relB)) {
+      throw new AiCliError(
+        'POLICY_DENIED',
+        'refusing recovered release: lease targets a protected or user-owned database path',
+        { details: { leasePath: String(lease.canonicalRuntimeDbPath), protectedPath: String(guarded) } },
+      );
+    }
+  }
+
+  // ---- Structural + digest proof ----------------------------------------
+  let proof;
+  try {
+    proof = proveReleaseIdentity({
+      dbPath,
+      databaseIdentity: lease.databaseIdentity,
+    });
+  } catch (error) {
+    if (error instanceof AiCliError) return unproven(error.message);
+    return unproven('structural proof failed');
+  }
+
+  // ---- Death proof on the leased process identity -----------------------
+  const pid = lease.processIdentity?.pid;
+  const startIdentity = lease.processIdentity?.startIdentity;
+  if (!Number.isInteger(pid) || pid <= 0 || typeof startIdentity !== 'string' || startIdentity.length === 0) {
+    return unproven('lease carries no provable process identity');
+  }
+  if (pid === process.pid) return unproven('self-pid-refused');
+  let alive = false;
+  try {
+    process.kill(pid, 0);
+    alive = true;
+  } catch {
+    alive = false;
+  }
+  if (alive) {
+    let holderIdentity = null;
+    try {
+      holderIdentity = await createPlatformIdentityDeps().getStartIdentity(pid);
+    } catch {
+      holderIdentity = null;
+    }
+    if (holderIdentity === startIdentity) return unproven('the leased runtime process is still alive');
+    if (typeof holderIdentity !== 'string' || holderIdentity.length === 0) {
+      return unproven('identity probe unavailable; death of the original cannot be proven');
+    }
+    // Probe succeeded AND mismatched: the ORIGINAL provably exited and its
+    // pid now belongs to an unrelated process that we never touch.
+  }
+
+  // ---- Deletion authorized: enumerate allowlist, remove, prove absence --
+  let removedFiles;
+  try {
+    removedFiles = readdirSync(proof.dbDir).sort();
+  } catch {
+    return unproven('isolated runtime directory could not be enumerated');
+  }
+  for (const name of removedFiles) {
+    if (!KNOWN_DATABASE_SIDECARS.has(name) && name !== 'opencode.db') {
+      return unproven(`unexpected file '${name}' inside the isolated runtime directory`);
+    }
+  }
+  try {
+    rmSync(proof.dbDir, { recursive: true, force: true });
+  } catch (error) {
+    throw new AiCliError('POLICY_DENIED', `runtime database cleanup failed: ${error?.code ?? error?.message}`);
+  }
+  const absenceProven =
+    !existsSync(proof.dbDir)
+    && !existsSync(dbPath)
+    && ![...KNOWN_DATABASE_SIDECARS].some((sidecar) => existsSync(join(proof.dbDir, sidecar)));
+  if (!absenceProven) return unproven('cleanup could not prove absence');
+  return {
+    released: true,
+    retained: false,
+    disposition: 'released',
+    exitProven: true,
+    removedFiles,
+    absenceProven: true,
+    databaseIdentity: lease.databaseIdentity,
+  };
 }
 
 /**

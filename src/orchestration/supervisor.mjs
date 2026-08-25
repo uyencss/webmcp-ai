@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
-import { isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, join, relative, dirname } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 import {
@@ -51,6 +51,7 @@ import {
   isSettlementProven,
   normalizeSettlementReceipt,
 } from './settlement.mjs';
+import { releaseRecoveredRuntimeDatabase } from './adapters/opencode-server.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
 
@@ -363,6 +364,10 @@ export async function createSupervisor(options = {}) {
   let capabilityToken;
   let server = null;
   let endpoint = null;
+  // Teardown latch: once stop() begins, late settlements no-op truthfully —
+  // the next owner completes them from durable state. Declared early because
+  // boot-time recovery paths reference it.
+  let stopping = false;
   const runtimeBindings = new Map(); // dispatchId -> { record }
   const liveBindingObjects = new Map(); // dispatchId -> live adapter binding object
   const reattachedAtBoot = new Set(); // dispatchIds reattached during THIS boot
@@ -373,6 +378,8 @@ export async function createSupervisor(options = {}) {
   // Idempotent residual sweeps: `<dispatchId>:residual` receipts replay from
   // the journal so repeated recoveries never append duplicate sweep events.
   const residualSweptKeys = new Set();
+  // Idempotent recovered-database releases: `<dispatchId>:rtdb` receipts.
+  const recoveredDbKeys = new Set();
   let journal = [];
   const taskPackets = new Map();
   let commit = () => {
@@ -413,6 +420,8 @@ export async function createSupervisor(options = {}) {
         settledCompletionKeys.add(key);
       } else if (key.endsWith(':residual')) {
         residualSweptKeys.add(key);
+      } else if (key.endsWith(':rtdb')) {
+        recoveredDbKeys.add(key);
       }
     }
     for (const [packetTaskId, packet] of loadTaskPackets(layout)) taskPackets.set(packetTaskId, packet);
@@ -540,11 +549,16 @@ export async function createSupervisor(options = {}) {
 
       // ---- Phase D: journal + filesystem effects --------------------------
       for (const effect of settlementEffects) {
-        applyRecoveredSettlement(effect.dispatch.dispatchId, effect.dispatch.taskId, effect.record, effect.orphanStop, effect.settlement);
+        await applyRecoveredSettlement(effect.dispatch.dispatchId, effect.dispatch.taskId, effect.record, effect.orphanStop, effect.settlement);
       }
       for (const effect of reconciledEffects) {
         const { dispatch, live, record, orphanStop } = effect;
         if (!live && record) {
+          // Provider-owned runtime databases are released through their
+          // cleanup lease BEFORE the binding pointer disappears.
+          if (record.cleanupLease) {
+            await attemptRecoveredDbRelease(dispatch.dispatchId, dispatch.taskId, record);
+          }
           revokeDispatchCapabilityFile(record);
           commit({
             type: 'cleanup_recorded',
@@ -619,6 +633,10 @@ export async function createSupervisor(options = {}) {
             { processIdentity: plan.proveStopIntent }, identityDepsOf(),
           );
         }
+        // A residual provider binding may still own a runtime database.
+        if (plan.record?.cleanupLease) {
+          await attemptRecoveredDbRelease(dispatchId, store.state.dispatches[dispatchId]?.taskId ?? null, plan.record);
+        }
         if (plan.record) revokeDispatchCapabilityFile(plan.record);
         for (const capPath of plan.capPaths) {
           try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
@@ -675,6 +693,45 @@ export async function createSupervisor(options = {}) {
     throw error;
   }
 
+  /**
+   * Attempt the adapter-safe release of a leased runtime-owned database
+   * during recovery. Every outcome is journaled exactly once under a keyed
+   * idempotency receipt; insufficient proof RETAINS all artifacts and is
+   * reported truthfully as cleanup-unproven.
+   */
+  async function attemptRecoveredDbRelease(dispatchId, taskId, record) {
+    if (!record?.cleanupLease) return;
+    if (stopping) return;
+    const key = `${dispatchId}:rtdb`;
+    if (recoveredDbKeys.has(key)) return;
+    recoveredDbKeys.add(key);
+    let outcome;
+    try {
+      outcome = await releaseRecoveredRuntimeDatabase(record, { env });
+    } catch (error) {
+      outcome = {
+        released: false,
+        retained: true,
+        disposition: 'recovered-runtime-database-cleanup-unproven',
+        reason: String(error?.message ?? 'release refused').slice(0, 200),
+      };
+    }
+    commit({
+      type: 'cleanup_recorded',
+      payload: {
+        dispatchId,
+        ...(taskId ? { taskId } : {}),
+        disposition: outcome.released
+          ? 'recovered-runtime-database-released'
+          : 'recovered-runtime-database-cleanup-unproven',
+        ...(outcome.released
+          ? { absenceProven: true, removedFiles: outcome.removedFiles ?? [] }
+          : { reason: outcome.reason ?? 'unproven', retainedArtifacts: true }),
+        idempotencyKey: key,
+      },
+    });
+  }
+
   function revokeDispatchCapabilityFile(record) {
     const capabilityFile = record?.callbackCapabilityPath;
     if (typeof capabilityFile !== 'string' || capabilityFile.length === 0) return;
@@ -688,6 +745,7 @@ export async function createSupervisor(options = {}) {
    * repeated recoveries can never duplicate the settled truth.
    */
   function settleDispatchOnce(dispatchId, taskId, { proof, disposition, extraPayload = {}, record = null }) {
+    if (stopping) return; // teardown in progress: next recovery settles from durable truth
     const key = `${dispatchId}:settle`;
     if (!settledCompletionKeys.has(key)) {
       settledCompletionKeys.add(key);
@@ -788,7 +846,7 @@ export async function createSupervisor(options = {}) {
    * artifact retained (the transactional boot persist already re-approved the
    * durable record before this runs).
    */
-  function applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement) {
+  async function applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement) {
     if (isSettlementProven(settlement.proof)) {
       settleDispatchOnce(dispatchId, taskId, {
         proof: settlement.proof,
@@ -808,6 +866,10 @@ export async function createSupervisor(options = {}) {
         recoveredStop: orphanStop,
       },
     });
+    // A parked provider binding may still own a runtime database whose death
+    // is provable right now; release it honestly even while the dispatch
+    // itself stays fail-closed.
+    await attemptRecoveredDbRelease(dispatchId, taskId, record);
     if (record && !runtimeBindings.has(dispatchId)) {
       runtimeBindings.set(dispatchId, { record });
       persistRuntimeBindingRecords(layout, runtimeBindings);
@@ -815,6 +877,17 @@ export async function createSupervisor(options = {}) {
   }
 
   const recoveredFinalizations = new Set();
+  // In-flight recovered finalizations: stop() drains these before releasing
+  // the singleton lock, so a settlement never races process teardown or
+  // leaks asynchronous activity past ownership.
+  const pendingFinalizations = new Set();
+
+  function enqueueFinalization(dispatchId) {
+    const pending = finalizeRecoveredTerminal(dispatchId)
+      .catch(() => { /* recovery stays truthful even when completion fails */ })
+      .finally(() => pendingFinalizations.delete(pending));
+    pendingFinalizations.add(pending);
+  }
 
   /**
    * Owner-side finalization for a REATTACHED dispatch whose terminal arrives
@@ -1515,6 +1588,10 @@ export async function createSupervisor(options = {}) {
     // The token itself NEVER persists: only its digest and the capability
     // file path (re-read under supervisor ownership, incl. after restart).
     const identity = started.binding.processIdentity ?? null;
+    // Provider-owned runtime databases persist a NON-SECRET cleanup lease so
+    // recovery can release them after proven shutdown. Auth material NEVER
+    // enters durable state.
+    const privateBinding = started.binding?.__private ?? null;
     await __recordRuntimeBinding(dispatchId, {
       bindingId,
       adapterId: adapter.id,
@@ -1525,6 +1602,17 @@ export async function createSupervisor(options = {}) {
       ...(capabilityFile ? { callbackCapabilityPath: capabilityFile } : {}),
       processIdentity: identity ?? undefined,
       controlOnly: !identity,
+      ...(adapter.lifecycle.kind === 'opencode-server' && typeof privateBinding?.dbPath === 'string'
+        ? {
+          cleanupLease: {
+            ownershipMode: started.binding.ownershipMode ?? 'runtime-owned',
+            canonicalRuntimeDbPath: privateBinding.dbPath,
+            canonicalRuntimeDbDir: dirname(privateBinding.dbPath),
+            databaseIdentity: started.binding.databaseIdentity ?? null,
+            processIdentity: identity ? { pid: identity.pid, processGroupId: identity.processGroupId, startIdentity: identity.startIdentity } : undefined,
+          },
+        }
+        : {}),
     });
     // The runtime binding is now the durable control record; its launch-intent
     // lease has served its crash-window purpose and is removed idempotently.
@@ -1799,11 +1887,12 @@ export async function createSupervisor(options = {}) {
         );
       }
       const taskNow = store.state.tasks[taskId].state;
-      // Truthfulness over the state machine: a task that already received its
-      // worker's terminal report (awaiting_acceptance) or reached an accepted/
-      // rejected/cancelled end can NEVER truthfully answer cancelled:true.
-      // These answers are idempotent, typed and commit NOTHING.
-      if (['awaiting_acceptance', 'accepted', 'rejected', 'cancelled'].includes(taskNow)) {
+      // Truthfulness over convenience: only genuinely terminal states
+      // (awaiting_acceptance holds the worker's terminal report; accepted and
+      // cancelled are ends) answer alreadyTerminal. `rejected` is an attempt
+      // verdict, NOT a tombstone — the frozen transition table allows
+      // rejected -> cancelled, so cancel must commit here.
+      if (['awaiting_acceptance', 'accepted', 'cancelled'].includes(taskNow)) {
         return {
           cancelled: false,
           alreadyTerminal: true,
@@ -2063,6 +2152,7 @@ export async function createSupervisor(options = {}) {
   async function stop() {
     if (stopped) return;
     stopped = true;
+    stopping = true;
     try {
       // Bounded shutdown: an orphaned half-open client socket must never wedge
       // the owner's exit. closeAllConnections (when available) drops stragglers.
@@ -2076,6 +2166,11 @@ export async function createSupervisor(options = {}) {
     }
     runtimeBindings.clear();
     liveBindingObjects.clear();
+    // Drain any in-flight recovered settlement BEFORE releasing ownership so
+    // no journal write races teardown.
+    if (pendingFinalizations.size > 0) {
+      await Promise.allSettled([...pendingFinalizations]);
+    }
     try {
       await releaseSupervisorLock(lock, identity.runtimeNonce);
     } catch {
@@ -2178,7 +2273,7 @@ export async function createSupervisor(options = {}) {
         if (TERMINAL_WORKER_DELIVERY_TYPES.includes(type)) {
           const terminalDispatchId = typeof payload?.dispatchId === 'string' ? payload.dispatchId : null;
           if (terminalDispatchId && reattachedAtBoot.has(terminalDispatchId)) {
-            void finalizeRecoveredTerminal(terminalDispatchId);
+            enqueueFinalization(terminalDispatchId);
           }
         }
         return { sequence: result.delivery.sequence };

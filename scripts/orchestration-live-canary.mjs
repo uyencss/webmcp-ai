@@ -394,9 +394,11 @@ async function scenarioOpenCodeServer() {
 
     const dbInsideRuntimeTree = String(started.runtime.dbPath).includes('webmcp-ai-runtime');
     if (!dbInsideRuntimeTree) throw new Error('runtime database escaped the owned tree');
-    const stopReceipt = await adapter.stopServer(started.runtime);
+    // The cleanup capability means EXACTLY this contract: an explicit,
+    // settled release whose absence is proven over the whole runtime tree.
+    const stopReceipt = await adapter.stopServer(started.runtime, { release: true, settled: true });
     if (stopReceipt.disposition !== 'stopped') throw new Error(`unexpected stop disposition ${stopReceipt.disposition}`);
-    capabilities.cleanup = stopReceipt.released ? 'pass' : 'fail';
+    capabilities.cleanup = stopReceipt.released === true && stopReceipt.absenceProven === true ? 'pass' : 'fail';
 
     return {
       ok: requiredCapabilitiesSatisfied(capabilities),
