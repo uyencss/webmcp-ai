@@ -232,15 +232,14 @@ export function createOwnedProcessAdapter(options = {}) {
 
       const identityDeps = createPlatformIdentityDeps();
       const probedStartIdentity = await identityDeps.getStartIdentity(child.pid);
-      const provenStartIdentity = probedStartIdentity
-        ?? `${process.platform}:indeterminate-${child.pid}`;
       // Launch-intent HANDSHAKE: the supervisor persists the BOUND lease the
       // instant the child exists and its identity is probed, closing the
-      // crash window between spawn and durable binding persistence.
+      // crash window between spawn and durable binding persistence. Identity
+      // is recorded ONLY when actually proven — never fabricated.
       await dispatch?.onSpawned?.({
         pid: child.pid,
         processGroupId: child.pid,
-        startIdentity: provenStartIdentity,
+        ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
         identityProven: probedStartIdentity !== null,
       });
 
@@ -340,7 +339,7 @@ export function createOwnedProcessAdapter(options = {}) {
               signalsAttempted: signalsAttempted.length > 0 ? [...signalsAttempted, signal] : [signal],
               processIdentity: {
                 pid: child.pid,
-                startIdentity: provenStartIdentity,
+                ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
                 processGroupId: child.pid,
               },
             });
@@ -388,7 +387,8 @@ export function createOwnedProcessAdapter(options = {}) {
         guaranteeTier: 'owned-process',
         processIdentity: {
           pid: child.pid,
-          startIdentity: provenStartIdentity,
+          ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
+          identityProven: probedStartIdentity !== null,
           processGroupId: child.pid,
           runtimeNonce: sha256(`${child.pid}:${Date.now()}:${Math.random()}`).slice(0, 16),
         },

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { validateAdapter } from './index.mjs';
+import { createPlatformIdentityDeps } from '../process-identity.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 
 /**
@@ -242,9 +243,33 @@ export function createClaudeStreamAdapter(options = {}) {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
 
+      // Launch-intent HANDSHAKE: the durable lease is upgraded the instant
+      // the child exists and its identity has been probed — BEFORE the
+      // objective write or any other fallible work. Identity is recorded
+      // ONLY when actually proven; an unavailable probe stays honestly
+      // unproven (identityProven:false) instead of fabricating a placeholder.
+      const identityDeps = createPlatformIdentityDeps();
+      let probedStartIdentity = null;
+      try {
+        probedStartIdentity = await identityDeps.getStartIdentity(child.pid);
+      } catch {
+        probedStartIdentity = null;
+      }
+      await dispatch?.onSpawned?.({
+        pid: child.pid,
+        processGroupId: child.pid,
+        ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
+        identityProven: probedStartIdentity !== null,
+      });
+
       let stdoutBuffer = '';
       const events = [];
       const signalsAttempted = [];
+
+      // A fast-exiting worker can close its stdin pipe before the objective
+      // write lands; the close/error events report that truthfully, so an
+      // EPIPE here must never crash the owner loop.
+      child.stdin.on('error', () => { /* terminal evidence flows via close */ });
 
       // The Task objective is the initial turn's prompt: write it as the
       // first stdin line and close the pipe so real `-p` runs settle instead
@@ -334,6 +359,12 @@ export function createClaudeStreamAdapter(options = {}) {
         adapterId: 'claude-stream',
         guaranteeTier: 'owned-process',
         sessionId,
+        processIdentity: {
+          pid: child.pid,
+          processGroupId: child.pid,
+          ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
+          identityProven: probedStartIdentity !== null,
+        },
         __child: child,
         __signalsAttempted: signalsAttempted,
         done: donePromise,
@@ -370,16 +401,56 @@ export function createClaudeStreamAdapter(options = {}) {
       return { ok: true, interrupted: true, reason };
     },
 
+    /**
+     * Proof-driven close: the ladder is SIGTERM -> SIGKILL with a bounded
+     * exit wait after every step. The receipt claims `group-stopped` ONLY
+     * when the child's exit was actually observed; a surviving child yields
+     * `group-signalled` (pending retry), never `stopped`.
+     */
     async close({ binding }) {
-      if (!binding?.__child) return { ok: true, disposition: 'already-exited' };
-      const child = binding.__child;
-      child.kill('SIGTERM');
-      await Promise.race([
-        new Promise((resolveExit) => child.once('exit', resolveExit)),
-        new Promise((resolveTick) => setTimeout(resolveTick, 800).unref?.()),
-      ]);
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      return { ok: true, disposition: 'stopped' };
+      const child = binding?.__child;
+      const gone = () => !child || child.exitCode !== null || child.signalCode !== null;
+      if (gone()) return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
+      const graceMs = options.closeGraceMsForTest ?? 800;
+      const forceGraceMs = options.forceCloseGraceMsForTest ?? 2000;
+      const signalsAttempted = [];
+      // Group sweep applies only to detached group leaders we spawned.
+      const signalOnce = (signal) => {
+        if (process.platform !== 'win32' && child.detached === true) {
+          try {
+            process.kill(-child.pid, signal);
+            signalsAttempted.push(`GROUP_${signal}`);
+            return;
+          } catch { /* fall back to pid-only signalling */ }
+        }
+        try {
+          child.kill(signal);
+          signalsAttempted.push(signal);
+        } catch { /* already gone */ }
+      };
+      const awaitExit = (ms) => new Promise((resolveExit) => {
+        if (gone()) { resolveExit(true); return; }
+        const timer = setTimeout(() => {
+          child.off('exit', onExit);
+          resolveExit(gone());
+        }, ms);
+        const onExit = () => {
+          clearTimeout(timer);
+          resolveExit(true);
+        };
+        child.once('exit', onExit);
+      });
+      signalOnce('SIGTERM');
+      let exited = await awaitExit(graceMs);
+      if (!exited && !gone()) {
+        signalOnce('SIGKILL');
+        exited = await awaitExit(forceGraceMs);
+      }
+      if (!exited && !gone()) {
+        // Signals were sent but survival remains possible. NEVER claim stopped.
+        return { ok: true, disposition: 'group-signalled', signalsAttempted: [...signalsAttempted] };
+      }
+      return { ok: true, disposition: 'group-stopped', exitProven: true, signalsAttempted: [...signalsAttempted] };
     },
   };
 

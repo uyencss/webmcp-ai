@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { validateAdapter } from './index.mjs';
+import { createPlatformIdentityDeps } from '../process-identity.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 
 /**
@@ -227,15 +228,50 @@ export function createCodexExecAdapter(options = {}) {
       // not advertised by this adapter.
       throw new AiCliError('UNSUPPORTED_CAPABILITY', 'interrupt is a hard process kill handled by the runtime');
     },
-    close({ binding }) {
-      try {
-        if (binding?.__child && binding.__child.exitCode === null) {
-          binding.__child.kill('SIGKILL');
+    /**
+     * Proof-driven close: SIGKILL the owned group, then WAIT for the exit.
+     * `group-stopped` is claimed only with an observed exit; a surviving
+     * child yields `group-signalled` — never a bare `killed`.
+     */
+    async close({ binding }) {
+      const child = binding?.__child;
+      const gone = () => !child || child.exitCode !== null || child.signalCode !== null;
+      if (gone()) return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
+      const forceGraceMs = options.forceCloseGraceMsForTest ?? 2000;
+      const signalsAttempted = [];
+      if (process.platform !== 'win32' && child.detached === true) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+          signalsAttempted.push('GROUP_SIGKILL');
+        } catch {
+          try {
+            child.kill('SIGKILL');
+            signalsAttempted.push('SIGKILL');
+          } catch { /* already gone */ }
         }
-        return { ok: true, disposition: 'killed' };
-      } catch {
-        return { ok: true, disposition: 'already-exited' };
+      } else {
+        try {
+          child.kill('SIGKILL');
+          signalsAttempted.push('SIGKILL');
+        } catch { /* already gone */ }
       }
+      const exited = await new Promise((resolveExit) => {
+        if (gone()) { resolveExit(true); return; }
+        const timer = setTimeout(() => {
+          child.off('exit', onExit);
+          resolveExit(gone());
+        }, forceGraceMs);
+        const onExit = () => {
+          clearTimeout(timer);
+          resolveExit(true);
+        };
+        child.once('exit', onExit);
+      });
+      if (!exited && !gone()) {
+        // The kill was delivered but death is unproven. Never claim killed/absent.
+        return { ok: true, disposition: 'group-signalled', signalsAttempted: [...signalsAttempted] };
+      }
+      return { ok: true, disposition: 'group-stopped', exitProven: true, signalsAttempted: [...signalsAttempted] };
     },
 
     /**
@@ -299,6 +335,27 @@ export function createCodexExecAdapter(options = {}) {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
 
+      // Launch-intent HANDSHAKE before the objective write: the durable lease
+      // is upgraded the instant the child exists. Identity is recorded ONLY
+      // when actually proven — never fabricated.
+      const identityDeps = createPlatformIdentityDeps();
+      let probedStartIdentity = null;
+      try {
+        probedStartIdentity = await identityDeps.getStartIdentity(child.pid);
+      } catch {
+        probedStartIdentity = null;
+      }
+      await dispatch?.onSpawned?.({
+        pid: child.pid,
+        processGroupId: child.pid,
+        ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
+        identityProven: probedStartIdentity !== null,
+      });
+
+      // A fast-exiting worker can close its stdin pipe before the objective
+      // write lands; the close/error events report that truthfully, so an
+      // EPIPE here must never crash the owner loop.
+      child.stdin.on('error', () => { /* terminal evidence flows via close */ });
       child.stdin.write(`${task.objective}\n`);
       child.stdin.end();
 
@@ -369,6 +426,12 @@ export function createCodexExecAdapter(options = {}) {
           adapterId: 'codex-exec',
           guaranteeTier: 'owned-process',
           sessionId: receipts.get(dispatch.dispatchId)?.threadId ?? null,
+          processIdentity: {
+            pid: child.pid,
+            processGroupId: child.pid,
+            ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
+            identityProven: probedStartIdentity !== null,
+          },
           __child: child,
           done: donePromise,
         },

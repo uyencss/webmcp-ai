@@ -31,6 +31,19 @@ if (mode === 'resume-help') {
   process.exit(0);
 }
 
+if (mode === 'hold') {
+  // Long-lived fixture turn: emits the thread record then traps signals so
+  // tests can prove signal delivery alone never counts as a stop.
+  process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: 'thr_hold_1' })}\n`);
+  process.stdout.write(`${JSON.stringify({ type: 'turn.started' })}\n`);
+  process.on('SIGTERM', () => {});
+  process.on('SIGINT', () => {});
+  setInterval(() => {}, 1000);
+} else if (mode !== 'assert-args' && mode !== 'run') {
+  process.stderr.write(`unsupported FAKE_CODEX_MODE: ${mode}\n`);
+  process.exit(4);
+}
+
 if (mode === 'assert-args' || mode === 'run') {
   const violations = [];
   const expectedCore = ['--json', '--sandbox', '--ignore-user-config', '--ignore-rules', '--color', 'never'];
@@ -66,6 +79,3 @@ if (mode === 'assert-args' || mode === 'run') {
   process.stdout.write(`PROMPT_ECHO:${prompt.slice(0, 40)}\n`);
   process.exit(0);
 }
-
-process.stderr.write(`unsupported FAKE_CODEX_MODE: ${mode}\n`);
-process.exit(4);

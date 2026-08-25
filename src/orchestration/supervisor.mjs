@@ -89,17 +89,30 @@ function strictDispatchStartInput(input) {
 
 async function buildSupervisorIdentity(processGeneration, identityDepsFactory) {
   const deps = identityDepsFactory ?? createPlatformIdentityDeps;
+  // Bounded retries so one transient probe failure never blocks ownership —
+  // but the value itself is NEVER fabricated. A supervisor whose own start
+  // identity cannot be proven must not own a coordination: lock takeover,
+  // stale-lock arbitration and every signalling decision depend on it.
   let startIdentity = null;
-  try {
-    startIdentity = await deps().getStartIdentity(process.pid);
-  } catch {
-    startIdentity = null;
+  for (let attempt = 0; attempt < 3 && startIdentity === null; attempt += 1) {
+    try {
+      startIdentity = await deps().getStartIdentity(process.pid);
+    } catch {
+      startIdentity = null;
+    }
+    if (startIdentity === null && attempt < 2) {
+      await new Promise((resolveTick) => setTimeout(resolveTick, 40));
+    }
+  }
+  if (typeof startIdentity !== 'string' || startIdentity.length === 0) {
+    throw new AiCliError(
+      'ORCHESTRATION_INDETERMINATE',
+      'supervisor cannot prove its own process start identity; refusing ownership instead of fabricating one',
+    );
   }
   return {
     pid: process.pid,
-    // An indeterminate probe still allows local supervision but this value
-    // never authorizes signalling decisions anywhere else.
-    startIdentity: startIdentity ?? `${process.platform}:indeterminate-${process.pid}`,
+    startIdentity,
     processGroupId: process.pid,
     processGeneration,
     runtimeNonce: `nonce_${randomUUID()}`,
@@ -272,7 +285,17 @@ function validateRuntimeBindingRecord(record) {
   if (!Number.isInteger(processIdentity.pid) || processIdentity.pid <= 0) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding requires a positive integer pid', { exitCode: 2 });
   }
-  if (typeof processIdentity.startIdentity !== 'string' || processIdentity.startIdentity.length === 0) {
+  if (processIdentity.identityProven === false) {
+    // Honest unproven launch: the pid is retained for recovery/observability,
+    // but a fabricated startIdentity must never ride along to pass validation.
+    if (processIdentity.startIdentity !== undefined && processIdentity.startIdentity !== null) {
+      throw new AiCliError(
+        'ORCHESTRATION_INVALID_INPUT',
+        'an unproven runtime binding must not carry a startIdentity',
+        { exitCode: 2 },
+      );
+    }
+  } else if (typeof processIdentity.startIdentity !== 'string' || processIdentity.startIdentity.length === 0) {
     throw new AiCliError(
       'ORCHESTRATION_INDETERMINATE',
       'runtime binding requires a proven startIdentity; indeterminate identity never authorizes control',
@@ -1621,6 +1644,19 @@ export async function createSupervisor(options = {}) {
     // The token itself NEVER persists: only its digest and the capability
     // file path (re-read under supervisor ownership, incl. after restart).
     const identity = started.binding.processIdentity ?? null;
+    // Control authority requires a PROVEN start identity. An explicit
+    // identityProven flag wins when present; absent flags fall back to an
+    // honestly probed non-empty value (legacy bindings). A placeholder
+    // `*:indeterminate-*` string NEVER counts as proof.
+    const rawStartIdentity = typeof identity?.startIdentity === 'string' && identity.startIdentity.length > 0
+      ? identity.startIdentity
+      : null;
+    const looksFabricated = rawStartIdentity !== null && /:indeterminate-/.test(rawStartIdentity);
+    const identityProven = identity
+      ? (typeof identity.identityProven === 'boolean'
+        ? identity.identityProven === true && rawStartIdentity !== null && !looksFabricated
+        : rawStartIdentity !== null && !looksFabricated)
+      : false;
     // Provider-owned runtime databases persist a NON-SECRET cleanup lease so
     // recovery can release them after proven shutdown. Auth material NEVER
     // enters durable state.
@@ -1633,8 +1669,19 @@ export async function createSupervisor(options = {}) {
       fenceEpoch,
       callbackCapabilityDigest: capabilityDigestOf(capabilityToken),
       ...(capabilityFile ? { callbackCapabilityPath: capabilityFile } : {}),
-      processIdentity: identity ?? undefined,
-      controlOnly: !identity,
+      ...(identity
+        ? {
+          processIdentity: {
+            pid: identity.pid,
+            processGroupId: identity.processGroupId,
+            ...(identityProven && typeof identity.startIdentity === 'string'
+              ? { startIdentity: identity.startIdentity }
+              : {}),
+            identityProven,
+          },
+        }
+        : {}),
+      controlOnly: !identity || !identityProven,
       ...(adapter.lifecycle.kind === 'opencode-server' && typeof privateBinding?.dbPath === 'string'
         ? {
           cleanupLease: {
@@ -1642,7 +1689,17 @@ export async function createSupervisor(options = {}) {
             canonicalRuntimeDbPath: privateBinding.dbPath,
             canonicalRuntimeDbDir: dirname(privateBinding.dbPath),
             databaseIdentity: started.binding.databaseIdentity ?? null,
-            processIdentity: identity ? { pid: identity.pid, processGroupId: identity.processGroupId, startIdentity: identity.startIdentity } : undefined,
+            ...(identity
+              ? {
+                processIdentity: {
+                  pid: identity.pid,
+                  processGroupId: identity.processGroupId,
+                  ...(identityProven && typeof identity.startIdentity === 'string'
+                    ? { startIdentity: identity.startIdentity }
+                    : {}),
+                },
+              }
+              : {}),
           },
         }
         : {}),

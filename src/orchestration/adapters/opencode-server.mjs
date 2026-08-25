@@ -651,14 +651,15 @@ export function createOpenCodeServerAdapter(options = {}) {
     }
 
     // Prove the server process start identity so the supervisor binding can
-    // reattach, interrupt and reconcile exactly like an owned process.
+    // reattach, interrupt and reconcile exactly like an owned process. An
+    // unavailable probe stays honestly unproven — never a fabricated value.
     const identityDeps = createPlatformIdentityDeps();
-    const provenStartIdentity = (await identityDeps.getStartIdentity(serverChild.pid).catch(() => null))
-      ?? `${process.platform}:indeterminate-${serverChild.pid}`;
+    const probedStartIdentity = await identityDeps.getStartIdentity(serverChild.pid).catch(() => null);
     const processIdentity = Object.freeze({
       pid: serverChild.pid,
-      startIdentity: provenStartIdentity,
+      ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
       processGroupId: serverChild.pid,
+      identityProven: probedStartIdentity !== null,
       startedAt: Date.now(),
       endpoint,
     });

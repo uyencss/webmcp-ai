@@ -65,7 +65,24 @@ if (mode === 'assert-args') {
   process.exit(0);
 }
 
-if (mode === 'busy-followup') {
+if (mode === 'trap-signals') {
+  // Stays alive through SIGINT+SIGTERM for a bounded window so tests can
+  // prove that signal delivery alone NEVER counts as a stop.
+  const effectiveSession = valueOf('--session-id') ?? valueOf('--resume');
+  emit({ type: 'system', subtype: 'init', session_id: effectiveSession });
+  let trapped = 0;
+  const onSignal = (signal) => {
+    trapped += 1;
+    process.stdout.write(`${JSON.stringify({ type: 'user', trapped, signal })}\n`);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  const holdMs = Number(process.env.FAKE_CLAUDE_TRAP_MS ?? 6000);
+  setTimeout(() => {
+    process.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', result: `released:${trapped}`, session_id: effectiveSession })}\n`);
+    process.exit(0);
+  }, holdMs);
+} else if (mode === 'busy-followup') {
   // First turn stays alive briefly; a second stdin write is a queued follow-up.
   const effectiveSession = valueOf('--session-id') ?? valueOf('--resume');
   emit({ type: 'system', subtype: 'init', session_id: effectiveSession });

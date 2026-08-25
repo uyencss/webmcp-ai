@@ -34,6 +34,12 @@ const ADAPTER_DISPOSITION_PROOF = Object.freeze({
   'group-signalled': SETTLEMENT_PROOF.PENDING_RETRY,
   'signalled-stop-unproven': SETTLEMENT_PROOF.PENDING_RETRY,
   'identity-drift-aborted': SETTLEMENT_PROOF.PENDING_RETRY,
+  // Legacy dishonest labels: "a signal was sent" or "we consider it stopped"
+  // NEVER prove absence. They fail closed so the retry ladder keeps control
+  // instead of settling a possibly-live worker.
+  stopped: SETTLEMENT_PROOF.FAILED_UNPROVEN,
+  killed: SETTLEMENT_PROOF.FAILED_UNPROVEN,
+  interrupted: SETTLEMENT_PROOF.FAILED_UNPROVEN,
 });
 
 export function isSettlementProven(proof) {
