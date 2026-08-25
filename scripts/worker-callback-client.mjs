@@ -30,6 +30,14 @@ const WORKER_CALLBACK_PROTOCOL = 'webmcp.ai-worker-callback/v0';
 const ORCHESTRATION_PROTOCOL = 'webmcp.ai-orchestration/v0';
 const CAPABILITY_SCHEMA = 'webmcp.ai-dispatch-capability/v1';
 
+// Reconnect resilience: after an owner crash the worker's stdout/stderr pipes
+// may point at a DEAD reader. An unhandled EPIPE error event would kill the
+// worker before it can redeliver its terminal callback, so the reference
+// client ignores broken-pipe errors on its own output streams.
+for (const stream of [process.stdout, process.stderr]) {
+  stream?.on?.('error', () => {});
+}
+
 let seqCounter = 0;
 const nextSeq = () => {
   seqCounter += 1;
@@ -119,7 +127,8 @@ async function demo(flags) {
   const progress = await sendProgress({ summary: flags.summary ?? 'demo progress' }, {});
   process.stdout.write(`${JSON.stringify({ step: 'progress', ok: progress.ok ?? false })}\n`);
   if (flags.trigger) {
-    const deadline = Date.now() + 30_000;
+    const triggerTimeoutMs = Number.parseInt(flags['trigger-timeout-ms'] ?? '30000', 10);
+    const deadline = Date.now() + (Number.isFinite(triggerTimeoutMs) ? Math.max(triggerTimeoutMs, 1000) : 30_000);
     while (!existsSync(flags.trigger)) {
       if (Date.now() > deadline) throw new Error('trigger never appeared');
       await new Promise((resolveTick) => setTimeout(resolveTick, 100));

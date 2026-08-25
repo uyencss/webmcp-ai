@@ -208,23 +208,36 @@ test('terminal callback replay is exactly-once across restart; conflicts escalat
   const firstTerminal = await supA.processWorkerCallback(done);
   assert.equal(firstTerminal.ok, true, JSON.stringify(firstTerminal.error ?? {}));
   assert.equal(journalCount(stateDir, '"type":"worker_done"'), 1);
+
+  // A conflicting proposal while the binding is still live escalates as
+  // evidence and never overwrites the settled outcome.
+  const conflictingLive = makeCallback('worker.terminal', 2, { callbackId: 'cbk_terminal_conflict', input: { outcome: 'failed', summary: 'contradiction' } });
+  const escalatedLive = await supA.processWorkerCallback(conflictingLive);
+  assert.equal(escalatedLive.ok, true);
+  assert.equal(supA.__store.state.dispatches.disp_cb.terminalOutcome, 'completed');
+  assert.equal(journalCount(stateDir, '"type":"worker_failed"'), 0, 'a conflicting terminal proposal must never append its outcome');
   await supA.stop();
 
+  // Recovery after a committed terminal completes the settlement TRUTHFULLY:
+  // the dispatch reaches exactly `settled` instead of lingering in
+  // `settling`, so a late duplicate can no longer be authorized against a
+  // revoked binding — and it must never append a second terminal event.
   const supB = await startedSupervisor(stateDir, 'recover');
   try {
-    await registerLiveBinding(supB, 'cap-term');
-    const replay = await supB.processWorkerCallback(done);
-    assert.equal(replay.ok, true, JSON.stringify(replay.error ?? {}));
-    assert.equal(journalCount(stateDir, '"type":"worker_done"'), 1, 'terminal replay across restart must stay exactly-once');
+    const record = supB.__store.state.dispatches.disp_cb;
+    assert.equal(record.state, 'settled', `recovery must complete post-terminal settlement, got ${record.state}`);
+    assert.equal(record.terminalOutcome, 'completed');
 
-    const conflicting = makeCallback('worker.terminal', 2, { callbackId: 'cbk_terminal_conflict', input: { outcome: 'failed', summary: 'contradiction' } });
-    const escalated = await supB.processWorkerCallback(conflicting);
-    assert.equal(escalated.ok, true);
-    // The conflicting PROPOSAL is journaled as evidence, but it must never
-    // mutate settled state: the reducer escalates and keeps the first outcome.
-    assert.equal(supB.__store.state.dispatches.disp_cb.terminalOutcome, 'completed');
-    assert.equal(journalCount(stateDir, '"type":"worker_failed"'), 0, 'a conflicting terminal proposal must never append its outcome');
-    assert.equal(journalCount(stateDir, 'conflicting terminal outcome'), 1);
+    const lateBindingRegistration = registerLiveBinding(supB, 'cap-term-late');
+    await assert.rejects(lateBindingRegistration,
+      (error) => error.code === 'ORCHESTRATION_INVALID_INPUT',
+      'a settled dispatch must refuse new runtime bindings');
+
+    const replay = await supB.processWorkerCallback(done);
+    assert.equal(replay.ok, false);
+    assert.equal(replay.error?.code, 'WORKER_CALLBACK_UNAUTHORIZED');
+    assert.equal(journalCount(stateDir, '"type":"worker_done"'), 1, 'terminal replay across restart must stay exactly-once');
+    assert.equal(journalCount(stateDir, '"state":"settled"'), 1, 'settlement is committed exactly once');
   } finally {
     await supB.stop();
   }

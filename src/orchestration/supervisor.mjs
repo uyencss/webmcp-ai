@@ -16,6 +16,7 @@ import {
   OPERATIONS,
   ORCHESTRATION_LIMITS,
   ORCHESTRATION_PROTOCOL,
+  TERMINAL_WORKER_DELIVERY_TYPES,
   WORKER_CALLBACK_OPERATIONS,
 } from './constants.mjs';
 import { validateTaskPacket } from './contracts.mjs';
@@ -231,6 +232,33 @@ function validateRuntimeBindingRecord(record) {
 }
 
 /**
+ * Capability-truthful reattach gate: ONLY an owned-process binding can truly
+ * restore control (proven-identity signal ladder), telemetry (durable
+ * capability file callbacks) and settlement (owner-side finalization) after a
+ * supervisor restart. Provider session/stream handles and their finalizers
+ * die with the old owner process, so those bindings must NEVER be labeled
+ * reattached — however alive their provider PROCESS still is.
+ */
+function bindingControlCapable(record) {
+  if (!record || typeof record !== 'object') return false;
+  return record.capability === 'owned-process' || record.adapterId === 'owned-process';
+}
+
+/** Reprove a durable binding's PID liveness AND exact start identity. */
+async function recordIdentityReproven(record, identityDeps) {
+  const pid = record?.processIdentity?.pid;
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+    return typeof record.processIdentity?.startIdentity === 'string'
+      && nowIdentity === record.processIdentity.startIdentity;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Single-writer supervisor: owns the lock, replays the journal, serves the
  * frozen operation table over authenticated local IPC.
  */
@@ -279,6 +307,7 @@ export async function createSupervisor(options = {}) {
   let endpoint = null;
   const runtimeBindings = new Map(); // dispatchId -> { record }
   const liveBindingObjects = new Map(); // dispatchId -> live adapter binding object
+  const reattachedAtBoot = new Set(); // dispatchIds reattached during THIS boot
   let journal = [];
   const taskPackets = new Map();
   let commit = () => {
@@ -328,21 +357,39 @@ export async function createSupervisor(options = {}) {
       for (const dispatch of [...Object.values(store.state.dispatches)]) {
         if (!dispatch || !NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
         const record = storedBindings[dispatch.dispatchId] ?? null;
-        let live = false;
-        if (record && typeof record === 'object' && record.controlOnly !== true) {
-          const pid = record.processIdentity?.pid;
-          if (Number.isInteger(pid) && pid > 0) {
-            try {
-              process.kill(pid, 0);
-              const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
-              live = typeof record.processIdentity?.startIdentity === 'string'
-                && nowIdentity === record.processIdentity.startIdentity;
-            } catch {
-              live = false;
-            }
-          }
+
+        // Crash window AFTER terminal BEFORE cleanup: the journal already
+        // holds the truthful worker outcome. Recovery completes the missing
+        // resource settlement instead of pretending the dispatch is live.
+        if (dispatch.state === 'settling' && dispatch.terminalOutcome) {
+          await completeRecoveredSettlement(dispatch.dispatchId, dispatch.taskId, record);
+          continue;
         }
-        if (live) runtimeBindings.set(dispatch.dispatchId, { record });
+
+        let live = false;
+        if (record && typeof record === 'object' && record.controlOnly !== true && bindingControlCapable(record)) {
+          live = await recordIdentityReproven(record, identityDeps);
+        }
+        if (live) {
+          runtimeBindings.set(dispatch.dispatchId, { record });
+          reattachedAtBoot.add(dispatch.dispatchId);
+        } else if (record) {
+          // A still-running orphaned owned process must never outlive its
+          // typed lost reconciliation: stop it ONLY through proven identity.
+          const orphanStop = await stopOrphanedByProvenIdentity(record, identityDeps);
+          runtimeBindings.delete(dispatch.dispatchId);
+          persistRuntimeBindingRecords(layout, runtimeBindings);
+          revokeDispatchCapabilityFile(record);
+          commit({
+            type: 'cleanup_recorded',
+            payload: {
+              dispatchId: dispatch.dispatchId,
+              taskId: dispatch.taskId,
+              disposition: 'recovered-binding-reconciled-lost',
+              recoveredStop: orphanStop,
+            },
+          });
+        }
         commit({
           type: 'dispatch_reconciled',
           dispatchId: dispatch.dispatchId,
@@ -355,8 +402,8 @@ export async function createSupervisor(options = {}) {
               ? 'binding-identity-reproven-after-restart'
               : record?.controlOnly === true
                 ? 'telemetry-binding-degraded-lost-unattachable'
-                : record && record.capability === 'opencode-server'
-                  ? 'provider-stream-unattachable-degraded-lost'
+                : record && !bindingControlCapable(record)
+                  ? 'provider-session-control-unrestorable-after-restart'
                   : 'no-live-binding-provable-after-restart',
           },
         });
@@ -395,6 +442,102 @@ export async function createSupervisor(options = {}) {
     }
     try { await releaseSupervisorLock(lock, identity.runtimeNonce); } catch { /* audit trail retained */ }
     throw error;
+  }
+
+  function revokeDispatchCapabilityFile(record) {
+    const capabilityFile = record?.callbackCapabilityPath;
+    if (typeof capabilityFile !== 'string' || capabilityFile.length === 0) return;
+    try { rmSync(capabilityFile, { force: true }); } catch { /* best effort */ }
+  }
+
+  /**
+   * Identity-guarded best-effort stop of an orphaned owned process. A pid is
+   * signalled ONLY when presence AND the exact recorded start identity are
+   * both proven right now; recycled or unprovable pids are never touched.
+   */
+  async function stopOrphanedByProvenIdentity(record, identityDeps) {
+    const pid = record?.processIdentity?.pid;
+    const startIdentity = record?.processIdentity?.startIdentity;
+    if (!Number.isInteger(pid) || pid <= 0
+      || typeof startIdentity !== 'string' || startIdentity.length === 0) {
+      return { attempted: false, disposition: 'no-provable-identity' };
+    }
+    if (pid === process.pid) {
+      // Never signal our own process group, whatever a record claims.
+      return { attempted: false, disposition: 'self-pid-refused' };
+    }
+    let alive = false;
+    let identityMatches = false;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+      identityMatches = (await identityDeps.getStartIdentity(pid).catch(() => null)) === startIdentity;
+    } catch {
+      alive = false;
+    }
+    if (!alive) return { attempted: false, disposition: 'already-exited' };
+    if (!identityMatches) return { attempted: false, disposition: 'pid-recycled-never-signalled' };
+    const ladder = await restoredSignalLadder(pid, record.processIdentity.processGroupId);
+    return {
+      attempted: true,
+      disposition: ladder.disposition,
+      signalsAttempted: ladder.signalsAttempted,
+    };
+  }
+
+  /**
+   * Crash-window settlement completion: the worker outcome is already durable,
+   * so recovery proves resource release (identity-guarded), commits the missing
+   * cleanup evidence and drives settling -> settled exactly once, then revokes
+   * the runtime binding and its capability file.
+   */
+  async function completeRecoveredSettlement(dispatchId, taskId, record) {
+    const orphanStop = await stopOrphanedByProvenIdentity(record, createPlatformIdentityDeps());
+    commit({
+      type: 'cleanup_recorded',
+      payload: {
+        dispatchId,
+        taskId,
+        disposition: 'recovered-post-terminal-cleanup',
+        recoveredStop: orphanStop,
+      },
+    });
+    const current = store.state.dispatches[dispatchId];
+    if (current && current.state === 'settling') {
+      commit({
+        type: 'dispatch_state_changed',
+        dispatchId,
+        taskId,
+        payload: { dispatchId, taskId, state: 'settled' },
+      });
+    }
+    runtimeBindings.delete(dispatchId);
+    liveBindingObjects.delete(dispatchId);
+    persistRuntimeBindingRecords(layout, runtimeBindings);
+    revokeDispatchCapabilityFile(record);
+  }
+
+  const recoveredFinalizations = new Set();
+
+  /**
+   * Owner-side finalization for a REATTACHED dispatch whose terminal arrives
+   * after the restart. The crashed owner's finalizer is gone; this supervisor
+   * now owns cleanup + settle + revocation exactly once per dispatch.
+   */
+  async function finalizeRecoveredTerminal(dispatchId) {
+    if (recoveredFinalizations.has(dispatchId)) return;
+    recoveredFinalizations.add(dispatchId);
+    try {
+      const dispatch = store.state.dispatches[dispatchId];
+      if (!dispatch) return;
+      const record = runtimeBindings.get(dispatchId)?.record ?? null;
+      await completeRecoveredSettlement(dispatchId, dispatch.taskId, record);
+    } catch {
+      // Recovery reconciliation stays truthful even when this best-effort
+      // completion fails: a later restart settles from the durable journal.
+    } finally {
+      recoveredFinalizations.delete(dispatchId);
+    }
   }
 
   function assertMutationAllowed(operation) {
@@ -1614,6 +1757,16 @@ export async function createSupervisor(options = {}) {
           return { duplicate: true, acknowledgedSequence: result.acknowledgedSequence };
         }
         journal.push(result.delivery);
+        // A recovered (reattached) dispatch has NO live owner finalizer — this
+        // supervisor IS the owner now, so a terminal callback must trigger
+        // resource settlement exactly once. Dispatches launched by THIS
+        // process keep their own launch-time finalizer and are skipped here.
+        if (TERMINAL_WORKER_DELIVERY_TYPES.includes(type)) {
+          const terminalDispatchId = typeof payload?.dispatchId === 'string' ? payload.dispatchId : null;
+          if (terminalDispatchId && reattachedAtBoot.has(terminalDispatchId)) {
+            void finalizeRecoveredTerminal(terminalDispatchId);
+          }
+        }
         return { sequence: result.delivery.sequence };
       },
     };
