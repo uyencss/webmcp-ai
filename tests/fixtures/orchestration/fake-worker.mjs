@@ -41,6 +41,13 @@ switch (mode) {
     setInterval(() => {}, 500);
     break;
   }
+  case 'hold-silent': {
+    // Produces NO output whatsoever: an owner crash closing our stdio pipes
+    // can never kill us via EPIPE, so crash-window tests observe pure
+    // process liveness without transport noise.
+    setInterval(() => {}, 1000);
+    break;
+  }
   default: {
     write('ready');
     setTimeout(() => process.exit(0), 200);

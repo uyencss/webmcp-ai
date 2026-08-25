@@ -67,19 +67,27 @@ if (mode === 'assert-args') {
 
 if (mode === 'trap-signals') {
   // Stays alive through SIGINT+SIGTERM for a bounded window so tests can
-  // prove that signal delivery alone NEVER counts as a stop.
+  // prove that signal delivery alone NEVER counts as a stop. When
+  // FAKE_QUIET=1 the fixture emits NOTHING: a crashed owner closes our
+  // stdio pipes and any write would kill us via EPIPE.
+  const quiet = process.env.FAKE_QUIET === '1';
+  const say = (line) => {
+    if (!quiet) {
+      try { process.stdout.write(`${JSON.stringify(line)}\n`); } catch { /* owner gone */ }
+    }
+  };
   const effectiveSession = valueOf('--session-id') ?? valueOf('--resume');
-  emit({ type: 'system', subtype: 'init', session_id: effectiveSession });
+  say({ type: 'system', subtype: 'init', session_id: effectiveSession });
   let trapped = 0;
   const onSignal = (signal) => {
     trapped += 1;
-    process.stdout.write(`${JSON.stringify({ type: 'user', trapped, signal })}\n`);
+    say({ type: 'user', trapped, signal });
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   const holdMs = Number(process.env.FAKE_CLAUDE_TRAP_MS ?? 6000);
   setTimeout(() => {
-    process.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success', result: `released:${trapped}`, session_id: effectiveSession })}\n`);
+    say({ type: 'result', subtype: 'success', result: `released:${trapped}`, session_id: effectiveSession });
     process.exit(0);
   }, holdMs);
 } else if (mode === 'busy-followup') {

@@ -33,9 +33,16 @@ if (mode === 'resume-help') {
 
 if (mode === 'hold') {
   // Long-lived fixture turn: emits the thread record then traps signals so
-  // tests can prove signal delivery alone never counts as a stop.
-  process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: 'thr_hold_1' })}\n`);
-  process.stdout.write(`${JSON.stringify({ type: 'turn.started' })}\n`);
+  // tests can prove signal delivery alone never counts as a stop. With
+  // FAKE_QUIET=1 it stays fully silent (crash-window safe: no EPIPE).
+  const quiet = process.env.FAKE_QUIET === '1';
+  const say = (line) => {
+    if (!quiet) {
+      try { process.stdout.write(`${JSON.stringify(line)}\n`); } catch { /* owner gone */ }
+    }
+  };
+  say({ type: 'thread.started', thread_id: 'thr_hold_1' });
+  say({ type: 'turn.started' });
   process.on('SIGTERM', () => {});
   process.on('SIGINT', () => {});
   setInterval(() => {}, 1000);

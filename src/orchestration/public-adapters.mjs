@@ -339,6 +339,10 @@ export function createPublicLifecycle(kind, adapter, config) {
             workspace: context.task.workspace,
             bindingId: context.dispatch.bindingId,
             fenceEpoch: context.dispatch.fenceEpoch,
+            // Universal crash-window handshake: the supervisor's durable
+            // launch lease is bound the instant the server process exists,
+            // BEFORE readiness/health/session/prompt work begins.
+            onSpawned: context.dispatch?.onSpawned,
           });
           const session = await adapter.createSession(runtime);
           const boundBinding = { ...binding, sessionId: session.sessionId };

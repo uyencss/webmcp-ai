@@ -266,6 +266,9 @@ function startHttpServer() {
 
   server.listen(PORT, '127.0.0.1', () => {
     const address = server.address();
+    // FAKE_QUIET=1 (crash-window harness): emit NOTHING — a crashed owner
+    // closes our stdout pipe and any write would kill this server via EPIPE.
+    if (process.env.FAKE_QUIET === '1') return;
     // WEBMCP_FAKE_READY_LINE lets tests simulate hostile ready dialects
     // (foreign port / non-loopback host) exactly as a compromised binary.
     if (process.env.WEBMCP_FAKE_READY_LINE) {

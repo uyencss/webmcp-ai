@@ -170,7 +170,7 @@ export function prepareRuntimeDatabase({ dataRoot, bindingId }) {
  * the caller's XDG_DATA_HOME are preserved untouched; isolation comes from
  * explicit flags plus a dispatch-private config root.
  */
-export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv = {}, port, streamFile, fakeReadyLine, fakeDbEcho, fakeSymlinkDbDir, fakeRequestLog, fakeIgnoreSigterm }) {
+export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv = {}, port, streamFile, fakeReadyLine, fakeDbEcho, fakeSymlinkDbDir, fakeRequestLog, fakeIgnoreSigterm, fakeQuiet }) {
   if (!isAbsolute(dbPath)) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime db path must be absolute', { exitCode: 2 });
   }
@@ -204,6 +204,7 @@ export function buildIsolatedEnv({ dbPath, dispatchPrivateDir, password, baseEnv
     ...(fakeSymlinkDbDir ? { WEBMCP_FAKE_SYMLINK_DB: '1' } : {}),
     ...(fakeRequestLog ? { WEBMCP_FAKE_REQ_LOG: fakeRequestLog } : {}),
     ...(fakeIgnoreSigterm ? { WEBMCP_FAKE_IGNORE_SIGTERM: '1' } : {}),
+    ...(fakeQuiet ? { FAKE_QUIET: '1' } : {}),
   };
 }
 
@@ -495,7 +496,7 @@ export function createOpenCodeServerAdapter(options = {}) {
     return Object.freeze({ ...fields, __private: Object.freeze({ dbPath: fields.__private?.dbPath ?? null }) });
   }
 
-  async function startRuntimeServer({ workspace, bindingId, fenceEpoch }) {
+  async function startRuntimeServer({ workspace, bindingId, fenceEpoch, onSpawned }) {
     const dataRoot = resolveOpencodeDataRoot({ env: options.env ?? {} });
     const prepared = prepareRuntimeDatabase({ dataRoot, bindingId });
 
@@ -527,6 +528,7 @@ export function createOpenCodeServerAdapter(options = {}) {
       fakeSymlinkDbDir: options.symlinkDbDirForTest === true,
       fakeRequestLog: options.requestLogForTest,
       fakeIgnoreSigterm: options.ignoreSigtermForTest === true,
+      fakeQuiet: options.fakeQuietForTest === true,
       baseEnv: pickLaunchEnv(),
     });
 
@@ -545,6 +547,40 @@ export function createOpenCodeServerAdapter(options = {}) {
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    // Universal post-spawn HANDSHAKE — BEFORE readiness parsing, the db
+    // probe, health, session creation or any prompt: the durable launch
+    // lease is upgraded with the REAL pid, the best-effort start identity
+    // (honestly unproven when the probe fails) and the NON-SECRET runtime
+    // database cleanup lease. An owner crash inside this window therefore
+    // leaves recovery everything it needs to find, control and clean up the
+    // worker without ever touching a user-owned database.
+    let probedStartIdentity = null;
+    if (typeof onSpawned === 'function') {
+      const handshakeIdentityDeps = createPlatformIdentityDeps();
+      try {
+        probedStartIdentity = await handshakeIdentityDeps.getStartIdentity(serverChild.pid);
+      } catch {
+        probedStartIdentity = null;
+      }
+      await onSpawned({
+        pid: serverChild.pid,
+        processGroupId: serverChild.pid,
+        ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
+        identityProven: probedStartIdentity !== null,
+        cleanupLease: Object.freeze({
+          ownershipMode: 'runtime-owned',
+          canonicalRuntimeDbPath: prepared.dbPath,
+          canonicalRuntimeDbDir: dirname(prepared.dbPath),
+          databaseIdentity: prepared.databaseIdentity,
+          processIdentity: {
+            pid: serverChild.pid,
+            processGroupId: serverChild.pid,
+            ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),
+          },
+        }),
+      });
+    }
 
     // Every bootstrap failure path must tear the child down — a rejected
     // promise alone would orphan a live server holding its isolated env.
@@ -650,11 +686,8 @@ export function createOpenCodeServerAdapter(options = {}) {
       throw new AiCliError('POLICY_DENIED', `server effective database mismatch: '${health.json.openCodeDb}' != '${prepared.dbPath}'`);
     }
 
-    // Prove the server process start identity so the supervisor binding can
-    // reattach, interrupt and reconcile exactly like an owned process. An
+    // The start identity was already probed at the post-spawn handshake; an
     // unavailable probe stays honestly unproven — never a fabricated value.
-    const identityDeps = createPlatformIdentityDeps();
-    const probedStartIdentity = await identityDeps.getStartIdentity(serverChild.pid).catch(() => null);
     const processIdentity = Object.freeze({
       pid: serverChild.pid,
       ...(probedStartIdentity ? { startIdentity: probedStartIdentity } : {}),

@@ -529,7 +529,14 @@ export async function createSupervisor(options = {}) {
       const residualSweeps = new Map();
       const residualPlanFor = (dispatchId) => {
         if (!residualSweeps.has(dispatchId)) {
-          residualSweeps.set(dispatchId, { record: null, capPaths: [], intentFiles: [], proveStopIntent: null });
+          residualSweeps.set(dispatchId, {
+            record: null,
+            capPaths: [],
+            intentFiles: [],
+            proveStopIntent: null,
+            intentLease: null,
+            retainBoundIntent: false,
+          });
         }
         return residualSweeps.get(dispatchId);
       };
@@ -560,8 +567,18 @@ export async function createSupervisor(options = {}) {
         if (dispatch && NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
         const plan = residualPlanFor(dispatchId);
         plan.intentFiles.push(join(launchIntentsDirFor(layout), `${dispatchId}.json`));
-        if (intent?.state === 'bound' && intent.processIdentity?.identityProven === true) {
-          plan.proveStopIntent = intent.processIdentity;
+        if (intent?.state === 'bound') {
+          if (intent.processIdentity?.identityProven === true) {
+            plan.proveStopIntent = intent.processIdentity;
+            if (intent.cleanupLease && typeof intent.cleanupLease === 'object') {
+              plan.intentLease = intent.cleanupLease;
+            }
+          } else {
+            // A BOUND worker whose identity could not be proven keeps its
+            // last durable pointer: absence was never proven, so sweeping
+            // the lease here would orphan a possibly-live worker forever.
+            plan.retainBoundIntent = true;
+          }
         }
       }
 
@@ -608,7 +625,9 @@ export async function createSupervisor(options = {}) {
                 : record && !bindingControlCapable(record)
                   ? 'provider-session-control-unrestorable-after-restart'
                   : effect.launchIntentStop
-                    ? 'launch-intent-orphan-stopped-after-crash-window'
+                    ? (isSettlementProven(classifyRecoveredStop(effect.launchIntentStop).proof)
+                      ? 'launch-intent-orphan-stopped-after-crash-window'
+                      : 'launch-intent-stop-unproven-retained-after-crash-window')
                     : 'no-live-binding-provable-after-restart',
           },
         });
@@ -628,7 +647,18 @@ export async function createSupervisor(options = {}) {
         }
         const key = `${dispatchId}:residual`;
         if (!effect.launchIntentStop || residualSweptKeys.has(key)) continue;
+        // Only a PROVEN orphan stop may consume the last durable pointer.
+        // A surviving or drift-aborted ladder parks the bound intent so a
+        // later recovery keeps authority over the possibly-live worker.
+        if (!isSettlementProven(classifyRecoveredStop(effect.launchIntentStop).proof)) continue;
         residualSweptKeys.add(key);
+        // The orphan stop is PROVEN here (only proven stops produce a
+        // launchIntentStop effect), so a provider runtime database may be
+        // released through its durable lease before the last pointer goes.
+        if (intent.cleanupLease && typeof intent.cleanupLease === 'object'
+          && isSettlementProven(classifyRecoveredStop(effect.launchIntentStop).proof)) {
+          await attemptRecoveredDbRelease(dispatchId, effect.dispatch.taskId, { cleanupLease: intent.cleanupLease });
+        }
         removeLaunchIntent(layout, dispatchId);
         commit({
           type: 'cleanup_recorded',
@@ -656,6 +686,20 @@ export async function createSupervisor(options = {}) {
             { processIdentity: plan.proveStopIntent }, identityDepsOf(),
           );
         }
+        const intentStopProof = plan.proveStopIntent
+          ? classifyRecoveredStop(intentStop).proof
+          : null;
+        const boundIntentUnresolved = plan.retainBoundIntent === true
+          || (plan.proveStopIntent !== null && !isSettlementProven(intentStopProof));
+        // A proven stop unlocks the provider runtime database release through
+        // its durable lease — before the last pointer disappears.
+        if (plan.intentLease && plan.proveStopIntent && isSettlementProven(intentStopProof)) {
+          await attemptRecoveredDbRelease(
+            dispatchId,
+            store.state.dispatches[dispatchId]?.taskId ?? null,
+            { cleanupLease: plan.intentLease },
+          );
+        }
         // A residual provider binding may still own a runtime database.
         if (plan.record?.cleanupLease) {
           await attemptRecoveredDbRelease(dispatchId, store.state.dispatches[dispatchId]?.taskId ?? null, plan.record);
@@ -664,7 +708,12 @@ export async function createSupervisor(options = {}) {
         for (const capPath of plan.capPaths) {
           try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
         }
+        let retainedLaunchIntents = 0;
         for (const intentFile of plan.intentFiles) {
+          if (boundIntentUnresolved) {
+            retainedLaunchIntents += 1;
+            continue;
+          }
           try { rmSync(intentFile, { force: true }); } catch { /* best effort */ }
         }
         commit({
@@ -677,6 +726,7 @@ export async function createSupervisor(options = {}) {
             disposition: 'residual-artifact-swept',
             idempotencyKey: key,
             ...(intentStop ? { launchIntentStop: intentStop } : {}),
+            ...(retainedLaunchIntents > 0 ? { retainedLaunchIntents } : {}),
           },
         });
       }
@@ -1580,10 +1630,13 @@ export async function createSupervisor(options = {}) {
           guaranteeTier: 'owned-process',
           capabilityFile,
           workerPacket,
-          onSpawned: async ({ pid, processGroupId, startIdentity, identityProven }) => {
+          onSpawned: async ({ pid, processGroupId, startIdentity, identityProven, cleanupLease }) => {
             // Launch-intent HANDSHAKE: the adapter calls this the instant the
             // child exists and its identity is probed, upgrading the durable
             // lease to `bound` so the orphan is locatable and controllable.
+            // Identity is recorded ONLY when proven; a provider cleanup lease
+            // (runtime-owned databases) rides along so recovery can release
+            // the resource even when this owner dies before returning.
             writeLaunchIntent(layout, {
               ...intentBase,
               state: 'bound',
@@ -1591,9 +1644,10 @@ export async function createSupervisor(options = {}) {
               processIdentity: {
                 pid,
                 processGroupId,
-                ...(identityProven ? { startIdentity } : {}),
+                ...(identityProven === true && typeof startIdentity === 'string' ? { startIdentity } : {}),
                 identityProven: identityProven === true,
               },
+              ...(cleanupLease && typeof cleanupLease === 'object' ? { cleanupLease } : {}),
             });
             if (crashAfterSpawn) {
               process.kill(process.pid, 'SIGKILL');
