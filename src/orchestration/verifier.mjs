@@ -365,9 +365,9 @@ export async function runAcceptanceCommand(spec) {
         }
         throw error;
       }
-      // Exclusive create with content-addressed naming: an identical digest
-      // means identical bytes, so a collision REUSES the existing ref instead
-      // of overwriting durable evidence.
+      // Exclusive create with content-addressed naming: on the (rare)
+      // digest collision a NEW suffixed name is written instead of ever
+      // overwriting durable evidence.
       let name = `${baseName}.txt`;
       for (let attempt = 0;; attempt += 1) {
         try {

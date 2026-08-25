@@ -118,18 +118,22 @@ export function normalizeSettlementReceipt(receipt, error = null) {
 
 /**
  * Classify a recovery orphan-stop result ({attempted, disposition, ...} from
- * stopOrphanedByProvenIdentity) into the same typed contract.
+ * stopOrphanedByProvenIdentity) into the same typed contract. Disposition
+ * semantics decide the proof regardless of which branch produced them.
  */
 export function classifyRecoveredStop(orphanStop) {
   const disposition = String(orphanStop?.disposition ?? 'unknown');
+  // A SUCCESSFUL identity probe that mismatched the recorded startIdentity
+  // proves the ORIGINAL process exited — its pid now belongs to an unrelated
+  // newcomer we never signal. This is exit-proven original-exited whether it
+  // surfaced before any signalling attempt (attempted:false) or as the
+  // ladder's own terminal finding.
+  if (disposition === 'pid-recycled-original-exited') {
+    return frozenReceipt(SETTLEMENT_PROOF.PROVEN_ABSENT, disposition);
+  }
   if (orphanStop?.attempted === true) {
     if (disposition === 'group-stopped') {
       return frozenReceipt(SETTLEMENT_PROOF.PROVEN_EXIT, disposition);
-    }
-    if (disposition === 'pid-recycled-original-exited') {
-      // Identity probe succeeded and mismatched: the ORIGINAL process provably
-      // exited; its pid now belongs to an unrelated process we never signal.
-      return frozenReceipt(SETTLEMENT_PROOF.PROVEN_ABSENT, disposition);
     }
     if (disposition === 'group-signalled' || disposition === 'identity-drift-aborted'
       || disposition === 'pid-recycled-identity-unavailable') {
@@ -140,8 +144,13 @@ export function classifyRecoveredStop(orphanStop) {
   if (disposition === 'already-exited') {
     return frozenReceipt(SETTLEMENT_PROOF.PROVEN_ABSENT, disposition);
   }
-  // no-provable-identity, self-pid-refused, pid-recycled-never-signalled
-  // (probe unavailable), unknown: nothing proven, park fail-closed.
+  if (disposition === 'pid-recycled-identity-unavailable') {
+    // The pid is alive but its holder identity could not be proven: the
+    // original MAY have exited. Nothing is provable — park for retry.
+    return frozenReceipt(SETTLEMENT_PROOF.PENDING_RETRY, disposition);
+  }
+  // no-provable-identity, self-pid-refused, unknown: nothing proven, park
+  // fail-closed.
   return frozenReceipt(SETTLEMENT_PROOF.FAILED_UNPROVEN, disposition);
 }
 

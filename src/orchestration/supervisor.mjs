@@ -802,9 +802,25 @@ export async function createSupervisor(options = {}) {
     try {
       process.kill(pid, 0);
       alive = true;
-      const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
-      identityProbeOk = typeof nowIdentity === 'string' && nowIdentity.length > 0;
-      identityMatches = nowIdentity === startIdentity;
+      // A process that exits between the presence check and the probe makes
+      // exactly one probe fail spuriously; retry briefly so an exiting
+      // original resolves to PROVEN absence instead of an unprovable park.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+        if (typeof nowIdentity === 'string' && nowIdentity.length > 0) {
+          identityProbeOk = true;
+          identityMatches = nowIdentity === startIdentity;
+          break;
+        }
+        try {
+          process.kill(pid, 0);
+        } catch {
+          // The original exited inside the race window: proof of absence.
+          alive = false;
+          break;
+        }
+        await new Promise((resolveTick) => setTimeout(resolveTick, 40));
+      }
     } catch {
       alive = false;
     }
@@ -836,7 +852,9 @@ export async function createSupervisor(options = {}) {
   async function completeRecoveredSettlement(dispatchId, taskId, record) {
     const orphanStop = await stopOrphanedByProvenIdentity(record, identityDepsOf());
     const settlement = classifyRecoveredStop(orphanStop);
-    applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement);
+    // Awaited so finalizeRecoveredTerminal (and therefore the stop() drain)
+    // cannot resolve while settlement effects are still in flight.
+    await applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement);
   }
 
   /**
@@ -951,7 +969,19 @@ export async function createSupervisor(options = {}) {
     } catch {
       return 'exited';
     }
-    const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+    let nowIdentity = null;
+    // Brief retry: a worker exiting inside this window makes exactly one
+    // probe fail spuriously before ESRCH becomes the truthful answer.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+      if (typeof nowIdentity === 'string' && nowIdentity.length > 0) break;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return 'exited';
+      }
+      await new Promise((resolveTick) => setTimeout(resolveTick, 40));
+    }
     if (typeof nowIdentity !== 'string' || nowIdentity.length === 0) return 'drift';
     return nowIdentity === startIdentity ? 'ok' : 'drift';
   }

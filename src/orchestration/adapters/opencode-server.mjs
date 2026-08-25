@@ -375,18 +375,25 @@ export async function releaseRecoveredRuntimeDatabase(record, {
     }
   };
   const targetCanonical = canonOf(dbPath);
-  const protectedTargets = [join(defaultRoot, 'opencode.db'), sharedCliDb, defaultRoot];
-  for (const guarded of protectedTargets) {
-    const guardedCanonical = canonOf(guarded);
-    const relA = relative(guardedCanonical, targetCanonical);
-    const relB = relative(targetCanonical, guardedCanonical);
-    const insideOrEqual = (rel) => rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-    if (insideOrEqual(relA) || insideOrEqual(relB)) {
-      throw new AiCliError(
-        'POLICY_DENIED',
-        'refusing recovered release: lease targets a protected or user-owned database path',
-        { details: { leasePath: String(lease.canonicalRuntimeDbPath), protectedPath: String(guarded) } },
-      );
+  // Production geometry places runtime-owned trees INSIDE the user data
+  // root (<dataRoot>/webmcp-ai-runtime/worker_*/opencode.db). The denylist
+  // therefore protects everything under the data root EXCEPT the dedicated
+  // webmcp-ai-runtime subtree, plus the shared CLI database absolutely.
+  const runtimeSubtreeRoot = join(defaultRoot, 'webmcp-ai-runtime');
+  const relToRuntime = relative(canonOf(runtimeSubtreeRoot), targetCanonical);
+  const insideRuntimeSubtree = relToRuntime !== '' && !relToRuntime.startsWith('..') && !isAbsolute(relToRuntime);
+  if (!insideRuntimeSubtree) {
+    for (const guarded of [join(defaultRoot, 'opencode.db'), sharedCliDb, defaultRoot]) {
+      const guardedCanonical = canonOf(guarded);
+      const relA = relative(guardedCanonical, targetCanonical);
+      const insideOrEqual = (rel) => rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+      if (insideOrEqual(relA)) {
+        throw new AiCliError(
+          'POLICY_DENIED',
+          'refusing recovered release: lease targets a protected or user-owned database path',
+          { details: { leasePath: String(lease.canonicalRuntimeDbPath), protectedPath: String(guarded) } },
+        );
+      }
     }
   }
 
