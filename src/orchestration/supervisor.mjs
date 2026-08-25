@@ -1318,9 +1318,10 @@ export async function createSupervisor(options = {}) {
 
   function dispatchReconciled(dispatch) {
     if (!dispatch) return true;
-    return ['settled', 'lost', 'failed'].includes(dispatch.state)
-      || Boolean(dispatch.terminalOutcome)
-      || dispatch.state === 'cancelled';
+    // A TERMINAL CLAIM ALONE IS NOT RECONCILIATION: settling with a recorded
+    // outcome still owes cleanup/settlement evidence. Only a genuinely
+    // terminal dispatch STATE counts.
+    return ['settled', 'lost', 'failed', 'cancelled'].includes(dispatch.state);
   }
 
   /** Bounded wait for the provider/bridge to reach a truthful terminal state. */

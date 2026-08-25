@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -111,38 +111,65 @@ export function openCoordinationStore(layout, { journalSizeBytes: sizeSource } =
 
 function spillLargePayload(store, sequence, payload, clock) {
   const serialized = JSON.stringify(payload ?? {});
-  if (Buffer.byteLength(serialized, 'utf8') <= ORCHESTRATION_LIMITS.maxInlinePayloadBytes) {
-    return payload;
+  const serializedBytes = Buffer.byteLength(serialized, 'utf8');
+  if (serializedBytes <= ORCHESTRATION_LIMITS.maxInlinePayloadBytes) {
+    return { payload, refPath: null };
   }
-  if (Buffer.byteLength(serialized, 'utf8') > ORCHESTRATION_LIMITS.maxRefBytes) {
+  if (serializedBytes > ORCHESTRATION_LIMITS.maxRefBytes) {
     throw new AiCliError(
       'ORCHESTRATION_INVALID_INPUT',
       `delivery payload exceeds the ${ORCHESTRATION_LIMITS.maxRefBytes} byte ref ceiling`,
       { exitCode: 2 },
     );
   }
-  const refName = `ref_${String(sequence).padStart(6, '0')}.json`;
   // Coordination-TOTAL refs quota: the spill reserves its EXACT serialized
   // byte size against the shared refs directory before any bytes land, so
   // large Delivery spills can never bypass maxRefsTotalBytes regardless of
   // what other writers did. The write itself is an exclusive create: durable
-  // evidence is never overwritten.
-  reserveRefsBytes(store.layout.refsDir, Buffer.byteLength(serialized, 'utf8'), {
+  // evidence is never overwritten. A crash-leftover orphan at the natural
+  // name must never wedge this sequence forever: bounded -rN suffix retries
+  // pick the next free slot while every attempt stays quota-accounted.
+  reserveRefsBytes(store.layout.refsDir, serializedBytes, {
     writerId: `store-spill:${sequence}`,
   });
-  createAtomicExclusiveFile(join(store.layout.refsDir, refName), serialized);
-  return {
-    ref: join('refs', refName),
-    mediaType: 'application/json',
-    bytes: Buffer.byteLength(serialized, 'utf8'),
-    sha256: createHash('sha256').update(serialized).digest('hex'),
-    expiresAt: new Date(clock() + REF_RETENTION_MS).toISOString(),
-  };
+  let lastCollision = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const suffix = attempt === 0 ? '' : `-r${attempt}`;
+    const refName = `ref_${String(sequence).padStart(6, '0')}${suffix}.json`;
+    const refPath = join(store.layout.refsDir, refName);
+    try {
+      createAtomicExclusiveFile(refPath, serialized);
+    } catch (error) {
+      if (/already exists/.test(String(error?.message))) {
+        lastCollision = error;
+        continue;
+      }
+      throw error;
+    }
+    return {
+      payload: {
+        ref: join('refs', refName),
+        mediaType: 'application/json',
+        bytes: serializedBytes,
+        sha256: createHash('sha256').update(serialized).digest('hex'),
+        expiresAt: new Date(clock() + REF_RETENTION_MS).toISOString(),
+      },
+      refPath,
+    };
+  }
+  throw lastCollision ?? new AiCliError('ORCHESTRATION_INDETERMINATE', 'refs spill could not find a free slot', { exitCode: 2 });
 }
 
 /**
- * The single-writer commit path: validate, assign identity, spill oversized
- * payloads, enforce journal bounds, append+fsync, reduce, snapshot atomically.
+ * The single-writer commit path — TRANSACTIONAL across the evidence spill:
+ *
+ *   1. reducer validation runs FIRST on the pre-spill envelope (zero writes
+ *      possible before the event is known-legal);
+ *   2. journal bound checks run BEFORE any ref exists;
+ *   3. only then is the oversized payload spilled;
+ *   4. every step AFTER the spill is wrapped — any failure rolls back THAT
+ *      transaction's ref file so no orphan can wedge the sequence or leak
+ *      quota — and rethrows.
  */
 export function commitDelivery(store, draft, { clock = () => Date.now(), waiters } = {}) {
   if (!draft || typeof draft.type !== 'string' || !draft.type) {
@@ -165,9 +192,10 @@ export function commitDelivery(store, draft, { clock = () => Date.now(), waiters
     && payloadDraft.env !== undefined) {
     payloadDraft = { ...payloadDraft, env: sanitizeEnvironmentMetadata(payloadDraft.env) };
   }
-  const payload = spillLargePayload(store, sequence, sanitizeEvent(payloadDraft), clock);
+  const sanitizedPayload = sanitizeEvent(payloadDraft);
 
-  const envelope = {
+  // ---- Phase 1: validate EVERYTHING provable before any byte lands ------
+  const baseEnvelope = {
     schema: DELIVERY_PROTOCOL,
     deliveryId: `${ID_PREFIXES.delivery}${sequence}`,
     sequence,
@@ -178,40 +206,50 @@ export function commitDelivery(store, draft, { clock = () => Date.now(), waiters
     ...(draft.callbackRef !== undefined ? { callbackRef: draft.callbackRef } : {}),
     type: draft.type,
     time: typeof draft.time === 'string' ? draft.time : new Date(clock()).toISOString(),
-    payload,
+    payload: sanitizedPayload,
   };
+  // Dry-run the reducer on the pre-spill envelope: an invalid event fails
+  // closed here, leaving journal AND refs untouched.
+  applyDelivery(store.state, baseEnvelope);
 
-  const recordBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
-  if (recordBytes > ORCHESTRATION_LIMITS.maxDeliveryBytes) {
-    throw new AiCliError(
-      'ORCHESTRATION_INVALID_INPUT',
-      `serialized delivery exceeds the ${ORCHESTRATION_LIMITS.maxDeliveryBytes} byte record limit`,
-      { exitCode: 2 },
-    );
-  }
-
+  // ---- Phase 2: journal bounds BEFORE the spill --------------------------
   const currentSize = store.__sizeSource();
   const critical = CRITICAL_DELIVERY_TYPES.includes(draft.type);
-  // The reserved final band is [backpressure, hard): only critical records may
-  // land there. At or beyond the hard limit everything fails closed.
   if (currentSize >= ORCHESTRATION_LIMITS.journalHardLimitBytes) {
     throw new AiCliError('JOURNAL_LIMIT_REACHED', 'journal hard limit reached; export/prune required');
   }
-  if (
-    !critical
-    && currentSize >= ORCHESTRATION_LIMITS.journalBackpressureBytes
-  ) {
+  if (!critical && currentSize >= ORCHESTRATION_LIMITS.journalBackpressureBytes) {
     throw new AiCliError('JOURNAL_BACKPRESSURE', 'journal backpressure threshold reached');
   }
 
-  // Validation happens BEFORE the durable append: a reducer-invalid event
-  // must leave no journal record at all.
-  const nextState = applyDelivery(store.state, envelope);
-  appendDeliveryLine(store.layout.journalPath, envelope);
-  writeAtomicJson(store.layout.snapshotPath, snapshotFromState(nextState));
-  store.state = nextState;
-  if (waiters) notifyWaiters(waiters);
-  return { delivery: envelope, state: nextState };
+  // ---- Phase 3: spill -----------------------------------------------------
+  const spilled = spillLargePayload(store, sequence, sanitizedPayload, clock);
+
+  // ---- Phase 4: all-or-nothing tail — any failure rolls the ref back ----
+  try {
+    const envelope = spilled.refPath === null
+      ? baseEnvelope
+      : { ...baseEnvelope, payload: spilled.payload };
+    const recordBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+    if (recordBytes > ORCHESTRATION_LIMITS.maxDeliveryBytes) {
+      throw new AiCliError(
+        'ORCHESTRATION_INVALID_INPUT',
+        `serialized delivery exceeds the ${ORCHESTRATION_LIMITS.maxDeliveryBytes} byte record limit`,
+        { exitCode: 2 },
+      );
+    }
+    const nextState = applyDelivery(store.state, envelope);
+    appendDeliveryLine(store.layout.journalPath, envelope);
+    writeAtomicJson(store.layout.snapshotPath, snapshotFromState(nextState));
+    store.state = nextState;
+    if (waiters) notifyWaiters(waiters);
+    return { delivery: envelope, state: nextState };
+  } catch (error) {
+    if (spilled.refPath !== null) {
+      try { rmSync(spilled.refPath, { force: true }); } catch { /* best effort */ }
+    }
+    throw error;
+  }
 }
 
 function notifyWaiters() {
