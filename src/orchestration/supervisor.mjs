@@ -847,6 +847,9 @@ export async function createSupervisor(options = {}) {
    * durable record before this runs).
    */
   async function applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement) {
+    // Teardown latch: once stop() begins, late recovered settlements no-op
+    // truthfully — the next owner completes them from durable state.
+    if (stopping) return;
     if (isSettlementProven(settlement.proof)) {
       settleDispatchOnce(dispatchId, taskId, {
         proof: settlement.proof,
