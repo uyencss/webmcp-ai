@@ -248,8 +248,18 @@ export function createOwnedProcessAdapter(options = {}) {
       }
 
       const identityDeps = createPlatformIdentityDeps();
-      const provenStartIdentity = (await identityDeps.getStartIdentity(child.pid))
+      const probedStartIdentity = await identityDeps.getStartIdentity(child.pid);
+      const provenStartIdentity = probedStartIdentity
         ?? `${process.platform}:indeterminate-${child.pid}`;
+      // Launch-intent HANDSHAKE: the supervisor persists the BOUND lease the
+      // instant the child exists and its identity is probed, closing the
+      // crash window between spawn and durable binding persistence.
+      await dispatch?.onSpawned?.({
+        pid: child.pid,
+        processGroupId: child.pid,
+        startIdentity: provenStartIdentity,
+        identityProven: probedStartIdentity !== null,
+      });
 
       const signalsAttempted = [];
       const donePromise = new Promise((resolveDone) => {

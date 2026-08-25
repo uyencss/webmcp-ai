@@ -86,11 +86,11 @@ function strictDispatchStartInput(input) {
   }
 }
 
-async function buildSupervisorIdentity(processGeneration) {
-  const deps = createPlatformIdentityDeps();
+async function buildSupervisorIdentity(processGeneration, identityDepsFactory) {
+  const deps = identityDepsFactory ?? createPlatformIdentityDeps;
   let startIdentity = null;
   try {
-    startIdentity = await deps.getStartIdentity(process.pid);
+    startIdentity = await deps().getStartIdentity(process.pid);
   } catch {
     startIdentity = null;
   }
@@ -139,6 +139,12 @@ function recoverLayout(roots, coordinationId) {
 const GENERATION_SCHEMA = 'webmcp.ai-supervisor-generation/v0';
 const BINDINGS_SCHEMA = 'webmcp.ai-supervisor-runtime-bindings/v0';
 const BINDINGS_FILENAME = 'runtime-bindings.json';
+// Durable launch-intent lease: written BEFORE any child spawns and upgraded
+// to `bound` the instant spawn returns (real pid/pgid + proven identity), so
+// an owner crash between spawn and runtime-binding persistence still leaves
+// recovery a machine-local, secret-free pointer it can act on.
+const LAUNCH_INTENT_SCHEMA = 'webmcp.ai-launch-intent/v0';
+const LAUNCH_INTENTS_DIRNAME = 'launch-intents';
 const NONTERMINAL_DISPATCH_STATES = new Set(['created', 'assigned', 'active', 'waiting', 'settling']);
 // Proof-driven settlement retry budget: a failing finalizer is retried a
 // bounded number of times before the dispatch parks fail-closed in settling.
@@ -211,6 +217,43 @@ function persistRuntimeBindingRecords(layout, bindingsMap) {
   writeAtomicJson(bindingsPathFor(layout), { schema: BINDINGS_SCHEMA, bindings });
 }
 
+function launchIntentsDirFor(layout) {
+  return join(layout.coordinationDir, LAUNCH_INTENTS_DIRNAME);
+}
+
+/** Atomically persist one launch-intent lease (machine-local, secret-free). */
+function writeLaunchIntent(layout, intent) {
+  const dir = launchIntentsDirFor(layout);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeAtomicJson(join(dir, `${intent.dispatchId}.json`), intent);
+}
+
+function removeLaunchIntent(layout, dispatchId) {
+  try { rmSync(join(launchIntentsDirFor(layout), `${dispatchId}.json`), { force: true }); } catch { /* best effort */ }
+}
+
+/** Load every durable launch intent; corrupt files are swept as garbage. */
+function loadLaunchIntents(layout) {
+  const dir = launchIntentsDirFor(layout);
+  const intents = new Map();
+  if (!existsSync(dir)) return intents;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.json')) continue;
+    const dispatchId = name.slice(0, -'.json'.length);
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+      if (parsed?.schema === LAUNCH_INTENT_SCHEMA && typeof parsed.dispatchId === 'string') {
+        intents.set(parsed.dispatchId, parsed);
+      } else {
+        intents.set(dispatchId, { schema: LAUNCH_INTENT_SCHEMA, dispatchId, state: 'corrupt' });
+      }
+    } catch {
+      intents.set(dispatchId, { schema: LAUNCH_INTENT_SCHEMA, dispatchId, state: 'corrupt' });
+    }
+  }
+  return intents;
+}
+
 function validateRuntimeBindingRecord(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'runtime binding record must be an object', { exitCode: 2 });
@@ -280,7 +323,12 @@ export async function createSupervisor(options = {}) {
     adapters = [],
     verifyDispatch = null,
     trustedCoordinatorConfig: trustedConfig = null,
+    identityDepsFactory = null,
   } = options;
+  // Injectable platform identity probes (test seam): production always uses
+  // the real per-platform probes. Every signalling decision flows through
+  // this factory so identity drift is deterministically testable.
+  const identityDepsOf = identityDepsFactory ?? createPlatformIdentityDeps;
   const freshCreate = options.mode ? options.mode === 'create' : true;
   // The registry stays empty by default: adapter-backed dispatch fails closed
   // at the UNSUPPORTED_CAPABILITY boundary until a validated adapter is
@@ -305,7 +353,7 @@ export async function createSupervisor(options = {}) {
   }
   const previousGeneration = readDurableGeneration(layout, manifestGeneration);
   const processGeneration = freshCreate ? 1 : previousGeneration + 1;
-  const identity = await buildSupervisorIdentity(processGeneration);
+  const identity = await buildSupervisorIdentity(processGeneration, identityDepsOf);
 
   // Singleton gate FIRST: no mutable recovery, generation allocation,
   // endpoint publication or lifecycle reconciliation may run unowned.
@@ -385,7 +433,8 @@ export async function createSupervisor(options = {}) {
     // can never wipe a live binding it was persisted ahead of.
     {
       const storedBindings = loadRuntimeBindingRecords(layout);
-      const identityDeps = createPlatformIdentityDeps();
+      const identityDeps = identityDepsOf();
+      const storedIntents = loadLaunchIntents(layout);
 
       // ---- Phase B: classify everything into nextBindings -----------------
       const nextBindings = new Map();
@@ -414,6 +463,7 @@ export async function createSupervisor(options = {}) {
 
         let live = false;
         let orphanStop = null;
+        let launchIntentStop = null;
         if (record && typeof record === 'object' && record.controlOnly !== true && bindingControlCapable(record)) {
           live = await recordIdentityReproven(record, identityDeps);
         }
@@ -425,19 +475,36 @@ export async function createSupervisor(options = {}) {
         } else if (live) {
           nextBindings.set(dispatch.dispatchId, { record });
           reattachedAtBoot.add(dispatch.dispatchId);
+        } else {
+          // No runtime binding survived the crash — but a BOUND launch intent
+          // with a proven identity still gives recovery safe authority over
+          // any worker spawned inside the crash window.
+          const intent = storedIntents.get(dispatch.dispatchId) ?? null;
+          if (intent?.state === 'bound' && intent.processIdentity?.identityProven === true) {
+            launchIntentStop = await stopOrphanedByProvenIdentity(
+              { processIdentity: intent.processIdentity }, identityDeps,
+            );
+          }
         }
-        reconciledEffects.push({ dispatch, live, record, orphanStop });
+        reconciledEffects.push({ dispatch, live, record, orphanStop, launchIntentStop });
       }
 
-      // Residual sweep plan: bindings AND capability files whose dispatch is
-      // already terminal (or absent from the journal entirely) are crash
-      // leftovers behind a settled truth; they are removed idempotently,
-      // one keyed receipt per affected dispatch.
+      // Residual sweep plan: bindings AND capability files AND launch intents
+      // whose dispatch is already terminal (or absent from the journal) are
+      // crash leftovers behind a settled truth; they are removed idempotently,
+      // one keyed receipt per affected dispatch. A bound intent's worker is
+      // proven-stopped BEFORE its last durable pointer is deleted.
       const residualSweeps = new Map();
+      const residualPlanFor = (dispatchId) => {
+        if (!residualSweeps.has(dispatchId)) {
+          residualSweeps.set(dispatchId, { record: null, capPaths: [], intentFiles: [], proveStopIntent: null });
+        }
+        return residualSweeps.get(dispatchId);
+      };
       for (const [dispatchId, entry] of [...nextBindings.entries()]) {
         const dispatch = store.state.dispatches[dispatchId];
         if (dispatch && NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
-        residualSweeps.set(dispatchId, { record: entry.record, capPaths: [] });
+        residualPlanFor(dispatchId).record = entry.record;
         nextBindings.delete(dispatchId);
       }
       const capabilityDir = join(layout.coordinationDir, DISPATCH_CAPABILITY_DIRNAME);
@@ -449,10 +516,20 @@ export async function createSupervisor(options = {}) {
           // A live nonterminal dispatch keeps its capability even when its
           // binding is parked fail-closed — callback auth survives retries.
           if (dispatch && NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
-          const plan = residualSweeps.get(dispatchId) ?? { record: null, capPaths: [] };
-          plan.capPaths.push(join(capabilityDir, name));
-          residualSweeps.set(dispatchId, plan);
+          residualPlanFor(dispatchId).capPaths.push(join(capabilityDir, name));
           nextBindings.delete(dispatchId);
+        }
+      }
+      for (const [dispatchId, intent] of storedIntents.entries()) {
+        // Intents for dispatches STILL nonterminal are handled below in the
+        // post-reconcile pass (this boot may resolve them); planning here
+        // would miss them because terminality is decided in Phase D.
+        const dispatch = store.state.dispatches[dispatchId];
+        if (dispatch && NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
+        const plan = residualPlanFor(dispatchId);
+        plan.intentFiles.push(join(launchIntentsDirFor(layout), `${dispatchId}.json`));
+        if (intent?.state === 'bound' && intent.processIdentity?.identityProven === true) {
+          plan.proveStopIntent = intent.processIdentity;
         }
       }
 
@@ -493,17 +570,61 @@ export async function createSupervisor(options = {}) {
                 ? 'telemetry-binding-degraded-lost-unattachable'
                 : record && !bindingControlCapable(record)
                   ? 'provider-session-control-unrestorable-after-restart'
-                  : 'no-live-binding-provable-after-restart',
+                  : effect.launchIntentStop
+                    ? 'launch-intent-orphan-stopped-after-crash-window'
+                    : 'no-live-binding-provable-after-restart',
           },
         });
+      }
+      // Launch-intent closure for dispatches THIS boot just resolved: a
+      // reattached binding supersedes its lease; a just-typed-lost dispatch
+      // had its bound orphan stopped during classification, so the last
+      // durable pointer is removed under the SAME idempotency key family as
+      // every other residual artifact.
+      for (const effect of reconciledEffects) {
+        const dispatchId = effect.dispatch.dispatchId;
+        const intent = storedIntents.get(dispatchId);
+        if (!intent) continue;
+        if (effect.live) {
+          removeLaunchIntent(layout, dispatchId);
+          continue;
+        }
+        const key = `${dispatchId}:residual`;
+        if (!effect.launchIntentStop || residualSweptKeys.has(key)) continue;
+        residualSweptKeys.add(key);
+        removeLaunchIntent(layout, dispatchId);
+        commit({
+          type: 'cleanup_recorded',
+          payload: {
+            dispatchId,
+            taskId: effect.dispatch.taskId,
+            disposition: 'launch-intent-orphan-stopped',
+            idempotencyKey: key,
+            recoveredStop: effect.launchIntentStop,
+          },
+        });
+        // A `launching`-stuck lease (crash between spawn and handshake) for a
+        // dispatch that stays nonterminal is RETAINED fail-closed: no safe
+        // authority exists over a possibly-spawned child without identity.
       }
       for (const [dispatchId, plan] of residualSweeps.entries()) {
         const key = `${dispatchId}:residual`;
         if (residualSweptKeys.has(key)) continue;
         residualSweptKeys.add(key);
+        // Prove-stop any lingering worker BEFORE deleting its last durable
+        // pointer (bound launch intent behind a terminal journal entry).
+        let intentStop = null;
+        if (plan.proveStopIntent) {
+          intentStop = await stopOrphanedByProvenIdentity(
+            { processIdentity: plan.proveStopIntent }, identityDepsOf(),
+          );
+        }
         if (plan.record) revokeDispatchCapabilityFile(plan.record);
         for (const capPath of plan.capPaths) {
           try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
+        }
+        for (const intentFile of plan.intentFiles) {
+          try { rmSync(intentFile, { force: true }); } catch { /* best effort */ }
         }
         commit({
           type: 'cleanup_recorded',
@@ -514,6 +635,7 @@ export async function createSupervisor(options = {}) {
               : {}),
             disposition: 'residual-artifact-swept',
             idempotencyKey: key,
+            ...(intentStop ? { launchIntentStop: intentStop } : {}),
           },
         });
       }
@@ -638,7 +760,7 @@ export async function createSupervisor(options = {}) {
         disposition: identityProbeOk ? 'pid-recycled-original-exited' : 'pid-recycled-identity-unavailable',
       };
     }
-    const ladder = await restoredSignalLadder(pid, record.processIdentity.processGroupId);
+    const ladder = await restoredSignalLadder(record, identityDeps);
     return {
       attempted: true,
       disposition: ladder.disposition,
@@ -654,7 +776,7 @@ export async function createSupervisor(options = {}) {
    * settling with its binding retained so a retry keeps control.
    */
   async function completeRecoveredSettlement(dispatchId, taskId, record) {
-    const orphanStop = await stopOrphanedByProvenIdentity(record, createPlatformIdentityDeps());
+    const orphanStop = await stopOrphanedByProvenIdentity(record, identityDepsOf());
     const settlement = classifyRecoveredStop(orphanStop);
     applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement);
   }
@@ -740,31 +862,52 @@ export async function createSupervisor(options = {}) {
   }
 
   /**
+   * Reprove the EXACT recorded start identity of the original worker process
+   * right now. Returns 'ok' (alive and identical), 'exited' (ESRCH: the
+   * ORIGINAL provably exited) or 'drift' (the pid is held by a different or
+   * unprovable process — a recycled pid must NEVER be signalled).
+   */
+  async function reproveOriginalIdentity(pid, startIdentity, identityDeps) {
+    if (!Number.isInteger(pid) || pid <= 0
+      || typeof startIdentity !== 'string' || startIdentity.length === 0) return 'drift';
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return 'exited';
+    }
+    const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+    if (typeof nowIdentity !== 'string' || nowIdentity.length === 0) return 'drift';
+    return nowIdentity === startIdentity ? 'ok' : 'drift';
+  }
+
+  /**
    * Raw restored-control signal ladder for an owned worker whose live adapter
    * handle no longer exists (post-restart reattach). The durable binding's
-   * proven process/group identity is the only authority to signal, and the
-   * ladder is SIGINT -> SIGTERM -> SIGKILL with exit proof between steps.
+   * proven process/group identity is the only authority to signal, the ladder
+   * is SIGINT -> SIGTERM -> SIGKILL with exit proof between steps, and the
+   * exact start identity is REPROVEN before EVERY signal: identity drift or
+   * pid reuse between steps aborts the ladder immediately so a recycled
+   * holder can never receive a single byte of our signalling. A surviving
+   * worker yields 'group-signalled', which NEVER counts as group-stopped.
    */
-  async function restoredSignalLadder(pid, processGroupId) {
+  async function restoredSignalLadder(record, identityDeps) {
+    const pid = record?.processIdentity?.pid;
+    const processGroupId = record?.processIdentity?.processGroupId;
+    const startIdentity = record?.processIdentity?.startIdentity;
     const signalsAttempted = [];
-    const isAlive = (targetPid) => {
-      try {
-        process.kill(targetPid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
     const graceMs = 400;
+    let driftAborted = false;
     const awaitExit = async () => {
       const deadline = Date.now() + graceMs;
-      while (Date.now() < deadline && isAlive(pid)) {
+      while (Date.now() < deadline && pidIsAlive(pid)) {
         await new Promise((resolveTick) => setTimeout(resolveTick, 25));
       }
     };
-    if (process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1) {
-      for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
-        if (!isAlive(pid)) break;
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
+      const proof = await reproveOriginalIdentity(pid, startIdentity, identityDeps);
+      if (proof === 'exited') break; // original gone: nothing left to signal
+      if (proof === 'drift') { driftAborted = true; break; }
+      if (process.platform !== 'win32' && Number.isInteger(processGroupId) && processGroupId > 1) {
         try {
           process.kill(-processGroupId, signal);
           signalsAttempted.push(`GROUP_${signal}`);
@@ -774,19 +917,29 @@ export async function createSupervisor(options = {}) {
             signalsAttempted.push(signal);
           } catch { /* already gone */ }
         }
-        await awaitExit();
-      }
-    } else {
-      for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
-        if (!isAlive(pid)) break;
+      } else {
         try {
           process.kill(pid, signal);
           signalsAttempted.push(signal);
         } catch { /* already gone */ }
-        await awaitExit();
       }
+      await awaitExit();
     }
-    return { signalsAttempted, disposition: isAlive(pid) ? 'group-signalled' : 'group-stopped' };
+    if (driftAborted) {
+      return { signalsAttempted, disposition: 'identity-drift-aborted', driftAborted: true };
+    }
+    // Terminal classification requires FRESH proof, not assumption.
+    const finalProof = await reproveOriginalIdentity(pid, startIdentity, identityDeps);
+    if (finalProof === 'exited') {
+      return { signalsAttempted, disposition: 'group-stopped', exitProven: true };
+    }
+    if (finalProof === 'drift') {
+      return { signalsAttempted, disposition: 'identity-drift-aborted', driftAborted: true };
+    }
+    return {
+      signalsAttempted,
+      disposition: signalsAttempted.length > 0 ? 'group-signalled' : 'untouched-alive',
+    };
   }
 
   function pidIsAlive(pid) {
@@ -961,7 +1114,7 @@ export async function createSupervisor(options = {}) {
     // Presence + identity proof BEFORE anything else.
     let presenceAlive = false;
     let identityMatches = false;
-    const identityDeps = createPlatformIdentityDeps();
+    const identityDeps = identityDepsOf();
     try {
       process.kill(pid, 0);
       presenceAlive = true;
@@ -1019,7 +1172,7 @@ export async function createSupervisor(options = {}) {
           reason,
         };
       }
-      controlled = await restoredSignalLadder(pid, record.processIdentity?.processGroupId);
+      controlled = await restoredSignalLadder(record, identityDeps);
     }
 
     const stopped = await awaitExitProof(pid, (controlled.signalsAttempted?.length ?? 0) === 0 ? 300 : 2_000);
@@ -1262,6 +1415,25 @@ export async function createSupervisor(options = {}) {
 
     let started;
     try {
+      // Durable LAUNCH INTENT before any child can exist: if this owner dies
+      // between spawn and runtime-binding persistence, recovery still finds a
+      // machine-local, secret-free lease naming exactly what was launched.
+      const intentBase = {
+        schema: LAUNCH_INTENT_SCHEMA,
+        dispatchId,
+        bindingId,
+        taskId,
+        adapterId: adapter.id,
+        capability: adapter.lifecycle.kind,
+        fenceEpoch,
+        coordinationId,
+      };
+      writeLaunchIntent(layout, { ...intentBase, state: 'launching', issuedAt: new Date().toISOString() });
+      // Deterministic crash-window probe (fixture-gated): die EXACTLY after
+      // the spawn handshake below but BEFORE the old binding persist path.
+      const crashAfterSpawn = trustedConfig?.allowFixtureDispatch === true
+        && typeof env.WEBMCP_AI_TEST_CRASH_AFTER_SPAWN === 'string'
+        && (env.WEBMCP_AI_TEST_CRASH_AFTER_SPAWN === '*' || env.WEBMCP_AI_TEST_CRASH_AFTER_SPAWN === taskId);
       started = await adapter.lifecycle.launch({
         task: taskContext,
         dispatch: {
@@ -1274,6 +1446,25 @@ export async function createSupervisor(options = {}) {
           guaranteeTier: 'owned-process',
           capabilityFile,
           workerPacket,
+          onSpawned: async ({ pid, processGroupId, startIdentity, identityProven }) => {
+            // Launch-intent HANDSHAKE: the adapter calls this the instant the
+            // child exists and its identity is probed, upgrading the durable
+            // lease to `bound` so the orphan is locatable and controllable.
+            writeLaunchIntent(layout, {
+              ...intentBase,
+              state: 'bound',
+              issuedAt: new Date().toISOString(),
+              processIdentity: {
+                pid,
+                processGroupId,
+                ...(identityProven ? { startIdentity } : {}),
+                identityProven: identityProven === true,
+              },
+            });
+            if (crashAfterSpawn) {
+              process.kill(process.pid, 'SIGKILL');
+            }
+          },
           // Durable evidence namespace: spilled output lands under THIS
           // coordination's canonical refsDir, namespaced per dispatch so no
           // two dispatches can ever overwrite each other's evidence.
@@ -1330,6 +1521,9 @@ export async function createSupervisor(options = {}) {
       processIdentity: identity ?? undefined,
       controlOnly: !identity,
     });
+    // The runtime binding is now the durable control record; its launch-intent
+    // lease has served its crash-window purpose and is removed idempotently.
+    removeLaunchIntent(layout, dispatchId);
     // Keep the LIVE adapter handle so interrupt/close route through the
     // adapter's own control surface (session abort, graceful ladder, ...).
     liveBindingObjects.set(dispatchId, started.binding);
