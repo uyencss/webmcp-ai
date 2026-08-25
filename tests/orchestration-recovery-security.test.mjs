@@ -1168,7 +1168,11 @@ test('supervisor operation table enforces lifecycle transitions and closure sema
 test('opencode-server adapter surfaces typed negatives and honest probe reports', { timeout: 20_000 }, async (t) => {
   const serverMod = await require_ocserver();
   const stateDir = covTemp(t, 'oc-negatives');
-  const adapter = serverMod.createOpenCodeServerAdapter({ stateDir });
+  // Isolated HOME geometry so the release path's physical containment anchor
+  // resolves INSIDE the fixture — production geometry without user state.
+  const ocHome = covTemp(t, 'oc-home');
+  const ocEnv = { HOME: ocHome };
+  const adapter = serverMod.createOpenCodeServerAdapter({ stateDir, env: ocEnv });
 
   assert.throws(
     () => serverMod.resolveOpencodeDataRoot({ platform: 'sunos' }),
@@ -1182,7 +1186,10 @@ test('opencode-server adapter surfaces typed negatives and honest probe reports'
   await assert.rejects(() =>
     Promise.resolve().then(() => adapter.deleteSession({ endpoint: 'http://127.0.0.1:1', authToken: 'x', __sessionId: 'ses_raw' })));
 
-  const runtimeDb = join(stateDir, 'webmcp-ai-runtime', 'worker_rel', 'opencode.db');
+  const ocDataRoot = serverMod.resolveOpencodeDataRoot({ env: ocEnv });
+  mkdirSync(ocDataRoot, { recursive: true });
+  if (!ocDataRoot.startsWith(ocHome)) throw new Error('fixture guard: data root escaped');
+  const runtimeDb = join(ocDataRoot, 'webmcp-ai-runtime', 'worker_rel', 'opencode.db');
   mkdirSync(dirname(runtimeDb), { recursive: true });
   for (const artifact of ['opencode.db', 'opencode.db-wal', 'opencode.db-shm']) {
     writeFileSync(join(dirname(runtimeDb), artifact), 'runtime-owned\n');

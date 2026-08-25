@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, readdirSync, rmSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { writeAtomicJson } from '../atomic-file.mjs';
@@ -41,8 +41,8 @@ const KNOWN_DATABASE_SIDECARS = new Set([
 ]);
 
 /**
- * Prove the binding directory is still a real directory inside its real
- * parent — catching post-prepare symlink/path-substitution attacks.
+ * Prove the binding directory is a real directory (never a symlink) and that
+ * the database path, when it already exists, is a real regular file.
  */
 function proveIsolatedDatabaseLocation(dbPath) {
   const dbDir = dirname(dbPath);
@@ -55,10 +55,6 @@ function proveIsolatedDatabaseLocation(dbPath) {
   if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
     throw new AiCliError('POLICY_DENIED', 'runtime database directory is not a real directory');
   }
-  const realDir = realpathSync(dbDir);
-  if (realDir !== join(realpathSync(dirname(dbDir)), basename(dbDir))) {
-    throw new AiCliError('POLICY_DENIED', 'runtime database directory resolves outside its binding');
-  }
   if (existsSync(dbPath)) {
     const fileStats = lstatSync(dbPath);
     if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
@@ -68,11 +64,59 @@ function proveIsolatedDatabaseLocation(dbPath) {
 }
 
 /**
+ * PHYSICAL containment proof for destructive cleanup. Trust is anchored at
+ * the coordinator-resolved dataRoot via exactly ONE realpath (this absorbs
+ * legitimate platform-level symlinks such as macOS /var -> /private/var);
+ * EVERY segment below it down to the binding directory is then walked with
+ * lstat: any symlink — including dangling links and ELOOP loops — any
+ * vanished ancestor fails closed. Because the whole tail is proven physical,
+ * requiring the exact <dataRoot>/webmcp-ai-runtime/<worker_*> suffix makes
+ * realpath-through-a-swapped-ancestor escapes impossible.
+ */
+function provePhysicalRuntimeContainment(dbDir, dataRoot) {
+  if (!isAbsolute(dbDir) || !isAbsolute(dataRoot)) {
+    throw new AiCliError('POLICY_DENIED', 'containment proof requires absolute paths');
+  }
+  let physicalRoot;
+  try {
+    physicalRoot = realpathSync(dataRoot);
+  } catch (error) {
+    throw new AiCliError('POLICY_DENIED', `runtime containment refused: data root unusable (${error?.code ?? 'ERROR'})`);
+  }
+  const suffix = relative(dataRoot, dbDir);
+  const suffixSegments = suffix.split(sep).filter(Boolean);
+  // Exactly ONE worker_<id> directory under the runtime tree.
+  if (suffixSegments.length !== 2 || suffixSegments[0] !== 'webmcp-ai-runtime'
+    || !/^worker_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(suffixSegments[1])) {
+    throw new AiCliError('POLICY_DENIED', 'runtime containment refused: binding dir does not sit exactly one worker_ level under the runtime root');
+  }
+  let cursor = physicalRoot;
+  for (const segment of suffixSegments) {
+    cursor = join(cursor, segment);
+    let stats = null;
+    try {
+      stats = lstatSync(cursor);
+    } catch (error) {
+      throw new AiCliError('POLICY_DENIED', `runtime containment refused: '${segment}' unusable (${error?.code ?? 'ERROR'})`);
+    }
+    if (stats.isSymbolicLink()) {
+      throw new AiCliError('POLICY_DENIED', `runtime containment refused: '${segment}' is a symlink`);
+    }
+    if (!stats.isDirectory()) {
+      throw new AiCliError('POLICY_DENIED', `runtime containment refused: '${segment}' is not a real directory`);
+    }
+  }
+}
+
+/**
  * Prove that a runtime's database path is exactly one isolated, runtime-owned
  * binding directory before any deletion is authorized. Every unprovable
- * property fails closed and retains the files.
+ * property fails closed and retains the files. When `dataRoot` is supplied
+ * the FULL physical ancestor chain must land inside
+ * <dataRoot>/webmcp-ai-runtime/<worker_*> — symlinked ancestors anywhere
+ * above the leaf are refused.
  */
-function proveReleaseIdentity(runtime, { protectedPaths = [] } = {}) {
+function proveReleaseIdentity(runtime, { protectedPaths = [], dataRoot = null } = {}) {
   const dbPath = typeof runtime?.dbPath === 'string' ? runtime.dbPath : null;
   if (!dbPath || !isAbsolute(dbPath)) {
     throw new AiCliError('POLICY_DENIED', 'release refused: database path is not an absolute proven path');
@@ -95,6 +139,9 @@ function proveReleaseIdentity(runtime, { protectedPaths = [] } = {}) {
       throw new AiCliError('POLICY_DENIED', 'refusing to release a protected or user-owned database');
     }
   }
+  if (typeof dataRoot === 'string') {
+    provePhysicalRuntimeContainment(dbDir, dataRoot);
+  }
   proveIsolatedDatabaseLocation(dbPath);
   return { dbDir };
 }
@@ -104,7 +151,12 @@ function proveReleaseIdentity(runtime, { protectedPaths = [] } = {}) {
  * to ~/.local/share across operating systems.
  */
 export function resolveOpencodeDataRoot({ env = {}, platform = process.platform, homeDir } = {}) {
-  const home = homeDir ?? homedir();
+  // Explicit parameter wins; otherwise an explicitly-set HOME in the supplied
+  // environment is honored (POSIX intuition, and lets embedding processes
+  // scope every derived root consistently); finally the OS lookup.
+  const home = homeDir
+    ?? (typeof env.HOME === 'string' && env.HOME.length > 0 ? env.HOME : null)
+    ?? homedir();
   switch (platform) {
     case 'darwin':
       return join(home, 'Library', 'Application Support', 'opencode');
@@ -398,13 +450,13 @@ export async function releaseRecoveredRuntimeDatabase(record, {
     }
   }
 
-  // ---- Structural + digest proof ----------------------------------------
+  // ---- Structural + digest + PHYSICAL containment proof -----------------
   let proof;
   try {
-    proof = proveReleaseIdentity({
-      dbPath,
-      databaseIdentity: lease.databaseIdentity,
-    });
+    proof = proveReleaseIdentity(
+      { dbPath, databaseIdentity: lease.databaseIdentity },
+      { dataRoot: defaultRoot },
+    );
   } catch (error) {
     if (error instanceof AiCliError) return unproven(error.message);
     return unproven('structural proof failed');
@@ -440,6 +492,15 @@ export async function releaseRecoveredRuntimeDatabase(record, {
   }
 
   // ---- Deletion authorized: enumerate allowlist, remove, prove absence --
+  // Re-prove PHYSICAL containment at the destructive moment itself: any
+  // ancestor swapped for a symlink since the earlier checks fails closed
+  // here, retaining every artifact and the retryable lease.
+  try {
+    provePhysicalRuntimeContainment(proof.dbDir, defaultRoot);
+  } catch (error) {
+    if (error instanceof AiCliError) return unproven(error.message);
+    return unproven('containment re-proof failed');
+  }
   let removedFiles;
   try {
     removedFiles = readdirSync(proof.dbDir).sort();
@@ -659,6 +720,9 @@ export function createOpenCodeServerAdapter(options = {}) {
       );
     }
     try {
+      // Start-time hardening: the full physical chain must already sit under
+      // THIS data root's runtime tree before any session may use the db.
+      provePhysicalRuntimeContainment(dirname(prepared.dbPath), dataRoot);
       proveIsolatedDatabaseLocation(prepared.dbPath);
     } catch (error) {
       sweepProcessGroup(serverChild, 'SIGKILL');
@@ -943,7 +1007,24 @@ export function createOpenCodeServerAdapter(options = {}) {
             'release refused: server process death could not be proven; database retained',
           );
         }
-        const proof = proveReleaseIdentity(runtime, { protectedPaths: options.protectedPathsForTest ?? [] });
+        const proof = proveReleaseIdentity(
+          runtime,
+          {
+            protectedPaths: options.protectedPathsForTest ?? [],
+            // Anchor the FULL physical containment chain in the platform data
+            // root; an unresolvable anchor fails closed and retains the tree.
+            ...((() => {
+              try {
+                return { dataRoot: resolveOpencodeDataRoot({ env: options.env ?? {} }) };
+              } catch (error) {
+                throw new AiCliError('POLICY_DENIED', `release refused: physical data root could not be resolved (${error?.code ?? 'ERROR'})`);
+              }
+            })()),
+          },
+        );
+        // RE-PROVE containment at the destructive moment — immediately before
+        // enumeration and removal, so no check can be raced stale.
+        provePhysicalRuntimeContainment(proof.dbDir, resolveOpencodeDataRoot({ env: options.env ?? {} }));
         // Only now is deletion authorized: read the manifest, remove, and
         // prove absence of every known artifact.
         try {

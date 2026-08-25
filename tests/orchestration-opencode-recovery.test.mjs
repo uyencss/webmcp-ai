@@ -34,7 +34,11 @@ const COORD = () => `coord_r11g_${(coordCounter += 1)}`;
 async function seedProviderLeaseFixture(t, name, { lease, withDbFiles = true } = {}) {
   const stateDir = tempDir(t, name);
   const coordinationId = COORD();
-  const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir } });
+  // Isolated HOME geometry: the runtime-owned tree lives under THIS fake
+  // data root — never under the real user's opencode directory.
+  const fakeHome = join(stateDir, 'home');
+  const env = { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir, HOME: fakeHome };
+  const roots = resolveOrchestrationRoots({ env });
   ensureOrchestrationRoots(roots);
   const layout = createCoordinationLayout(roots.stateRoot, coordinationId);
   writeAtomicJson(layout.manifestPath, {
@@ -55,8 +59,13 @@ async function seedProviderLeaseFixture(t, name, { lease, withDbFiles = true } =
     commitDelivery(store, { type, payload });
   }
 
-  // Fake ISOLATED runtime-owned database tree inside the TEST state root.
-  const dbDir = join(roots.stateRoot, 'webmcp-ai-runtime', 'worker_g');
+  // Fake ISOLATED runtime-owned database tree under the fake HOME data root
+  // (production geometry), fully inside the test state dir.
+  const ocMod = await import('../src/orchestration/adapters/opencode-server.mjs');
+  const dataRoot = ocMod.resolveOpencodeDataRoot({ env });
+  if (!dataRoot.startsWith(stateDir)) throw new Error('SAFETY GUARD: data root escaped the fixture');
+  mkdirSync(dataRoot, { recursive: true });
+  const dbDir = join(dataRoot, 'webmcp-ai-runtime', 'worker_g');
   const dbPath = join(dbDir, 'opencode.db');
   if (withDbFiles) {
     mkdirSync(dbDir, { recursive: true });
@@ -88,7 +97,7 @@ async function seedProviderLeaseFixture(t, name, { lease, withDbFiles = true } =
     bindings: { disp_g: record },
   });
 
-  return { stateDir, coordinationId, roots, layout, dbPath, dbDir, defaultDb, sharedCliDb, record };
+  return { stateDir, coordinationId, fakeHome, env, roots, layout, dbPath, dbDir, defaultDb, sharedCliDb, record };
 }
 
 test('R11G-A1: provider-lost recovery releases the leased runtime DB after proven death and never the user trees', async (t) => {
@@ -109,7 +118,7 @@ test('R11G-A1: provider-lost recovery releases the leased runtime DB after prove
   });
 
   const sup = await createSupervisor({
-    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: fixture.stateDir },
+    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: fixture.stateDir, HOME: fixture.fakeHome },
     mode: 'recover',
     coordinationId: fixture.coordinationId,
   });
@@ -159,7 +168,7 @@ test('R11G-A2: insufficient proof keeps every artifact and reports cleanup unpro
   });
 
   const sup = await createSupervisor({
-    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: fixture.stateDir },
+    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: fixture.stateDir, HOME: fixture.fakeHome },
     mode: 'recover',
     coordinationId: fixture.coordinationId,
   });
@@ -200,7 +209,7 @@ test('R11G-A3: a forged lease pointing at the user default database is refused b
   void forgedPath;
 
   const sup = await createSupervisor({
-    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: fixture.stateDir },
+    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: fixture.stateDir, HOME: fixture.fakeHome },
     mode: 'recover',
     coordinationId: fixture.coordinationId,
   });
