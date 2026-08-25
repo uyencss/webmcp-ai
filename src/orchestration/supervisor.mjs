@@ -2528,12 +2528,17 @@ export async function createSupervisor(options = {}) {
     // launch-time finalizations — before releasing ownership. A finalizer
     // still parked on provider work converts to its durable retryable state
     // via the stopping guards; the bound below only caps pathological waits,
-    // and safety never depends on it.
+    // and safety never depends on it. The bound timer stays REF'D on purpose:
+    // an unref'd fallback would let the event loop empty mid-drain on
+    // runtimes where a parked promise alone cannot hold the process.
     if (pendingFinalizations.size > 0) {
-      await Promise.race([
-        Promise.allSettled([...pendingFinalizations]),
-        new Promise((resolveTick) => setTimeout(resolveTick, 4_000).unref?.()),
-      ]);
+      await new Promise((resolveDrain) => {
+        const bound = setTimeout(resolveDrain, 4_000);
+        Promise.allSettled([...pendingFinalizations]).then(() => {
+          clearTimeout(bound);
+          resolveDrain();
+        });
+      });
     }
     // Maps are cleared ONLY after the drain so in-flight finalizers always
     // observed their own records (never an emptied view).
