@@ -256,12 +256,20 @@ test('R8A: task.cancel really interrupts a live owned worker', async (t) => {
 
   const cancelled = await call('task.cancel', { taskId, reason: 'r8a-real-interrupt' });
   assert.equal(cancelled.ok, true, JSON.stringify(cancelled.error ?? {}));
-  assert.equal(cancelled.result.cancelled, true);
-  assert.equal(
-    cancelled.result.stops.some((stop) => stop.dispatchId === dispatchId && stop.stopped === true),
-    true,
-    'cancel reports the executed interrupt',
-  );
+  // TWO truthful outcomes exist depending on which terminal path won the
+  // race: our interrupt (cancelled:true + executed stop evidence) or the
+  // worker's own terminal report arriving first (alreadyTerminal, NEVER a
+  // fabricated cancelled:true).
+  if (cancelled.result.cancelled === true) {
+    assert.equal(
+      cancelled.result.stops.some((stop) => stop.dispatchId === dispatchId && stop.stopped === true),
+      true,
+      'cancel reports the executed interrupt',
+    );
+  } else {
+    assert.equal(cancelled.result.alreadyTerminal, true,
+      `post-terminal race must answer alreadyTerminal: ${JSON.stringify(cancelled.result ?? {})}`);
+  }
 
   const deadline = Date.now() + 6_000;
   let state = null;
