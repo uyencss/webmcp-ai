@@ -45,6 +45,12 @@ import { loadCanaryReceipts, probeExecutableVersion, resolveExecutableDigest } f
 import { sanitizeEvent } from './redaction.mjs';
 import { captureWorkspaceBaseline, canonicalizeExistingPrefix } from './verifier.mjs';
 import { verifyDispatch as defaultVerifyDispatch } from './verifier.mjs';
+import {
+  SETTLEMENT_PROOF,
+  classifyRecoveredStop,
+  isSettlementProven,
+  normalizeSettlementReceipt,
+} from './settlement.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
 
@@ -134,6 +140,10 @@ const GENERATION_SCHEMA = 'webmcp.ai-supervisor-generation/v0';
 const BINDINGS_SCHEMA = 'webmcp.ai-supervisor-runtime-bindings/v0';
 const BINDINGS_FILENAME = 'runtime-bindings.json';
 const NONTERMINAL_DISPATCH_STATES = new Set(['created', 'assigned', 'active', 'waiting', 'settling']);
+// Proof-driven settlement retry budget: a failing finalizer is retried a
+// bounded number of times before the dispatch parks fail-closed in settling.
+const FINALIZE_MAX_ATTEMPTS = 6;
+const FINALIZE_RETRY_DELAY_MS = 250;
 
 function generationPath(layout) {
   return join(layout.coordinationDir, 'generation.json');
@@ -308,6 +318,10 @@ export async function createSupervisor(options = {}) {
   const runtimeBindings = new Map(); // dispatchId -> { record }
   const liveBindingObjects = new Map(); // dispatchId -> live adapter binding object
   const reattachedAtBoot = new Set(); // dispatchIds reattached during THIS boot
+  // Exactly-once settlement: completion receipts are keyed `<dispatchId>:settle`
+  // and pre-populated from the replayed journal so a crash between the proven
+  // cleanup receipt and the settled transition never duplicates either.
+  const settledCompletionKeys = new Set();
   let journal = [];
   const taskPackets = new Map();
   let commit = () => {
@@ -341,6 +355,14 @@ export async function createSupervisor(options = {}) {
     }
 
     journal = replayJournal(layout).deliveries.slice();
+    for (const delivery of journal) {
+      if (delivery?.type === 'cleanup_recorded'
+        && typeof delivery.payload?.idempotencyKey === 'string'
+        && delivery.payload.idempotencyKey.endsWith(':settle')
+        && isSettlementProven(delivery.payload.proof)) {
+        settledCompletionKeys.add(delivery.payload.idempotencyKey);
+      }
+    }
     for (const [packetTaskId, packet] of loadTaskPackets(layout)) taskPackets.set(packetTaskId, packet);
 
     commit = (draft) => {
@@ -451,6 +473,47 @@ export async function createSupervisor(options = {}) {
   }
 
   /**
+   * Settle a dispatch AT MOST ONCE, and only on proven resource release.
+   * The proven completion receipt carries an idempotency key replayed from
+   * the journal, so retries, crashes between receipt and transition, and
+   * repeated recoveries can never duplicate the settled truth.
+   */
+  function settleDispatchOnce(dispatchId, taskId, { proof, disposition, extraPayload = {}, record = null }) {
+    const key = `${dispatchId}:settle`;
+    if (!settledCompletionKeys.has(key)) {
+      settledCompletionKeys.add(key);
+      commit({
+        type: 'cleanup_recorded',
+        payload: {
+          dispatchId,
+          taskId,
+          proof,
+          disposition,
+          idempotencyKey: key,
+          ...extraPayload,
+        },
+      });
+    }
+    const current = store.state.dispatches[dispatchId];
+    if (current && current.state === 'settling') {
+      commit({
+        type: 'dispatch_state_changed',
+        dispatchId,
+        taskId,
+        payload: { dispatchId, taskId, state: 'settled' },
+      });
+    }
+    const entry = runtimeBindings.get(dispatchId) ?? null;
+    const effectiveRecord = record ?? entry?.record ?? null;
+    runtimeBindings.delete(dispatchId);
+    liveBindingObjects.delete(dispatchId);
+    if (entry) persistRuntimeBindingRecords(layout, runtimeBindings);
+    // Revoke the capability ONLY after settled is durable; retention of this
+    // file is what keeps callback auth alive for unproven (parked) retries.
+    if (effectiveRecord) revokeDispatchCapabilityFile(effectiveRecord);
+  }
+
+  /**
    * Identity-guarded best-effort stop of an orphaned owned process. A pid is
    * signalled ONLY when presence AND the exact recorded start identity are
    * both proven right now; recycled or unprovable pids are never touched.
@@ -468,15 +531,26 @@ export async function createSupervisor(options = {}) {
     }
     let alive = false;
     let identityMatches = false;
+    let identityProbeOk = false;
     try {
       process.kill(pid, 0);
       alive = true;
-      identityMatches = (await identityDeps.getStartIdentity(pid).catch(() => null)) === startIdentity;
+      const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+      identityProbeOk = typeof nowIdentity === 'string' && nowIdentity.length > 0;
+      identityMatches = nowIdentity === startIdentity;
     } catch {
       alive = false;
     }
     if (!alive) return { attempted: false, disposition: 'already-exited' };
-    if (!identityMatches) return { attempted: false, disposition: 'pid-recycled-never-signalled' };
+    if (!identityMatches) {
+      // A SUCCESSFUL probe that mismatched proves the original process exited
+      // (its pid now belongs to a newcomer we never signal). A FAILED probe
+      // proves nothing and must park the settlement fail-closed.
+      return {
+        attempted: false,
+        disposition: identityProbeOk ? 'pid-recycled-original-exited' : 'pid-recycled-identity-unavailable',
+      };
+    }
     const ladder = await restoredSignalLadder(pid, record.processIdentity.processGroupId);
     return {
       attempted: true,
@@ -486,35 +560,40 @@ export async function createSupervisor(options = {}) {
   }
 
   /**
-   * Crash-window settlement completion: the worker outcome is already durable,
-   * so recovery proves resource release (identity-guarded), commits the missing
-   * cleanup evidence and drives settling -> settled exactly once, then revokes
-   * the runtime binding and its capability file.
+   * Crash-window settlement completion: the worker outcome is already durable.
+   * Recovery proves resource release (identity-guarded) BEFORE any settle:
+   * proven outcomes drive settling -> settled exactly once and release the
+   * binding + capability; unproven outcomes PARK the dispatch fail-closed in
+   * settling with its binding retained so a retry keeps control.
    */
   async function completeRecoveredSettlement(dispatchId, taskId, record) {
     const orphanStop = await stopOrphanedByProvenIdentity(record, createPlatformIdentityDeps());
+    const settlement = classifyRecoveredStop(orphanStop);
+    if (isSettlementProven(settlement.proof)) {
+      settleDispatchOnce(dispatchId, taskId, {
+        proof: settlement.proof,
+        disposition: 'recovered-post-terminal-cleanup',
+        extraPayload: { recoveredStop: orphanStop },
+        record,
+      });
+      return;
+    }
+    // Fail-closed park: keep the dispatch in settling and retain every control
+    // artifact so a later owner/retry can still prove the stop truthfully.
     commit({
       type: 'cleanup_recorded',
       payload: {
         dispatchId,
         taskId,
-        disposition: 'recovered-post-terminal-cleanup',
+        proof: settlement.proof,
+        disposition: `recovered-settlement-${settlement.disposition}`,
         recoveredStop: orphanStop,
       },
     });
-    const current = store.state.dispatches[dispatchId];
-    if (current && current.state === 'settling') {
-      commit({
-        type: 'dispatch_state_changed',
-        dispatchId,
-        taskId,
-        payload: { dispatchId, taskId, state: 'settled' },
-      });
+    if (record && !runtimeBindings.has(dispatchId)) {
+      runtimeBindings.set(dispatchId, { record });
+      persistRuntimeBindingRecords(layout, runtimeBindings);
     }
-    runtimeBindings.delete(dispatchId);
-    liveBindingObjects.delete(dispatchId);
-    persistRuntimeBindingRecords(layout, runtimeBindings);
-    revokeDispatchCapabilityFile(record);
   }
 
   const recoveredFinalizations = new Set();
@@ -1187,41 +1266,50 @@ export async function createSupervisor(options = {}) {
             },
           });
         }
-        let cleanupReceipt = null;
-        try {
-          cleanupReceipt = await adapter.lifecycle.finalize({ binding: started.binding });
-        } catch (error) {
-          cleanupReceipt = { disposition: 'cleanup-error', reason: error.message?.slice(0, 200) };
+        // Proof-driven settlement: the owner retries the finalizer a bounded
+        // number of times and the dispatch settles ONLY on a PROVEN release
+        // receipt. Cleanup errors, unproven stops (`group-signalled`) and
+        // unusable receipts park the dispatch fail-closed in settling with
+        // its runtime binding and capability retained for retry.
+        let settlement = null;
+        for (let attempt = 1; attempt <= FINALIZE_MAX_ATTEMPTS; attempt += 1) {
+          let receipt = null;
+          let finalizeError = null;
+          try {
+            receipt = await adapter.lifecycle.finalize({ binding: started.binding });
+          } catch (error) {
+            finalizeError = error;
+          }
+          settlement = normalizeSettlementReceipt(receipt, finalizeError);
+          if (isSettlementProven(settlement.proof)) break;
+          if (attempt < FINALIZE_MAX_ATTEMPTS) {
+            await new Promise((resolveTick) => setTimeout(resolveTick, FINALIZE_RETRY_DELAY_MS));
+          }
         }
-        commit({
-          type: 'cleanup_recorded',
-          payload: {
-            dispatchId,
-            taskId,
-            disposition: cleanupReceipt?.disposition ?? 'unknown',
-            released: cleanupReceipt?.released ?? null,
-            retained: cleanupReceipt?.retained ?? null,
-          },
-        });
-        // The legal settling -> settled transition is committed by the owner
-        // only after resource reconciliation evidence is durable.
-        const current = store.state.dispatches[dispatchId];
-        if (current && current.state === 'settling') {
-          commit({
-            type: 'dispatch_state_changed',
-            dispatchId,
-            taskId,
-            payload: { dispatchId, taskId, state: 'settled' },
+        if (isSettlementProven(settlement.proof)) {
+          settleDispatchOnce(dispatchId, taskId, {
+            proof: settlement.proof,
+            disposition: settlement.disposition,
+            extraPayload: {
+              ...(settlement.reason ? { reason: settlement.reason } : {}),
+              released: settlement.proof === SETTLEMENT_PROOF.PROVEN_EXIT ? true : settlement.released,
+              signalsAttempted: settlement.signalsAttempted ?? undefined,
+            },
           });
-        }
-        runtimeBindings.delete(dispatchId);
-        liveBindingObjects.delete(dispatchId);
-        persistRuntimeBindingRecords(layout, runtimeBindings);
-        // Revoke the capability ONLY now: terminal + cleanup + settled all
-        // durable. A leftover file after a crash stays inert — recovery never
-        // trusts it without a live, reattached binding.
-        if (capabilityFile) {
-          try { rmSync(capabilityFile, { force: true }); } catch { /* best effort */ }
+        } else {
+          commit({
+            type: 'cleanup_recorded',
+            payload: {
+              dispatchId,
+              taskId,
+              proof: settlement.proof,
+              disposition: settlement.disposition,
+              reason: settlement.reason,
+              retriesExhausted: true,
+            },
+          });
+          // Retain binding + capability file: the retry surface stays intact.
+          persistRuntimeBindingRecords(layout, runtimeBindings);
         }
       } catch {
         // The owner process is shutting down or the wait was cancelled;
@@ -1335,6 +1423,7 @@ export async function createSupervisor(options = {}) {
       // commits ONLY after every stop is proven or truthfully reconciled.
       const stoppedDispatches = [];
       const pending = [];
+      const boundDispatchIds = new Set(runtimeBindings.keys());
       for (const [dispatchId] of [...runtimeBindings.entries()]) {
         const state = store.state.dispatches[dispatchId]?.state;
         if (!state || !NONTERMINAL_DISPATCH_STATES.has(state)) continue;
@@ -1344,6 +1433,20 @@ export async function createSupervisor(options = {}) {
           const reconciled = await awaitDispatchReconciliation(dispatchId);
           if (!reconciled) pending.push({ dispatchId, code: stop.error?.code ?? 'WORKER_STOP_UNPROVEN' });
         }
+      }
+      // Fail-closed closure: a live/settling dispatch WITHOUT a controllable
+      // binding (e.g. parked after an unproven settlement) also defers close —
+      // its settlement was never proven, so the coordination cannot honestly
+      // declare everything terminal.
+      for (const dispatch of Object.values(store.state.dispatches)) {
+        if (!dispatch || !NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
+        if (boundDispatchIds.has(dispatch.dispatchId)) continue;
+        if (!['active', 'waiting', 'settling'].includes(dispatch.state)) continue;
+        pending.push({
+          dispatchId: dispatch.dispatchId,
+          code: 'WORKER_STOP_UNPROVEN',
+          reason: 'settlement unproven: no controllable runtime binding',
+        });
       }
       if (pending.length > 0) {
         throw new AiCliError(

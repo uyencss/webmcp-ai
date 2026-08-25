@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -86,14 +87,31 @@ function journalCount(stateDir, substring) {
 
 const SELF_IDENTITY_DEPS = createPlatformIdentityDeps();
 
-async function registerLiveBinding(sup, capabilityToken, { dispatchId = 'disp_cb' } = {}) {
-  const startIdentity = await SELF_IDENTITY_DEPS.getStartIdentity(process.pid);
+async function waitForPidExit(pid, deadlineMs = 2_000) {
+  const startedAt = Date.now();
+  for (;;) {
+    try { process.kill(pid, 0); } catch (error) {
+      if (error.code === 'ESRCH') return;
+    }
+    if (Date.now() - startedAt > deadlineMs) throw new Error(`pid ${pid} did not exit`);
+    await new Promise((resolveTick) => setTimeout(resolveTick, 25));
+  }
+}
+
+async function registerLiveBinding(sup, capabilityToken, { dispatchId = 'disp_cb', exitedPid = null } = {}) {
+  const startIdentity = exitedPid === null
+    ? await SELF_IDENTITY_DEPS.getStartIdentity(process.pid)
+    : 'fixture:exited-worker';
   await sup.__recordRuntimeBinding(dispatchId === 'disp_cb' ? 'disp_cb' : dispatchId, {
     bindingId: 'worker_cb',
     adapterId: 'owned-process',
     taskId: 'task_cb',
     callbackCapability: capabilityToken,
-    processIdentity: { pid: process.pid, startIdentity, processGroupId: process.pid },
+    processIdentity: {
+      pid: exitedPid ?? process.pid,
+      startIdentity,
+      processGroupId: exitedPid ?? process.pid,
+    },
   });
 }
 
@@ -203,7 +221,11 @@ test('conflicting payload with a reused event identity fails closed', async (t) 
 test('terminal callback replay is exactly-once across restart; conflicts escalate without overwrite', async (t) => {
   const stateDir = prepareCoordination(t, 'terminal');
   const supA = await startedSupervisor(stateDir);
-  await registerLiveBinding(supA, 'cap-term');
+  // The recorded worker has ALREADY exited (its pid is provably gone), so the
+  // post-terminal recovery can PROVE resource release and settle truthfully.
+  const exited = spawnSync(process.execPath, ['-e', '']);
+  await waitForPidExit(exited.pid);
+  await registerLiveBinding(supA, 'cap-term', { exitedPid: exited.pid });
   const done = makeCallback('worker.terminal', 1, { input: { outcome: 'done', summary: 'finished work' } });
   const firstTerminal = await supA.processWorkerCallback(done);
   assert.equal(firstTerminal.ok, true, JSON.stringify(firstTerminal.error ?? {}));

@@ -1,0 +1,155 @@
+import { AiCliError } from '../errors.mjs';
+
+/**
+ * Typed settlement contract between adapters and the supervisor.
+ *
+ * A dispatch may leave `settling` ONLY on proven resource release:
+ *   - proven-exit:   the worker/process group provably exited during this
+ *                    finalization (exit event, ESRCH, identity-consistent
+ *                    post-ladder absence).
+ *   - proven-absent: the resource was already provably gone before any signal
+ *                    was sent (already-exited / nothing owned).
+ * Every other outcome is fail-closed and must retain the runtime binding,
+ * the capability file and the `settling` state so a retry keeps control:
+ *   - pending-retry:    signals were attempted but survival is possible or
+ *                       unproven (`group-signalled`, retained resources).
+ *   - failed-unproven:  the finalizer threw, refused, or produced no usable
+ *                       evidence; nothing about release is proven.
+ */
+export const SETTLEMENT_PROOF = Object.freeze({
+  PROVEN_EXIT: 'proven-exit',
+  PROVEN_ABSENT: 'proven-absent',
+  PENDING_RETRY: 'pending-retry',
+  FAILED_UNPROVEN: 'failed-unproven',
+});
+
+const ADAPTER_DISPOSITION_PROOF = Object.freeze({
+  // Honest exit proofs.
+  'group-stopped': SETTLEMENT_PROOF.PROVEN_EXIT,
+  'already-exited': SETTLEMENT_PROOF.PROVEN_ABSENT,
+  'no-op': SETTLEMENT_PROOF.PROVEN_ABSENT,
+  // Stub/no-op finalizer convention for adapters that own no live resource.
+  closed: SETTLEMENT_PROOF.PROVEN_ABSENT,
+  // Signals sent but survival possible/unproven.
+  'group-signalled': SETTLEMENT_PROOF.PENDING_RETRY,
+  'signalled-stop-unproven': SETTLEMENT_PROOF.PENDING_RETRY,
+  'identity-drift-aborted': SETTLEMENT_PROOF.PENDING_RETRY,
+});
+
+export function isSettlementProven(proof) {
+  return proof === SETTLEMENT_PROOF.PROVEN_EXIT || proof === SETTLEMENT_PROOF.PROVEN_ABSENT;
+}
+
+function frozenReceipt(proof, disposition, extra = {}) {
+  return Object.freeze({
+    proof,
+    disposition,
+    reason: extra.reason ?? null,
+    released: extra.released ?? null,
+    retained: extra.retained ?? null,
+    signalsAttempted: extra.signalsAttempted ?? null,
+  });
+}
+
+/**
+ * Normalize ANY adapter finalization receipt (or thrown error) into the typed
+ * settlement contract. Unknown shapes fail closed: they never authorize a
+ * settle. Adapters may declare `proof` directly under this contract; declared
+ * values are validated against the enum.
+ */
+export function normalizeSettlementReceipt(receipt, error = null) {
+  if (error) {
+    return frozenReceipt(
+      SETTLEMENT_PROOF.FAILED_UNPROVEN,
+      'cleanup-error',
+      { reason: String(error?.message ?? 'finalizer failed').slice(0, 200) },
+    );
+  }
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
+    return frozenReceipt(SETTLEMENT_PROOF.FAILED_UNPROVEN, 'unknown', {
+      reason: 'finalizer returned no receipt',
+    });
+  }
+  if (typeof receipt.proof === 'string') {
+    if (!Object.values(SETTLEMENT_PROOF).includes(receipt.proof)) {
+      return frozenReceipt(SETTLEMENT_PROOF.FAILED_UNPROVEN, String(receipt.disposition ?? 'unknown'), {
+        reason: `adapter declared unknown settlement proof ${receipt.proof}`,
+        released: receipt.released ?? null,
+        retained: receipt.retained ?? null,
+      });
+    }
+    return frozenReceipt(receipt.proof, String(receipt.disposition ?? 'unknown'), {
+      reason: typeof receipt.reason === 'string' ? receipt.reason.slice(0, 200) : null,
+      released: receipt.released ?? null,
+      retained: receipt.retained ?? null,
+      signalsAttempted: Array.isArray(receipt.signalsAttempted) ? receipt.signalsAttempted : null,
+    });
+  }
+  if (receipt.ok === false) {
+    return frozenReceipt(SETTLEMENT_PROOF.FAILED_UNPROVEN, String(receipt.disposition ?? 'adapter-refused'), {
+      reason: typeof receipt.error?.message === 'string' ? receipt.error.message.slice(0, 200) : 'finalizer refused',
+    });
+  }
+  // Full release receipts (opencode stopServer): release only counts when the
+  // file-tree absence itself is proven.
+  if (receipt.released === true && receipt.absenceProven === true) {
+    return frozenReceipt(SETTLEMENT_PROOF.PROVEN_EXIT, String(receipt.disposition ?? 'released'), {
+      released: true,
+      retained: receipt.retained ?? false,
+    });
+  }
+  if (receipt.released === false || receipt.retained === true) {
+    return frozenReceipt(SETTLEMENT_PROOF.PENDING_RETRY, String(receipt.disposition ?? 'retained'), {
+      released: receipt.released ?? null,
+      retained: receipt.retained ?? true,
+    });
+  }
+  const disposition = typeof receipt.disposition === 'string' ? receipt.disposition : 'unknown';
+  const proof = ADAPTER_DISPOSITION_PROOF[disposition] ?? SETTLEMENT_PROOF.FAILED_UNPROVEN;
+  return frozenReceipt(proof, disposition, {
+    reason: proof === SETTLEMENT_PROOF.FAILED_UNPROVEN && disposition === 'unknown'
+      ? 'finalizer receipt carried no recognizable disposition'
+      : null,
+    released: receipt.released ?? null,
+    retained: receipt.retained ?? null,
+    signalsAttempted: Array.isArray(receipt.signalsAttempted) ? receipt.signalsAttempted : null,
+  });
+}
+
+/**
+ * Classify a recovery orphan-stop result ({attempted, disposition, ...} from
+ * stopOrphanedByProvenIdentity) into the same typed contract.
+ */
+export function classifyRecoveredStop(orphanStop) {
+  const disposition = String(orphanStop?.disposition ?? 'unknown');
+  if (orphanStop?.attempted === true) {
+    if (disposition === 'group-stopped') {
+      return frozenReceipt(SETTLEMENT_PROOF.PROVEN_EXIT, disposition);
+    }
+    if (disposition === 'pid-recycled-original-exited') {
+      // Identity probe succeeded and mismatched: the ORIGINAL process provably
+      // exited; its pid now belongs to an unrelated process we never signal.
+      return frozenReceipt(SETTLEMENT_PROOF.PROVEN_ABSENT, disposition);
+    }
+    if (disposition === 'group-signalled' || disposition === 'identity-drift-aborted'
+      || disposition === 'pid-recycled-identity-unavailable') {
+      return frozenReceipt(SETTLEMENT_PROOF.PENDING_RETRY, disposition);
+    }
+    return frozenReceipt(SETTLEMENT_PROOF.FAILED_UNPROVEN, disposition);
+  }
+  if (disposition === 'already-exited') {
+    return frozenReceipt(SETTLEMENT_PROOF.PROVEN_ABSENT, disposition);
+  }
+  // no-provable-identity, self-pid-refused, pid-recycled-never-signalled
+  // (probe unavailable), unknown: nothing proven, park fail-closed.
+  return frozenReceipt(SETTLEMENT_PROOF.FAILED_UNPROVEN, disposition);
+}
+
+/** Guard helper for callers that want a typed error on unproven settlement. */
+export function settlementUnprovenError(settlement, messagePrefix = 'settlement unproven') {
+  return new AiCliError(
+    'WORKER_STOP_UNPROVEN',
+    `${messagePrefix}: ${settlement.disposition}`,
+    { details: { proof: settlement.proof, disposition: settlement.disposition } },
+  );
+}
