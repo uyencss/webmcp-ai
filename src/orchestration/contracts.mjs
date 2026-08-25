@@ -223,7 +223,11 @@ export function validateTaskPacket(value) {
 
   for (const guarded of protectedPaths) {
     for (const writable of [...allowedWriteRoots]) {
-      if (isWithin(guarded, writable)) {
+      // BOTH containment directions are policy contradictions and are refused
+      // at admission, before any durable dispatch creation or adapter launch:
+      // a protected path inside the writable area AND a writable root inside
+      // the protected path can never be verified honestly.
+      if (isWithin(guarded, writable) || isWithin(writable, guarded)) {
         throw invalid('protected paths may not overlap allowed write roots', {
           protectedPath: guarded,
           allowedWriteRoot: writable,

@@ -44,11 +44,16 @@ export function canonicalizeWorkspacePath(rootPath, candidate) {
   }
   const rel = relative(resolve(rootPath), absolute);
   const missingTail = [];
-  // `cursor` only ever advances over VERIFIED existing segments; not-yet-
-  // existing tail segments accumulate separately and are appended exactly
-  // once at the end.
+  // `cursor` only ever advances over VERIFIED existing segments. As soon as a
+  // segment is missing, EVERY remaining segment belongs to the missing tail
+  // and is appended verbatim in lexical order — probing later segments would
+  // mix two different spellings of the path and reorder the caller's tail.
   let cursor = realpathSync(rootPath);
   for (const segment of rel.split(/[\\/]/).filter(Boolean)) {
+    if (missingTail.length > 0) {
+      missingTail.push(segment);
+      continue;
+    }
     const next = join(cursor, segment);
     let stats;
     try {
