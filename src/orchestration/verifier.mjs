@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { join, isAbsolute, relative, resolve } from 'node:path';
+import { join, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 import { ORCHESTRATION_LIMITS } from './constants.mjs';
@@ -102,16 +102,49 @@ function probeSucceeded(result) {
  * purely lexical, so containment checks never mix two spellings of one
  * directory and symlinked segments are judged by where they REALLY lead.
  */
+/**
+ * Canonicalize the EXISTING prefix of a path while being HONEST about every
+ * filesystem proof failure:
+ *   - a genuinely missing segment (ENOENT) continues lexically — the missing
+ *     tail is legal under preventive confinement;
+ *   - an existing symlink is resolved to its TARGET, and a DANGLING link
+ *     (target missing) or a loop (ELOOP) is a hard refusal, never silently
+ *     treated as "missing";
+ *   - any other probe error (EACCES, EIO, ...) fails closed: geometry that
+ *     cannot be proven cannot be authorized.
+ */
 export function canonicalizeExistingPrefix(pathValue) {
   const absolute = resolve(pathValue);
-  let cursor = isAbsolute(absolute) ? '/' : '.';
+  let cursor = isAbsolute(absolute) ? sep : '.';
   for (const segment of absolute.split(/[\\/]/).filter(Boolean)) {
     const next = join(cursor, segment);
+    let stats = null;
     try {
-      cursor = realpathSync(next);
-    } catch {
-      cursor = next;
+      stats = lstatSync(next);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        cursor = next;
+        continue;
+      }
+      throw new AiCliError(
+        'POLICY_DENIED',
+        `path segment '${segment}' cannot be proven (${error?.code ?? 'ERROR'}): ${next}`,
+      );
     }
+    if (stats.isSymbolicLink()) {
+      let target = null;
+      try {
+        target = realpathSync(next);
+      } catch (error) {
+        throw new AiCliError(
+          'POLICY_DENIED',
+          `symlinked segment '${segment}' does not resolve (${error?.code ?? 'ERROR'}): ${next}`,
+        );
+      }
+      cursor = target;
+      continue;
+    }
+    cursor = next;
   }
   return cursor;
 }
@@ -137,22 +170,31 @@ export function pathsOverlap(firstPath, secondPath) {
  * symlink-substitution bypass of the purely lexical packet check.
  */
 export function assertNoProtectedWriteOverlap({ protectedPaths = [], allowedWriteRoots = [] } = {}) {
-  for (const guardedRaw of protectedPaths ?? []) {
-    const guardedCanonical = canonicalizeExistingPrefix(String(guardedRaw));
-    for (const writableRaw of allowedWriteRoots ?? []) {
-      const writableCanonical = canonicalizeExistingPrefix(String(writableRaw));
-      if (guardedCanonical === writableCanonical) {
+  // EVERY allowed write root must be provable — even when zero protected
+  // paths exist. Canonicalization is the proof step: dangling symlinks,
+  // loops or unprovable segments refuse here regardless of overlap.
+  const writableCanonicals = (allowedWriteRoots ?? []).map((writableRaw) => ({
+    raw: String(writableRaw),
+    canonical: canonicalizeExistingPrefix(String(writableRaw)),
+  }));
+  const guardedCanonicals = (protectedPaths ?? []).map((guardedRaw) => ({
+    raw: String(guardedRaw),
+    canonical: canonicalizeExistingPrefix(String(guardedRaw)),
+  }));
+  for (const guarded of guardedCanonicals) {
+    for (const writable of writableCanonicals) {
+      if (guarded.canonical === writable.canonical) {
         throw new AiCliError(
           'POLICY_DENIED',
           'protected path and allowed write root are equal after canonicalization; '
-            + `aliasing ${String(guardedRaw)} <-> ${String(writableRaw)} is refused`,
+            + `aliasing ${guarded.raw} <-> ${writable.raw} is refused`,
         );
       }
-      if (isWithin(guardedCanonical, writableCanonical) || isWithin(writableCanonical, guardedCanonical)) {
+      if (isWithin(guarded.canonical, writable.canonical) || isWithin(writable.canonical, guarded.canonical)) {
         throw new AiCliError(
           'POLICY_DENIED',
           'protected path and allowed write root overlap after canonicalization; '
-            + `${String(guardedRaw)} vs ${String(writableRaw)} is refused`,
+            + `${guarded.raw} vs ${writable.raw} is refused`,
         );
       }
     }

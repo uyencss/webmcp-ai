@@ -63,6 +63,31 @@ function unsupportedAdapterBoundary(operation) {
   );
 }
 
+/** Workspace + write-root containment against a disposable root. */
+function assertGeometryWithinDisposable(packet, disposableReal) {
+  // Workspace containment: canonical existing prefix + lexical missing tail,
+  // so symlinked segments are judged by their REAL destination and a
+  // not-yet-created workspace tail stays safely inside the root.
+  const workspaceReal = canonicalizeExistingPrefix(String(packet.workspace));
+  if (!isWithin(workspaceReal, disposableReal)) {
+    throw new AiCliError(
+      'POLICY_DENIED',
+      'task workspace must live inside the disposable workspace before any worker spawns',
+    );
+  }
+  for (const root of packet.allowedWriteRoots ?? []) {
+    if (!isAbsolute(root)) {
+      throw new AiCliError('POLICY_DENIED', 'mutable write roots must be absolute paths');
+    }
+    if (!isWithin(canonicalizeExistingPrefix(root), disposableReal)) {
+      throw new AiCliError(
+        'POLICY_DENIED',
+        'mutable write roots must live inside the disposable workspace',
+      );
+    }
+  }
+}
+
 /** Lexical containment after canonicalization; '' counts as inside. */
 function isWithin(candidate, rootPath) {
   const rel = relative(rootPath, candidate);
@@ -1638,27 +1663,8 @@ export async function createSupervisor(options = {}) {
       throw new AiCliError('POLICY_DENIED', 'disposable workspace root must be a directory');
     }
     const disposableReal = realpathSync(trustedConfig.disposableRoot);
-    // Workspace containment: canonical existing prefix + lexical missing
-    // tail, so symlinked segments are judged by their REAL destination and a
-    // not-yet-created workspace tail stays safely inside the root.
-    const workspaceReal = canonicalizeExistingPrefix(String(packet.workspace));
-    if (!isWithin(workspaceReal, disposableReal)) {
-      throw new AiCliError(
-        'POLICY_DENIED',
-        'task workspace must live inside the disposable workspace before any worker spawns',
-      );
-    }
-    for (const root of packet.allowedWriteRoots ?? []) {
-      if (!isAbsolute(root)) {
-        throw new AiCliError('POLICY_DENIED', 'mutable write roots must be absolute paths');
-      }
-      if (!isWithin(canonicalizeExistingPrefix(root), disposableReal)) {
-        throw new AiCliError(
-          'POLICY_DENIED',
-          'mutable write roots must live inside the disposable workspace',
-        );
-      }
-    }
+    // Workspace + write-root containment against the disposable root.
+    assertGeometryWithinDisposable(packet, disposableReal);
   }
 
   /**
@@ -1795,6 +1801,26 @@ export async function createSupervisor(options = {}) {
       const crashAfterSpawn = trustedConfig?.allowFixtureDispatch === true
         && typeof env.WEBMCP_AI_TEST_CRASH_AFTER_SPAWN === 'string'
         && (env.WEBMCP_AI_TEST_CRASH_AFTER_SPAWN === '*' || env.WEBMCP_AI_TEST_CRASH_AFTER_SPAWN === taskId);
+      // Fixture-only TOCTOU seam: the harness may mutate filesystem geometry
+      // EXACTLY here — after every earlier check, before the spawn below —
+      // to prove the final re-proof actually gates the worker.
+      if (crashAfterSpawn || (trustedConfig?.allowFixtureDispatch === true && typeof env.WEBMCP_AI_TEST_PRESWAP_HOOK === 'function')) {
+        try {
+          if (typeof env.WEBMCP_AI_TEST_PRESWAP_HOOK === 'function') {
+            await env.WEBMCP_AI_TEST_PRESWAP_HOOK({ taskId });
+          }
+        } catch { /* harness hook errors are irrelevant to production proof */ }
+      }
+      // FINAL geometry re-proof, immediately before any child can exist:
+      // everything above (baseline, commits, capability file) takes time and
+      // a swapped symlink must fail the dispatch HERE, before the worker runs.
+      assertNoProtectedWriteOverlap(packet);
+      if (trustedConfig?.confinement === 'disposable-workspace' && trustedConfig.disposableRoot) {
+        assertGeometryWithinDisposable(
+          packet,
+          realpathSync(trustedConfig.disposableRoot),
+        );
+      }
       started = await adapter.lifecycle.launch({
         task: taskContext,
         dispatch: {
