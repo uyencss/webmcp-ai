@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -28,6 +29,10 @@ function tempDir(t, name) {
   const dir = mkdtempSync(join(tmpdir(), `webmcp-ai-r8b-${name}-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
+}
+
+function testBindingId(label) {
+  return `worker_${label}_${randomUUID().slice(0, 12)}`;
 }
 
 let coordCounter = 0;
@@ -229,15 +234,17 @@ test('R8B: owned-process workers receive the objective on stdin', async (t) => {
 test('R8B: opencode subscribes SSE before prompting and binds proven process identity', async (t) => {
   const reqLog = join(tempDir(t, 'oc-reqlog'), 'requests.log');
   const stateDir = tempDir(t, 'oc-state');
+  const dataRoot = tempDir(t, 'oc-data');
   const workspace = tempDir(t, 'oc-ws');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     streamFile: null,
     requestLogForTest: reqLog,
   });
-  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_oc', fenceEpoch: 1 });
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: testBindingId('oc'), fenceEpoch: 1 });
   t.after(() => adapter.stopServer(started.runtime));
 
   // Unified process identity on the binding: recovery/interrupt can target it.
@@ -263,11 +270,13 @@ test('R8B: opencode subscribes SSE before prompting and binds proven process ide
 test('R8B: public opencode launch awaits SSE readiness before prompt_async', async (t) => {
   const reqLog = join(tempDir(t, 'oc-order'), 'requests.log');
   const stateDir = tempDir(t, 'oc-state2');
+  const dataRoot = tempDir(t, 'oc-data2');
   const workspace = tempDir(t, 'ws4');
   const inner = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     requestLogForTest: reqLog,
   });
   const config = createTrustedCoordinatorConfig({
@@ -280,7 +289,7 @@ test('R8B: public opencode launch awaits SSE readiness before prompt_async', asy
   const emitted = [];
   const context = {
     task: { taskId: 'task_sse', objective: 'hello', workspace, allowedReadRoots: [], allowedWriteRoots: [] },
-    dispatch: { dispatchId: 'disp_sse', bindingId: 'worker_sse', taskId: 'task_sse', fenceEpoch: 1, mode: 'delegated-result-return', guaranteeTier: 'owned-process' },
+    dispatch: { dispatchId: 'disp_sse', bindingId: testBindingId('sse'), taskId: 'task_sse', fenceEpoch: 1, mode: 'delegated-result-return', guaranteeTier: 'owned-process' },
     emit: (type, payload) => emitted.push(type),
     resumeSessionId: null,
     resumeThread: null,
@@ -300,14 +309,16 @@ test('R8B: public opencode launch awaits SSE readiness before prompt_async', asy
 
 test('R8B: release proves process death and survives a trapped SIGTERM via escalation', async (t) => {
   const stateDir = tempDir(t, 'oc-release');
+  const dataRoot = tempDir(t, 'oc-release-data');
   const workspace = tempDir(t, 'ws5');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     ignoreSigtermForTest: true,
   });
-  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_rel', fenceEpoch: 1 });
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: testBindingId('rel'), fenceEpoch: 1 });
   const dbDir = dirname(started.runtime.dbPath);
   assert.equal(existsSync(dbDir), true);
 

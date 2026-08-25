@@ -4,6 +4,15 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Make teardown receipts proof-driven across all four process adapters and
+  crash recovery: on POSIX, `group-stopped` now requires `kill(-pgid, 0)` to
+  report `ESRCH`, including when the group leader exits before escalation.
+- Document the accepted Windows alpha limitation: without Job Object support,
+  teardown remains pid-only and does not prove that descendants are absent.
+- Isolate every OpenCode test runtime database under a per-test temporary data
+  root, reject unsandboxed starts under `node:test`, and use unique binding IDs
+  so concurrent suites cannot share or mutate the real user data root.
+
 ## 0.3.0-alpha.0 - 2026-08-23
 
 - Add the opt-in portable CLI-agent orchestration runtime (alpha): explicit

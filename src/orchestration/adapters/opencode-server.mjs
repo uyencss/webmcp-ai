@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, readdirSync, rmSync, statSync } from 'node:fs';
 import net from 'node:net';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
@@ -14,6 +14,18 @@ import { resolveOpencodeCliDb } from '../../providers/opencode.mjs';
 
 function sha256(value) {
   return createHash('sha256').update(String(value)).digest('hex');
+}
+
+function canonicalizeExistingPrefix(pathValue) {
+  let cursor = resolve(pathValue);
+  const suffix = [];
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    suffix.unshift(basename(cursor));
+    cursor = parent;
+  }
+  return join(realpathSync(cursor), ...suffix);
 }
 
 const POSIX_MODES = process.platform !== 'win32';
@@ -546,6 +558,35 @@ export function createOpenCodeServerAdapter(options = {}) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'opencode adapter requires a machine-local state dir', { exitCode: 2 });
   }
   const streamFile = options.streamFile ?? null;
+  const configuredEnv = { ...(options.env ?? {}) };
+  const explicitDataRoot = options.dataRoot ?? null;
+  let resolvedDataRoot = null;
+
+  function runtimeDataRoot() {
+    if (resolvedDataRoot) return resolvedDataRoot;
+    if (explicitDataRoot !== null && (typeof explicitDataRoot !== 'string' || !isAbsolute(explicitDataRoot))) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'opencode adapter dataRoot must be an absolute path', { exitCode: 2 });
+    }
+    const candidate = explicitDataRoot ?? resolveOpencodeDataRoot({ env: configuredEnv });
+    if (process.env.NODE_TEST_CONTEXT) {
+      const hasExplicitSandbox = explicitDataRoot !== null
+        || (typeof configuredEnv.HOME === 'string' && configuredEnv.HOME.length > 0);
+      const canonicalCandidate = canonicalizeExistingPrefix(candidate);
+      const targetsTestTemp = [tmpdir(), ...(process.platform === 'win32' ? [] : ['/tmp'])]
+        .map((rootPath) => relative(canonicalizeExistingPrefix(rootPath), canonicalCandidate))
+        .some((relativeToTempRoot) => relativeToTempRoot === ''
+          || (!relativeToTempRoot.startsWith('..') && !isAbsolute(relativeToTempRoot)));
+      if (!hasExplicitSandbox || !targetsTestTemp) {
+        throw new AiCliError(
+          'ORCHESTRATION_INVALID_INPUT',
+          'opencode adapter in test mode requires an explicit data root sandbox outside the user data root',
+          { exitCode: 2 },
+        );
+      }
+    }
+    resolvedDataRoot = candidate;
+    return resolvedDataRoot;
+  }
 
   function makeBinding(fields) {
     const required = ['sessionId', 'databaseIdentity', 'serverProcessIdentity', 'bindingId', 'ownershipMode', 'fenceEpoch'];
@@ -558,7 +599,7 @@ export function createOpenCodeServerAdapter(options = {}) {
   }
 
   async function startRuntimeServer({ workspace, bindingId, fenceEpoch, onSpawned }) {
-    const dataRoot = resolveOpencodeDataRoot({ env: options.env ?? {} });
+    const dataRoot = runtimeDataRoot();
     const prepared = prepareRuntimeDatabase({ dataRoot, bindingId });
 
     const dispatchPrivateDir = join(stateDir, 'runtime-config', bindingId);
@@ -1070,7 +1111,7 @@ export function createOpenCodeServerAdapter(options = {}) {
             // root; an unresolvable anchor fails closed and retains the tree.
             ...((() => {
               try {
-                return { dataRoot: resolveOpencodeDataRoot({ env: options.env ?? {} }) };
+                return { dataRoot: runtimeDataRoot() };
               } catch (error) {
                 throw new AiCliError('POLICY_DENIED', `release refused: physical data root could not be resolved (${error?.code ?? 'ERROR'})`);
               }
@@ -1079,7 +1120,7 @@ export function createOpenCodeServerAdapter(options = {}) {
         );
         // RE-PROVE containment at the destructive moment — immediately before
         // enumeration and removal, so no check can be raced stale.
-        provePhysicalRuntimeContainment(proof.dbDir, resolveOpencodeDataRoot({ env: options.env ?? {} }));
+        provePhysicalRuntimeContainment(proof.dbDir, runtimeDataRoot());
         // Only now is deletion authorized: read the manifest, remove, and
         // prove absence of every known artifact.
         try {

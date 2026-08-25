@@ -123,11 +123,16 @@ const STUB_SOURCE = '#!/usr/bin/env node\n'
 
 async function buildProviderHarness(t, binPath) {
   const stateDir = tempDir(t, 'provider');
+  const dataRoot = tempDir(t, 'provider-data');
   const coordinationId = `coord_r10f_prov_${(coordCounter += 1)}`;
   writeFileSync(binPath, STUB_SOURCE);
   chmodSync(binPath, 0o755);
   const { createOpenCodeServerAdapter } = await import('../src/orchestration/adapters/opencode-server.mjs');
-  const inner = createOpenCodeServerAdapter({ stateDir: join(stateDir, 'oc'), openCodeBin: binPath });
+  const inner = createOpenCodeServerAdapter({
+    stateDir: join(stateDir, 'oc'),
+    dataRoot,
+    openCodeBin: binPath,
+  });
   const config = createTrustedCoordinatorConfig({
     stateDir,
     confinement: 'disposable-workspace',

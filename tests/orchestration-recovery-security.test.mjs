@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -43,6 +43,10 @@ function seedStore(t, name) {
   const layout = fixture(t, name);
   const store = openCoordinationStore(layout);
   return { layout, store };
+}
+
+function testBindingId(label) {
+  return `worker_${label}_${randomUUID().slice(0, 12)}`;
 }
 
 test('crash between journal append and snapshot write recovers to the journal truth', (t) => {
@@ -170,7 +174,10 @@ test('worker callbacks cannot inject acceptance commands or acceptance deliverie
 });
 
 test('observer bindings cannot abort or delete external sessions', (t) => {
-  const adapter = createOpenCodeServerAdapter({ stateDir: tempDirOf(t) });
+  const adapter = createOpenCodeServerAdapter({
+    stateDir: tempDirOf(t),
+    dataRoot: covTemp(t, 'observer-data'),
+  });
   const { binding } = adapter.attachExternal({ sessionId: 'ses_ext' });
   assert.rejects(() => Promise.resolve(adapter.abortSession(binding)), (error) => error.code === 'WORKER_IDENTITY_UNPROVEN');
   assert.rejects(() => Promise.resolve(adapter.deleteSession(binding)), (error) => error.code === 'WORKER_IDENTITY_UNPROVEN');
@@ -587,7 +594,10 @@ test('opencode-server guards cover bad bindings and control-target mismatches', 
   const server = await require_ocserver();
   const guardStateDir = mkdtempSync(join(tmpdir(), 'oc-guard-'));
   t.after(() => rmSync(guardStateDir, { recursive: true, force: true }));
-  const adapter = server.createOpenCodeServerAdapter({ stateDir: guardStateDir });
+  const adapter = server.createOpenCodeServerAdapter({
+    stateDir: guardStateDir,
+    dataRoot: covTemp(t, 'guard-data'),
+  });
 
   assert.throws(() => server.prepareRuntimeDatabase({ dataRoot: '/tmp/x', bindingId: 'bad' }), (e) => e.code === 'ORCHESTRATION_INVALID_INPUT');
   assert.throws(
@@ -663,6 +673,7 @@ async function assertPidDies(t, pidFile, label) {
 test('bootstrap ready-line failure kills the runtime server instead of orphaning it', { timeout: 20_000 }, async (t) => {
   const serverMod = await require_ocserver();
   const stateDir = covTemp(t, 'boot-badline');
+  const dataRoot = covTemp(t, 'boot-badline-data');
   const workspace = covTemp(t, 'boot-ws1');
   const pidFile = join(stateDir, 'server.pid');
   const badLineFixture = join(stateDir, 'bad-line.mjs');
@@ -684,11 +695,12 @@ test('bootstrap ready-line failure kills the runtime server instead of orphaning
     openCodeBin: process.execPath,
     openCodeArgs: [badLineFixture],
     stateDir,
+    dataRoot,
     bootstrapTimeoutMs: 700,
   });
 
   await assert.rejects(
-    () => adapter.startRuntimeServer({ workspace, bindingId: 'worker_boot1', fenceEpoch: 1 }),
+    () => adapter.startRuntimeServer({ workspace, bindingId: testBindingId('boot1'), fenceEpoch: 1 }),
     (error) => error.code === 'PROVIDER_PROTOCOL_ERROR' && /timed out/.test(error.message),
   );
   await assertPidDies(t, pidFile, 'bad-ready-line server');
@@ -697,6 +709,7 @@ test('bootstrap ready-line failure kills the runtime server instead of orphaning
 test('bootstrap timeout kills the runtime server instead of orphaning it', { timeout: 10_000 }, async (t) => {
   const serverMod = await require_ocserver();
   const stateDir = covTemp(t, 'boot-timeout');
+  const dataRoot = covTemp(t, 'boot-timeout-data');
   const workspace = covTemp(t, 'boot-ws2');
   const pidFile = join(stateDir, 'server.pid');
   const silentFixture = join(stateDir, 'silent.mjs');
@@ -716,11 +729,12 @@ test('bootstrap timeout kills the runtime server instead of orphaning it', { tim
     openCodeBin: process.execPath,
     openCodeArgs: [silentFixture],
     stateDir,
+    dataRoot,
     bootstrapTimeoutMs: 250,
   });
 
   await assert.rejects(
-    () => adapter.startRuntimeServer({ workspace, bindingId: 'worker_boot2', fenceEpoch: 1 }),
+    () => adapter.startRuntimeServer({ workspace, bindingId: testBindingId('boot2'), fenceEpoch: 1 }),
     (error) => error.code === 'PROVIDER_PROTOCOL_ERROR' && /timed out/.test(error.message),
   );
   await assertPidDies(t, pidFile, 'timed-out server');
@@ -729,6 +743,7 @@ test('bootstrap timeout kills the runtime server instead of orphaning it', { tim
 test('stopServer sweeps the whole detached group including grandchildren', { timeout: 20_000 }, async (t) => {
   const serverMod = await require_ocserver();
   const stateDir = covTemp(t, 'group-sweep');
+  const dataRoot = covTemp(t, 'group-sweep-data');
   const workspace = covTemp(t, 'group-ws');
   const kidFile = join(stateDir, 'kid.pid');
   const serveFixture = join(stateDir, 'serve-with-kid.mjs');
@@ -764,9 +779,10 @@ test('stopServer sweeps the whole detached group including grandchildren', { tim
     openCodeBin: process.execPath,
     openCodeArgs: [serveFixture],
     stateDir,
+    dataRoot,
   });
 
-  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_grp', fenceEpoch: 1 });
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: testBindingId('grp'), fenceEpoch: 1 });
   const receipt = await adapter.stopServer(started.runtime);
   assert.equal(receipt.disposition, 'stopped');
 
@@ -1200,7 +1216,11 @@ test('opencode-server adapter surfaces typed negatives and honest probe reports'
     () => adapter.stopServer(runtimeLike, { release: true }),
     (e) => e.code === 'POLICY_DENIED' && /settlement/.test(e.message),
   );
-  const guarded = serverMod.createOpenCodeServerAdapter({ stateDir: covTemp(t, 'oc-guarded'), protectedPathsForTest: [runtimeDb] });
+  const guarded = serverMod.createOpenCodeServerAdapter({
+    stateDir: covTemp(t, 'oc-guarded'),
+    env: ocEnv,
+    protectedPathsForTest: [runtimeDb],
+  });
   await assert.rejects(
     () => guarded.stopServer(runtimeLike, { release: true, settled: true }),
     (e) => e.code === 'POLICY_DENIED' && /protected or user-owned/.test(e.message),
@@ -1217,6 +1237,7 @@ test('opencode-server adapter surfaces typed negatives and honest probe reports'
   writeFileSync(versionFixture, "console.log('1.18.21');\n");
   const probing = serverMod.createOpenCodeServerAdapter({
     stateDir: covTemp(t, 'oc-probe'),
+    dataRoot: covTemp(t, 'oc-probe-data'),
     openCodeBin: process.execPath,
     openCodeArgs: [versionFixture],
   });
@@ -1232,10 +1253,11 @@ test('a missing opencode binary fails preflight without spawning any server', { 
   const serverMod = await require_ocserver();
   const adapter = serverMod.createOpenCodeServerAdapter({
     stateDir: covTemp(t, 'oc-enoent'),
+    dataRoot: covTemp(t, 'oc-enoent-data'),
     openCodeBin: '/nonexistent/webmcp-oc-binary',
   });
   await assert.rejects(
-    () => adapter.startRuntimeServer({ workspace: '/tmp', bindingId: 'worker_enoent', fenceEpoch: 1 }),
+    () => adapter.startRuntimeServer({ workspace: '/tmp', bindingId: testBindingId('enoent'), fenceEpoch: 1 }),
     (error) => error?.code === 'ENOENT',
   );
 });

@@ -447,8 +447,10 @@ const opencodeMod = await import('../src/orchestration/adapters/opencode-server.
 
 function openCodeAdapterPair(t, streamFile) {
   const stateDir = tempDir(t, 'ocserver');
+  const dataRoot = tempDir(t, 'ocdata');
   const inner = opencodeMod.createOpenCodeServerAdapter({
     stateDir,
+    dataRoot,
     openCodeBin: process.execPath,
     openCodeArgs: [join(FIXTURES, 'fake-opencode-server.mjs')],
     streamFile,

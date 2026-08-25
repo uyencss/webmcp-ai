@@ -75,6 +75,7 @@ let coordCounter = 0;
  */
 async function runCrashingOwner(t, kind, { workspace }) {
   const stateDir = tempStateDir(t, `${kind}-owner`);
+  const opencodeHome = join(stateDir, 'home');
   const coordinationId = `coord_r12b_${kind}_${(coordCounter += 1)}`;
   const driver = spawn(process.execPath, [
     DRIVER,
@@ -83,7 +84,11 @@ async function runCrashingOwner(t, kind, { workspace }) {
     '--fixture', kind,
     '--workspace', workspace,
   ], {
-    env: { ...process.env, WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir },
+    env: {
+      ...process.env,
+      WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir,
+      ...(kind === 'opencode' ? { HOME: opencodeHome } : {}),
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdoutText = '';
@@ -109,6 +114,9 @@ async function runCrashingOwner(t, kind, { workspace }) {
   // The dispatch.start call never returns: the hook SIGKILLs the driver.
   await waitFor(() => driver.exitCode !== null || driver.signalCode !== null, 15_000,
     `driver crash (${kind}); stderr=${stderrText.slice(0, 300)}`);
+  if (driver.exitCode !== null) {
+    throw new Error(`driver exited instead of crashing (${kind}); code=${driver.exitCode}; stderr=${stderrText.slice(0, 500)}`);
+  }
 
   const coordinationDir = join(stateDir, 'coordinations', coordinationId);
   const intentsDir = join(coordinationDir, 'launch-intents');
@@ -138,6 +146,7 @@ async function runCrashingOwner(t, kind, { workspace }) {
       try { process.kill(-intent.processIdentity.pid, 'SIGKILL'); } catch { /* gone */ }
       try { process.kill(intent.processIdentity.pid, 'SIGKILL'); } catch { /* gone */ }
     },
+    opencodeHome,
   };
 }
 
@@ -156,7 +165,10 @@ async function recover(t, crash, { hideIdentityForPid = null } = {}) {
     };
   }
   const recovered = await createSupervisor({
-    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: crash.stateDir },
+    env: {
+      WEBMCP_AI_ORCHESTRATION_STATE_DIR: crash.stateDir,
+      ...(crash.opencodeHome ? { HOME: crash.opencodeHome } : {}),
+    },
     mode: 'recover',
     coordinationId: crash.coordinationId,
     ...(identityDepsFactory ? { identityDepsFactory } : {}),
@@ -279,7 +291,10 @@ test('R12B: an unproven crash-window worker is RETAINED with its lease — never
   // releases the tree successfully.
   try { process.kill(-crash.orphanPid, 'SIGKILL'); } catch { /* gone */ }
   await waitFor(() => !pidAlive(crash.orphanPid), 5_000, 'manual orphan stop');
-  const outcome = await releaseRecoveredRuntimeDatabase({ cleanupLease: retainedIntent.cleanupLease }, {});
+  const outcome = await releaseRecoveredRuntimeDatabase(
+    { cleanupLease: retainedIntent.cleanupLease },
+    { env: { HOME: crash.opencodeHome } },
+  );
   assert.equal(outcome.released, true, `retained lease must stay usable: ${JSON.stringify(outcome)}`);
   assert.equal(outcome.absenceProven, true);
 });

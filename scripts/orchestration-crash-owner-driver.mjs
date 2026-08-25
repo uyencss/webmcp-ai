@@ -86,6 +86,7 @@ if (fixture === 'owned') {
   kind = 'opencode-server';
   inner = createOpenCodeServerAdapter({
     stateDir,
+    env: { HOME: process.env.HOME },
     openCodeBin: process.execPath,
     openCodeArgs: [join(FIXTURES_DIR, 'fake-opencode-server.mjs')],
     fakeQuietForTest: true,
@@ -153,11 +154,11 @@ if (!created.ok) {
 }
 process.stdout.write(`${JSON.stringify({ taskId: created.result.taskId })}\n`);
 const startResult = await call('dispatch.start', { taskId: created.result.taskId, adapterId: kind });
+if (!startResult.ok) {
+  process.stderr.write(`dispatch.start failed: ${JSON.stringify(startResult.error)}\n`);
+  process.exit(3);
+}
 if (holdOwner) {
-  if (!startResult.ok) {
-    process.stderr.write(`dispatch.start failed: ${JSON.stringify(startResult.error)}\n`);
-    process.exit(3);
-  }
   process.stdout.write(`${JSON.stringify({ started: true, dispatchId: startResult.result.dispatchId })}\n`);
   // Hold until the harness SIGKILLs us — the spawned worker survives.
   setInterval(() => {}, 1_000);

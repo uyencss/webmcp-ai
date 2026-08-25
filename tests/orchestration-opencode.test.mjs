@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -31,7 +31,28 @@ function tempDir(t, name = 'oc') {
   return dir;
 }
 
+function testBindingId(label) {
+  return `worker_${label}_${randomUUID().slice(0, 12)}`;
+}
+
 const binding = { sessionId: 'ses_fixture', bindingId: 'worker_fixture' };
+
+test('R13 BUG 4: node:test refuses an OpenCode runtime start without an explicit data-root sandbox', async (t) => {
+  assert.ok(process.env.NODE_TEST_CONTEXT, 'fixture must run under the Node test runner');
+  const workspace = tempDir(t, 'missing-data-root-workspace');
+  for (const adapter of [
+    createOpenCodeServerAdapter({ stateDir: tempDir(t, 'missing-data-root') }),
+    createOpenCodeServerAdapter({
+      stateDir: tempDir(t, 'real-data-root'),
+      dataRoot: resolveOpencodeDataRoot({ env: process.env }),
+    }),
+  ]) {
+    await assert.rejects(
+      () => adapter.startRuntimeServer({ workspace, bindingId: 'bad', fenceEpoch: 1 }),
+      (error) => error.code === 'ORCHESTRATION_INVALID_INPUT' && /data root.*sandbox/i.test(error.message),
+    );
+  }
+});
 
 test('event normalization filters foreign sessions, dedups, and drops reasoning', () => {
   const lines = readFileSync(streamFixture, 'utf8').split('\n').filter(Boolean);
@@ -152,6 +173,7 @@ test('isolated launch environments pin the exact db and keep HOME untouched', (t
 
 test('the runtime-owned server launches with its own db and basic auth', async (t) => {
   const stateDir = tempDir(t, 'srv');
+  const dataRoot = tempDir(t, 'srv-data');
   const workspace = tempDir(t, 'ws');
   // Hostile ambient project config must be neither loaded nor touched.
   const sentinel = join(workspace, '.opencode', 'plugin', 'hostile.js');
@@ -164,11 +186,17 @@ test('the runtime-owned server launches with its own db and basic auth', async (
     openCodeArgs: [fakeOpenCode],
     streamFile: streamFixture,
     stateDir,
+    dataRoot,
   });
 
-  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_srv', fenceEpoch: 1 });
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: testBindingId('srv'), fenceEpoch: 1 });
   t.after(() => adapter.stopServer(started.runtime));
 
+  assert.equal(
+    started.runtime.dbPath.startsWith(join(dataRoot, 'webmcp-ai-runtime')),
+    true,
+    'the explicit adapter dataRoot owns every runtime database path',
+  );
   assert.equal(existsSync(sentinel), true, 'hostile sentinel untouched');
   assert.equal(readFileSync(sentinel, 'utf8'), beforeSentinel);
   assert.match(started.runtime.databaseIdentity, /^[0-9a-f]{64}$/);
@@ -190,34 +218,39 @@ test('the runtime-owned server launches with its own db and basic auth', async (
 
 test('a db-path mismatch fails closed instead of degrading', async (t) => {
   const stateDir = tempDir(t, 'mismatch');
+  const dataRoot = tempDir(t, 'mismatch-data');
   const workspace = tempDir(t, 'ws2');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     forceIntendedDbPathForTest: '/elsewhere/fake.db',
   });
 
   await assert.rejects(
-    () => adapter.startRuntimeServer({ workspace, bindingId: 'worker_mm', fenceEpoch: 1 }),
+    () => adapter.startRuntimeServer({ workspace, bindingId: testBindingId('mm'), fenceEpoch: 1 }),
     (error) => error.code === 'POLICY_DENIED',
   );
 });
 
 test('sessions resume from the same runtime database after a restart', async (t) => {
   const stateDir = tempDir(t, 'resume');
+  const dataRoot = tempDir(t, 'resume-data');
   const workspace = tempDir(t, 'ws3');
+  const bindingId = testBindingId('rs');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
   });
 
-  const first = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_rs', fenceEpoch: 1 });
+  const first = await adapter.startRuntimeServer({ workspace, bindingId, fenceEpoch: 1 });
   const created = await adapter.createSession(first.runtime);
   await adapter.stopServer(first.runtime);
 
-  const second = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_rs', fenceEpoch: 1 });
+  const second = await adapter.startRuntimeServer({ workspace, bindingId, fenceEpoch: 1 });
   t.after(() => adapter.stopServer(second.runtime));
 
   assert.equal(second.runtime.dbPath, first.runtime.dbPath, 'restart reopens the same database identity');
@@ -229,7 +262,7 @@ test('sessions resume from the same runtime database after a restart', async (t)
 
 test('observer attach is read-only; control verbs are identity-unproven', async (t) => {
   const stateDir = tempDir(t, 'observer');
-  const adapter = createOpenCodeServerAdapter({ stateDir });
+  const adapter = createOpenCodeServerAdapter({ stateDir, dataRoot: tempDir(t, 'observer-data') });
 
   const external = adapter.attachExternal({ sessionId: 'ses_external', databaseIdentityHint: null });
   assert.equal(external.binding.ownershipMode, 'attached-observer');
@@ -241,6 +274,7 @@ test('observer attach is read-only; control verbs are identity-unproven', async 
 
 test('cleanup never touches user-owned or shared databases', async (t) => {
   const stateDir = tempDir(t, 'cleanup');
+  const dataRoot = tempDir(t, 'cleanup-data');
   const workspace = tempDir(t, 'ws4');
   const defaultDb = join(workspace, 'user-owned-opencode.db');
   writeFileSync(defaultDb, 'user data\n', 'utf8');
@@ -251,10 +285,11 @@ test('cleanup never touches user-owned or shared databases', async (t) => {
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     protectedPathsForTest: [defaultDb, sharedCliDb],
   });
 
-  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_cl', fenceEpoch: 1 });
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: testBindingId('cl'), fenceEpoch: 1 });
   const receipt = await adapter.stopServer(started.runtime);
   assert.match(JSON.stringify(receipt), /stopped|retained/);
   assert.equal(existsSync(defaultDb), true, 'user-owned db survives cleanup');
@@ -394,15 +429,17 @@ test('R5: real chmod behavior yields 0700 dir and 0600 reserved db file', (t) =>
 
 test('R5: ready line reporting a foreign port fails closed', async (t) => {
   const stateDir = tempDir(t, 'portmm');
+  const dataRoot = tempDir(t, 'portmm-data');
   const workspace = tempDir(t, 'ws5');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     readyLineForTest: `${JSON.stringify({ ready: true, port: 43210 })}\n`,
   });
 
-  await expectStartFailure(adapter, { workspace, bindingId: 'worker_pmm', fenceEpoch: 1 }, (error) => {
+  await expectStartFailure(adapter, { workspace, bindingId: testBindingId('pmm'), fenceEpoch: 1 }, (error) => {
     assert.equal(error.code, 'PROVIDER_PROTOCOL_ERROR');
     assert.match(error.message, /port/i);
     return true;
@@ -411,6 +448,7 @@ test('R5: ready line reporting a foreign port fails closed', async (t) => {
 
 test('R5: non-loopback ready endpoint fails closed', async (t) => {
   const stateDir = tempDir(t, 'nonloop');
+  const dataRoot = tempDir(t, 'nonloop-data');
   const workspace = tempDir(t, 'ws6');
   // Reserve one genuinely free port so the ready line can report the RIGHT
   // port on the WRONG host — isolating the loopback check.
@@ -422,11 +460,12 @@ test('R5: non-loopback ready endpoint fails closed', async (t) => {
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     requestedPortForTest: chosenPort,
     readyLineForTest: `opencode server listening on http://10.9.8.7:${chosenPort}\n`,
   });
 
-  await expectStartFailure(adapter, { workspace, bindingId: 'worker_nl', fenceEpoch: 1 }, (error) => {
+  await expectStartFailure(adapter, { workspace, bindingId: testBindingId('nl'), fenceEpoch: 1 }, (error) => {
     assert.equal(error.code, 'PROVIDER_PROTOCOL_ERROR');
     assert.match(error.message, /loopback|host/i);
     return true;
@@ -435,15 +474,17 @@ test('R5: non-loopback ready endpoint fails closed', async (t) => {
 
 test('R5: symlink-substituted runtime database fails before session use', async (t) => {
   const stateDir = tempDir(t, 'symdb');
+  const dataRoot = tempDir(t, 'symdb-data');
   const workspace = tempDir(t, 'ws7');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     symlinkDbDirForTest: true,
   });
 
-  await expectStartFailure(adapter, { workspace, bindingId: 'worker_sym', fenceEpoch: 1 }, (error) => {
+  await expectStartFailure(adapter, { workspace, bindingId: testBindingId('sym'), fenceEpoch: 1 }, (error) => {
     assert.equal(error.code, 'POLICY_DENIED');
     return true;
   });
@@ -475,14 +516,16 @@ test('R5: default/user databases are never selected or harmed', async (t) => {
 
 test('R5: release removes the verified database plus sidecars and proves absence', async (t) => {
   const stateDir = tempDir(t, 'rel');
+  const dataRoot = tempDir(t, 'rel-data');
   const workspace = tempDir(t, 'ws8');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
   });
 
-  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_rel', fenceEpoch: 1 });
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: testBindingId('rel'), fenceEpoch: 1 });
   await adapter.createSession(started.runtime);
   // Known sqlite sidecars as the real binary would leave them behind.
   for (const side of ['opencode.db-wal', 'opencode.db-shm', 'opencode.db-journal']) {
@@ -506,14 +549,16 @@ test('R5: release removes the verified database plus sidecars and proves absence
 
 test('R5: unprovable release identity retains files and fails typed', async (t) => {
   const stateDir = tempDir(t, 'amb');
+  const dataRoot = tempDir(t, 'amb-data');
   const workspace = tempDir(t, 'ws9');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
   });
 
-  const started = await adapter.startRuntimeServer({ workspace, bindingId: 'worker_amb', fenceEpoch: 1 });
+  const started = await adapter.startRuntimeServer({ workspace, bindingId: testBindingId('amb'), fenceEpoch: 1 });
   const dbDir = dirname(started.runtime.dbPath);
 
   // (a) digest drift
@@ -539,6 +584,7 @@ test('R5: unprovable release identity retains files and fails typed', async (t) 
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     protectedPathsForTest: [started.runtime.dbPath],
   });
   await assert.rejects(
@@ -560,14 +606,16 @@ test('R5: an ambient server on the requested port cannot hijack the binding', as
   // (a) the requested port is occupied: bootstrap must fail typed and the
   // ambient server must survive untouched.
   const stateDir = tempDir(t, 'hijack');
+  const dataRoot = tempDir(t, 'hijack-data');
   const workspace = tempDir(t, 'ws10');
   const adapter = createOpenCodeServerAdapter({
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir,
+    dataRoot,
     requestedPortForTest: blockedPort,
   });
-  await expectStartFailure(adapter, { workspace, bindingId: 'worker_hj', fenceEpoch: 1 }, (error) => {
+  await expectStartFailure(adapter, { workspace, bindingId: testBindingId('hj'), fenceEpoch: 1 }, (error) => {
     assert.equal(error.code, 'WORKER_PROCESS_LOST');
     return true;
   });
@@ -580,10 +628,11 @@ test('R5: an ambient server on the requested port cannot hijack the binding', as
     openCodeBin: process.execPath,
     openCodeArgs: [fakeOpenCode],
     stateDir: stateDir2,
+    dataRoot,
     requestedPortForTest: blockedPort === 41000 ? 41001 : 41000,
     readyLineForTest: `${JSON.stringify({ ready: true, port: blockedPort })}\n`,
   });
-  await expectStartFailure(lyingAdapter, { workspace, bindingId: 'worker_hj2', fenceEpoch: 1 }, (error) => {
+  await expectStartFailure(lyingAdapter, { workspace, bindingId: testBindingId('hj2'), fenceEpoch: 1 }, (error) => {
     assert.equal(error.code, 'PROVIDER_PROTOCOL_ERROR');
     return true;
   });

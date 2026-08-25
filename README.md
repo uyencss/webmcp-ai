@@ -49,6 +49,12 @@ After separate operator authorization (`WEBMCP_AI_LIVE_CANARY=1` plus a
 per-adapter flag), `npm run canary -- <adapter-id>` records a machine-local
 receipt that promotes exactly that adapter to `canary-proven` on this machine.
 
+Teardown proof is platform-scoped. On POSIX, `group-stopped` is emitted only
+after an independent `kill(-pgid, 0)` probe proves the whole process group is
+absent. On Windows, this alpha has no Job Object integration, so the same label
+proves only that the single owned process exited; descendant-group absence is
+not guaranteed there.
+
 See [skills/webmcp-ai-cli/references/orchestration-runtime.md](skills/webmcp-ai-cli/references/orchestration-runtime.md)
 for the operator guide and
 [skills/webmcp-ai-cli/references/cli-subagent-orchestration.md](skills/webmcp-ai-cli/references/cli-subagent-orchestration.md)

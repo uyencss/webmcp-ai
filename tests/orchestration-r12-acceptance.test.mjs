@@ -193,10 +193,16 @@ test('R12 ACCEPTANCE — provider settlement, identity, crash windows, retention
   /* (3) Crash-after-spawn (owned + opencode) recovers via bound lease ----- */
   async function runCrash(kind, wsPrep) {
     const ownerDir = tempDir(`acc-owner-${kind}`);
+    const opencodeHome = join(ownerDir, 'home');
     const coordinationId = `coord_acc_crash_${kind}_${(coordCounter += 1)}`;
     const driver = spawn(process.execPath, [DRIVER, '--state-dir', ownerDir, '--coordination-id', coordinationId,
       '--fixture', kind, '--workspace', wsPrep], {
-      env: { ...process.env, WEBMCP_AI_ORCHESTRATION_STATE_DIR: ownerDir }, stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        WEBMCP_AI_ORCHESTRATION_STATE_DIR: ownerDir,
+        ...(kind === 'opencode' ? { HOME: opencodeHome } : {}),
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
     driver.stdout.on('data', (c) => { out += c.toString(); });
@@ -208,6 +214,9 @@ test('R12 ACCEPTANCE — provider settlement, identity, crash windows, retention
       // owned fixture is hold-silent; the hook kills the driver mid-start.
     }
     await waitFor(() => driver.exitCode !== null || driver.signalCode !== null, 15_000, `crash exit ${kind}`);
+    if (driver.exitCode !== null) {
+      throw new Error(`crash driver exited instead of SIGKILL (${kind}); code=${driver.exitCode}; output=${out.slice(0, 500)}`);
+    }
     const cdir = join(ownerDir, 'coordinations', coordinationId);
     const intentPath = join(cdir, 'launch-intents', readdirSync(join(cdir, 'launch-intents'))[0]);
     const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
@@ -218,7 +227,10 @@ test('R12 ACCEPTANCE — provider settlement, identity, crash windows, retention
     assert.equal(pidAlive(orphan), true, `${kind} orphan alive pre-recovery`);
 
     const recSup = await createSupervisor({
-      env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: ownerDir },
+      env: {
+        WEBMCP_AI_ORCHESTRATION_STATE_DIR: ownerDir,
+        ...(kind === 'opencode' ? { HOME: opencodeHome } : {}),
+      },
       mode: 'recover', coordinationId,
     });
     await recSup.stop();
