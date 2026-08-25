@@ -105,10 +105,31 @@ export function createOwnedProcessAdapter(options = {}) {
     async close({ binding }) {
       const child = binding?.__child;
       const groupId = binding?.processIdentity?.processGroupId;
-      if (!groupId || groupId <= 1 || process.platform === 'win32') {
-        return { ok: true, disposition: 'no-op' };
+      const platform = options.platformForTest ?? process.platform;
+      // ABSENCE IS THE ONLY no-op TICKET: a live child must never be skipped
+      // because of a platform check. Where group signalling is unavailable
+      // (win32 / no group), the pid-level ladder still runs to completion.
+      const settled = () => !child || child.exitCode !== null || child.signalCode !== null;
+      if (platform === 'win32' || !groupId || groupId <= 1) {
+        if (settled()) return { ok: true, disposition: 'no-op', signalsAttempted: [] };
+        const signalsAttempted = [];
+        const ladder = ['SIGTERM', 'SIGKILL'];
+        for (const signal of ladder) {
+          try {
+            child.kill(signal);
+            signalsAttempted.push(signal);
+          } catch { /* already gone */ }
+          await Promise.race([
+            new Promise((resolveExit) => child.once('exit', () => resolveExit(true))),
+            new Promise((resolveTick) => setTimeout(() => resolveTick(false), signalGraceMs)),
+          ]);
+          if (settled()) {
+            return { ok: true, disposition: 'group-stopped', exitProven: true, signalsAttempted: [...signalsAttempted] };
+          }
+        }
+        return { ok: true, disposition: 'group-signalled', signalsAttempted: [...signalsAttempted] };
       }
-      const hasExited = () => Boolean(child && (child.exitCode !== null || child.signalCode !== null));
+      const hasExited = settled;
       if (hasExited()) {
         return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
       }

@@ -28,6 +28,7 @@ import {
   enumerateProductionSources,
   evaluateThresholds,
   mergeV8Payloads,
+  probeUnloadedSources,
 } from './lib/coverage-aggregate.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -94,6 +95,11 @@ function main() {
   }
 
   const universe = enumerateProductionSources(ROOT);
+  const firstPass = mergeV8Payloads(ROOT, payloads);
+  // HONEST never-loaded accounting: import-probe src/** files the suite
+  // missed so V8 reports their TRUE zero-hit function/branch structure.
+  const probed = probeUnloadedSources({ rootPath: ROOT, universe, mergedScripts: firstPass, workDir: coverageDir });
+  if (probed.extraPayloads.length > 0) payloads.push(...probed.extraPayloads);
   const mergedScripts = mergeV8Payloads(ROOT, payloads);
   const { rows, overall } = aggregateCoverage({ rootPath: ROOT, universe, mergedScripts });
 
@@ -104,14 +110,14 @@ function main() {
     + `(${loadedCount}/${rows.length} files loaded by the suite)`);
   for (const row of rows) {
     if (!row.loaded) {
-      console.log(`  ${row.file.padEnd(52)} NEVER LOADED (${row.lines[1]} lines count as uncovered)`);
+      console.log(`  ${row.file.padEnd(52)} UNPROBED (${row.lines[1]} lines count as uncovered; funcs/branches unknown — never fabricated)`);
       continue;
     }
     console.log(
       `  ${row.file.padEnd(52)}`
       + ` lines ${row.linesPct.toFixed(1).padStart(6)}%`
-      + `  funcs ${(row.funcsPct ?? 100).toFixed(1).padStart(6)}%`
-      + `  branches ${(row.branchesPct ?? 100).toFixed(1).padStart(6)}%`
+      + `  funcs ${(row.funcsPct ?? 0).toFixed(1).padStart(6)}%`
+      + `  branches ${(row.branchesPct ?? 0).toFixed(1).padStart(6)}%`
       + (row.uncoveredLines.length > 0 ? `  [uncovered: ${row.uncoveredLines.join(',')}]` : ''),
     );
   }

@@ -17,8 +17,10 @@
  *   - Functions exclude the synthetic index-0 script root; branches count
  *     every range of every block-coverage function (built-in parity).
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export function isProductionSource(rootPath, filePath) {
   const rel = relative(rootPath, filePath);
@@ -126,7 +128,9 @@ export function mergeScriptInto(mergedFunctions, newFunctions) {
 }
 
 /** Merge raw NODE_V8_COVERAGE JSON payloads into url-keyed merged scripts. */
-export function mergeV8Payloads(rootPath, payloads, { existsSyncImpl = existsSync } = {}) {
+export function mergeV8Payloads(rootPathRaw, payloads, { existsSyncImpl = existsSync } = {}) {
+  // Compare everything against the REAL root spelling (/var vs /private/var).
+  const rootPath = normalizeRealpathSafe(rootPathRaw);
   const mergedScripts = new Map();
   for (const parsed of payloads) {
     for (const script of parsed?.result ?? []) {
@@ -134,9 +138,28 @@ export function mergeV8Payloads(rootPath, payloads, { existsSyncImpl = existsSyn
       if (!url.startsWith('file://')) continue;
       let filePath;
       try {
-        filePath = decodeURIComponent(new URL(url).pathname);
+        // fileURLToPath (NOT .pathname): platform-correct decoding — on
+        // Windows .pathname yields /%C:/... and percent-encoded segments
+        // would never match the real files.
+        filePath = fileURLToPath(url);
       } catch {
         continue;
+      }
+      // Normalize platform symlink spellings (/var vs /private/var) FIRST so
+      // universe membership and later comparisons are stable regardless of
+      // who reported the path.
+      {
+        let normalized = filePath;
+        if (!existsSyncImpl(filePath)) {
+          // A /private-prefixed spelling may exist while the literal one does
+          // not (or vice versa): probe both.
+          const alt = filePath.startsWith('/private')
+            ? filePath.slice('/private'.length)
+            : `/private${filePath}`;
+          if (existsSyncImpl(alt)) normalized = alt;
+        }
+        try { normalized = existsSyncImpl(normalized) ? realpathSync(normalized) : normalized; } catch { }
+        filePath = normalized;
       }
       if (!isProductionSource(rootPath, filePath) || !existsSyncImpl(filePath)) continue;
       const existing = mergedScripts.get(url);
@@ -155,14 +178,19 @@ export function mergeV8Payloads(rootPath, payloads, { existsSyncImpl = existsSyn
  * Returns per-file rows (including never-loaded files at zero) and overall
  * ratios. Uncovered line numbers are reported per file for actionable logs.
  */
+function normalizeRealpathSafe(filePath) {
+  try { return realpathSync(filePath); } catch { return filePath; }
+}
+
 export function aggregateCoverage({
-  rootPath,
+  rootPath: rootPathRaw,
   universe,
   mergedScripts,
   readFile = (filePath) => readFileSync(filePath, 'utf8'),
 }) {
+  const rootPath = normalizeRealpathSafe(rootPathRaw);
   const loadedByPath = new Map();
-  for (const entry of mergedScripts.values()) loadedByPath.set(entry.filePath, entry.functions);
+  for (const entry of mergedScripts.values()) loadedByPath.set(normalizeRealpathSafe(entry.filePath), entry.functions);
 
   const rows = [];
   const totals = { lines: [0, 0], functions: [0, 0], branches: [0, 0] };
@@ -170,7 +198,7 @@ export function aggregateCoverage({
   for (const filePath of universe) {
     const source = readFile(filePath);
     const lineRows = buildLineTable(source);
-    const functions = loadedByPath.get(filePath);
+    const functions = loadedByPath.get(normalizeRealpathSafe(filePath));
 
     if (!functions) {
       // NEVER-LOADED production file: entire line table counts, zero hit.
@@ -280,4 +308,70 @@ export function evaluateThresholds(overall, thresholds) {
     if (!(overall[metric] >= thresholds[metric])) failures.push(metric);
   }
   return failures;
+}
+
+/**
+ * HONEST never-loaded accounting: for every src/** production file the suite
+ * did NOT load, run a throwaway child that merely IMPORTS it under its own
+ * NODE_V8_COVERAGE dir. V8 then reports the module's TRUE function/branch
+ * structure with zero hits, so functions/branches denominators include real
+ * counts instead of silently excluding the file (which would fake 100%).
+ *
+ * Only side-effect-safe imports are attempted: bin/ scripts are excluded
+ * (they execute CLIs), every failure is swallowed and the file stays an
+ * explicit UNPROBED zero-lines row rather than a fabricated number.
+ */
+export function probeUnloadedSources({
+  rootPath,
+  universe,
+  mergedScripts,
+  workDir = mkdtempSync(join(tmpdirBase(), 'cov-probe-')),
+} = {}) {
+  const loaded = new Set([...mergedScripts.values()].map((script) => script.filePath));
+  const missing = universe.filter((filePath) => !loaded.has(filePath)
+    && filePath.startsWith(resolve(rootPath, 'src') + sep));
+  const extraPayloads = [];
+  const unprobeable = [];
+  for (const filePath of missing) {
+    const outDir = join(workDir, Buffer.from(relative(rootPath, filePath)).toString('hex').slice(0, 40));
+    try {
+      rmSync(outDir, { recursive: true, force: true });
+      mkdirSync(outDir, { recursive: true });
+      const run = spawnSync(process.execPath, [
+        '--input-type=module', '-e',
+        `await import(${JSON.stringify(pathToFileURL(filePath).href)});`,
+      ], {
+        env: { ...process.env, NODE_V8_COVERAGE: outDir },
+        timeout: 15_000,
+      });
+      if (run.error) throw run.error;
+      let sawAny = false;
+      collectJsonFiles(outDir, (path) => {
+        try {
+          const parsed = JSON.parse(readFileSync(path, 'utf8'));
+          if (parsed?.result) { extraPayloads.push(parsed); sawAny = true; }
+        } catch { /* skip unreadable */ }
+      });
+      if (!sawAny) unprobeable.push(filePath);
+    } catch {
+      unprobeable.push(filePath);
+    }
+  }
+  return { extraPayloads, unprobeable };
+}
+
+function tmpdirBase() {
+  return process.env.TMPDIR || process.env.TEMP || '/tmp';
+}
+
+function collectJsonFiles(dir, sink) {
+  let entries = [];
+  try { entries = readdirSync(dir); } catch { return; }
+  for (const name of entries) {
+    const full = join(dir, name);
+    let stats = null;
+    try { stats = statSync(full); } catch { continue; }
+    if (stats.isDirectory()) collectJsonFiles(full, sink);
+    else if (name.endsWith('.json')) sink(full);
+  }
 }
