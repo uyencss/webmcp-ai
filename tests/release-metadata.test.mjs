@@ -11,10 +11,18 @@ test('package publication runs tests and includes release notes', () => {
   // The permanent publish lifecycle: unit suite, coverage thresholds,
   // installed-package closure and pack dry-run — no nested npm lifecycles and
   // NO fixed-SHA git gate (one-time remediation checks never block releases).
-  assert.match(gate, /node --test --test-force-exit tests\/\*\.test\.mjs/);
-  assert.match(gate, /--test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80/);
+  assert.match(gate, /node --test tests\/\*\.test\.mjs/);
+  assert.match(gate, /node scripts\/orchestration-coverage\.mjs/);
   assert.match(gate, /node scripts\/orchestration-package-closure\.mjs/);
   assert.match(gate, /npm pack --dry-run/);
+  // Node 18 portability: the runner must NEVER mask leaked handles and must
+  // NOT rely on coverage flags that only exist on newer Node lines.
+  assert.equal(gate.includes('--test-force-exit'), false, 'publish gates may not force-exit over leaked handles');
+  assert.equal(gate.includes('--experimental-test-coverage'), false, 'coverage thresholds come from the portable verifier');
+  const verifier = readFileSync(`${root}/scripts/orchestration-coverage.mjs`, 'utf8');
+  for (const metric of ['lines', 'functions', 'branches']) {
+    assert.match(verifier, new RegExp(`${metric}: 80`), `the verifier enforces the 80% ${metric} threshold`);
+  }
   assert.equal(/git diff --check 47bfccee/.test(gate), false, 'the one-time SHA gate stays out of the publish lifecycle');
   assert.equal(gate.includes('npm run'), false, 'no recursive npm lifecycle inside prepublishOnly');
   assert.ok(packageJson.files.includes('CHANGELOG.md'));

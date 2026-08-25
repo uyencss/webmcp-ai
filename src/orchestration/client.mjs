@@ -352,7 +352,12 @@ export function createOrchestrationClient({ env = {}, spawnImpl } = {}) {
       const child = children.get(coordinationId);
       if (!child || child.exitCode !== null || child.signalCode !== null) return false;
       child.kill('SIGKILL');
-      await new Promise((resolveExit) => child.once('exit', resolveExit));
+      // Bounded, REF'D wait: an unref'd fallback would vanish whenever the
+      // owner's loop is otherwise idle, leaving this await pending forever.
+      await Promise.race([
+        new Promise((resolveExit) => child.once('exit', resolveExit)),
+        new Promise((resolveTick) => setTimeout(resolveTick, 2_000)),
+      ]);
       children.delete(coordinationId);
       // A SIGKILLed supervisor leaves its socket inode behind; remove it so
       // the next connection surfaces as a clean connectivity failure.
@@ -368,9 +373,12 @@ export function createOrchestrationClient({ env = {}, spawnImpl } = {}) {
       for (const [id, child] of [...children]) {
         if (child.exitCode === null && child.signalCode === null) {
           child.kill('SIGTERM');
+          // The supervisor child is unref'd/detached, so its exit event can
+          // only be delivered while THIS loop is kept alive. The fallback
+          // bound must therefore stay ref'd — bounded, never unref'd.
           await Promise.race([
             new Promise((resolveExit) => child.once('exit', resolveExit)),
-            new Promise((resolveTick) => setTimeout(resolveTick, 1500).unref?.()),
+            new Promise((resolveTick) => setTimeout(resolveTick, 1500)),
           ]);
           if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
         }

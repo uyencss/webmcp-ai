@@ -720,20 +720,30 @@ export function createOpenCodeServerAdapter(options = {}) {
       const child = runtime.__serverChild;
       let stopped = false;
       let exitProven = !isChildLive(child);
+      // An 'exit' event fires EXACTLY once: a listener attached after the
+      // fact (or a second wait) would pend forever, and an unref'd fallback
+      // timer vanishes whenever the owner's loop is otherwise empty. Both
+      // waits below therefore check the child's settled state FIRST and keep
+      // their bounded fallback timers ref'd so the proof always completes.
+      const childSettled = () => child.exitCode !== null || child.signalCode !== null;
+      const awaitChildExit = (timeoutMs) => {
+        if (childSettled()) return Promise.resolve();
+        return new Promise((resolveWait) => {
+          child.once('exit', resolveWait);
+          setTimeout(() => {
+            child.off?.('exit', resolveWait);
+            resolveWait();
+          }, timeoutMs);
+        });
+      };
       if (isChildLive(child)) {
         sweepProcessGroup(child, 'SIGTERM');
-        await Promise.race([
-          new Promise((resolveExit) => child.once('exit', resolveExit)),
-          new Promise((resolveTick) => setTimeout(resolveTick, 1500).unref?.()),
-        ]);
+        await awaitChildExit(1500);
         if (isChildLive(child)) sweepProcessGroup(child, 'SIGKILL');
         // PROOF, not assumption: the child must actually be dead before any
         // destructive cleanup is authorized. SIGKILL cannot be trapped, so a
         // trapped SIGTERM still terminates here.
-        await Promise.race([
-          new Promise((resolveExit) => (exitProven ? resolveExit() : child.once('exit', resolveExit))),
-          new Promise((resolveTick) => setTimeout(resolveTick, 2000).unref?.()),
-        ]);
+        await awaitChildExit(2000);
         exitProven = !isChildLive(child);
         stopped = true;
       }

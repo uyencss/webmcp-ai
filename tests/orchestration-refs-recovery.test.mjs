@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -57,6 +56,10 @@ async function startSupervisor(t, name, { adapters, workerMode }) {
       disposableRoot: tmpdir(),
     },
   });
+  // Central leak containment: EVERY supervisor this helper creates is closed
+  // through t.after, so `node --test` can always exit on its own. stop() is
+  // idempotent, explicit per-test stops stay safe.
+  t.after(() => sup.stop());
   const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir } });
   const coordinationDir = join(roots.stateRoot, 'coordinations', coordinationId);
   const call = async (operation, input) => requestIpc(
