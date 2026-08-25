@@ -31,7 +31,7 @@ import {
 import { acquireSupervisorLock, releaseSupervisorLock } from './lock.mjs';
 import { createPlatformIdentityDeps } from './process-identity.mjs';
 import { commitDelivery, openCoordinationStore, persistAck } from './store.mjs';
-import { createWorkerCallbackHandlers, buildWorkerPacket } from './worker-callback.mjs';
+import { createWorkerCallbackHandlers, buildWorkerPacket, DISPATCH_CAPABILITY_DIRNAME } from './worker-callback.mjs';
 import {
   generateDispatchCapabilityToken,
   writeDispatchCapability,
@@ -322,6 +322,9 @@ export async function createSupervisor(options = {}) {
   // and pre-populated from the replayed journal so a crash between the proven
   // cleanup receipt and the settled transition never duplicates either.
   const settledCompletionKeys = new Set();
+  // Idempotent residual sweeps: `<dispatchId>:residual` receipts replay from
+  // the journal so repeated recoveries never append duplicate sweep events.
+  const residualSweptKeys = new Set();
   let journal = [];
   const taskPackets = new Map();
   let commit = () => {
@@ -356,11 +359,12 @@ export async function createSupervisor(options = {}) {
 
     journal = replayJournal(layout).deliveries.slice();
     for (const delivery of journal) {
-      if (delivery?.type === 'cleanup_recorded'
-        && typeof delivery.payload?.idempotencyKey === 'string'
-        && delivery.payload.idempotencyKey.endsWith(':settle')
-        && isSettlementProven(delivery.payload.proof)) {
-        settledCompletionKeys.add(delivery.payload.idempotencyKey);
+      if (delivery?.type !== 'cleanup_recorded' || typeof delivery.payload?.idempotencyKey !== 'string') continue;
+      const key = delivery.payload.idempotencyKey;
+      if (key.endsWith(':settle') && isSettlementProven(delivery.payload.proof)) {
+        settledCompletionKeys.add(key);
+      } else if (key.endsWith(':residual')) {
+        residualSweptKeys.add(key);
       }
     }
     for (const [packetTaskId, packet] of loadTaskPackets(layout)) taskPackets.set(packetTaskId, packet);
@@ -371,36 +375,99 @@ export async function createSupervisor(options = {}) {
       return delivery;
     };
 
-    // Restart reconciliation: every nonterminal dispatch must end this block
-    // either reattached under a reproven binding identity or typed lost.
+    // Restart reconciliation is TRANSACTIONAL. Phase A loads every durable
+    // record ONCE; phase B classifies every nonterminal dispatch against
+    // proven identity into an in-memory nextBindings reconstruction (no
+    // persistence, no journal effects); phase C persists the FULL map
+    // atomically exactly once; phase D applies journal effects and artifact
+    // revocations afterwards. A crash at any point therefore leaves either
+    // the previous complete sidecar or the new one — a lost/settling record
+    // can never wipe a live binding it was persisted ahead of.
     {
       const storedBindings = loadRuntimeBindingRecords(layout);
       const identityDeps = createPlatformIdentityDeps();
+
+      // ---- Phase B: classify everything into nextBindings -----------------
+      const nextBindings = new Map();
+      for (const [dispatchId, record] of Object.entries(storedBindings)) {
+        if (!record || typeof record !== 'object') continue;
+        nextBindings.set(dispatchId, { record });
+      }
+
+      const settlementEffects = [];
+      const reconciledEffects = [];
       for (const dispatch of [...Object.values(store.state.dispatches)]) {
         if (!dispatch || !NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
         const record = storedBindings[dispatch.dispatchId] ?? null;
 
-        // Crash window AFTER terminal BEFORE cleanup: the journal already
-        // holds the truthful worker outcome. Recovery completes the missing
-        // resource settlement instead of pretending the dispatch is live.
+        // Crash window AFTER terminal BEFORE cleanup: classify the missing
+        // settlement now; its journal effects run only after the single
+        // atomic persist below.
         if (dispatch.state === 'settling' && dispatch.terminalOutcome) {
-          await completeRecoveredSettlement(dispatch.dispatchId, dispatch.taskId, record);
+          const orphanStop = await stopOrphanedByProvenIdentity(record, identityDeps);
+          const settlement = classifyRecoveredStop(orphanStop);
+          if (isSettlementProven(settlement.proof)) nextBindings.delete(dispatch.dispatchId);
+          else nextBindings.set(dispatch.dispatchId, { record }); // park: retain control artifacts
+          settlementEffects.push({ dispatch, record, orphanStop, settlement });
           continue;
         }
 
         let live = false;
+        let orphanStop = null;
         if (record && typeof record === 'object' && record.controlOnly !== true && bindingControlCapable(record)) {
           live = await recordIdentityReproven(record, identityDeps);
         }
-        if (live) {
-          runtimeBindings.set(dispatch.dispatchId, { record });
-          reattachedAtBoot.add(dispatch.dispatchId);
-        } else if (record) {
+        if (!live && record) {
           // A still-running orphaned owned process must never outlive its
           // typed lost reconciliation: stop it ONLY through proven identity.
-          const orphanStop = await stopOrphanedByProvenIdentity(record, identityDeps);
-          runtimeBindings.delete(dispatch.dispatchId);
-          persistRuntimeBindingRecords(layout, runtimeBindings);
+          orphanStop = await stopOrphanedByProvenIdentity(record, identityDeps);
+          nextBindings.delete(dispatch.dispatchId);
+        } else if (live) {
+          nextBindings.set(dispatch.dispatchId, { record });
+          reattachedAtBoot.add(dispatch.dispatchId);
+        }
+        reconciledEffects.push({ dispatch, live, record, orphanStop });
+      }
+
+      // Residual sweep plan: bindings AND capability files whose dispatch is
+      // already terminal (or absent from the journal entirely) are crash
+      // leftovers behind a settled truth; they are removed idempotently,
+      // one keyed receipt per affected dispatch.
+      const residualSweeps = new Map();
+      for (const [dispatchId, entry] of [...nextBindings.entries()]) {
+        const dispatch = store.state.dispatches[dispatchId];
+        if (dispatch && NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
+        residualSweeps.set(dispatchId, { record: entry.record, capPaths: [] });
+        nextBindings.delete(dispatchId);
+      }
+      const capabilityDir = join(layout.coordinationDir, DISPATCH_CAPABILITY_DIRNAME);
+      if (existsSync(capabilityDir)) {
+        for (const name of readdirSync(capabilityDir)) {
+          if (!name.endsWith('.cap')) continue;
+          const dispatchId = name.slice(0, -'.cap'.length);
+          const dispatch = store.state.dispatches[dispatchId];
+          // A live nonterminal dispatch keeps its capability even when its
+          // binding is parked fail-closed — callback auth survives retries.
+          if (dispatch && NONTERMINAL_DISPATCH_STATES.has(dispatch.state)) continue;
+          const plan = residualSweeps.get(dispatchId) ?? { record: null, capPaths: [] };
+          plan.capPaths.push(join(capabilityDir, name));
+          residualSweeps.set(dispatchId, plan);
+          nextBindings.delete(dispatchId);
+        }
+      }
+
+      // ---- Phase C: ONE atomic persist of the reconstructed map -----------
+      persistRuntimeBindingRecords(layout, nextBindings);
+      runtimeBindings.clear();
+      for (const [dispatchId, entry] of nextBindings.entries()) runtimeBindings.set(dispatchId, entry);
+
+      // ---- Phase D: journal + filesystem effects --------------------------
+      for (const effect of settlementEffects) {
+        applyRecoveredSettlement(effect.dispatch.dispatchId, effect.dispatch.taskId, effect.record, effect.orphanStop, effect.settlement);
+      }
+      for (const effect of reconciledEffects) {
+        const { dispatch, live, record, orphanStop } = effect;
+        if (!live && record) {
           revokeDispatchCapabilityFile(record);
           commit({
             type: 'cleanup_recorded',
@@ -427,6 +494,26 @@ export async function createSupervisor(options = {}) {
                 : record && !bindingControlCapable(record)
                   ? 'provider-session-control-unrestorable-after-restart'
                   : 'no-live-binding-provable-after-restart',
+          },
+        });
+      }
+      for (const [dispatchId, plan] of residualSweeps.entries()) {
+        const key = `${dispatchId}:residual`;
+        if (residualSweptKeys.has(key)) continue;
+        residualSweptKeys.add(key);
+        if (plan.record) revokeDispatchCapabilityFile(plan.record);
+        for (const capPath of plan.capPaths) {
+          try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
+        }
+        commit({
+          type: 'cleanup_recorded',
+          payload: {
+            dispatchId,
+            ...(store.state.dispatches[dispatchId]?.taskId
+              ? { taskId: store.state.dispatches[dispatchId].taskId }
+              : {}),
+            disposition: 'residual-artifact-swept',
+            idempotencyKey: key,
           },
         });
       }
@@ -569,6 +656,17 @@ export async function createSupervisor(options = {}) {
   async function completeRecoveredSettlement(dispatchId, taskId, record) {
     const orphanStop = await stopOrphanedByProvenIdentity(record, createPlatformIdentityDeps());
     const settlement = classifyRecoveredStop(orphanStop);
+    applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement);
+  }
+
+  /**
+   * Effect half of a classified recovered settlement. Proven outcomes drive
+   * settling -> settled exactly once and release binding + capability;
+   * unproven outcomes park the dispatch fail-closed with every control
+   * artifact retained (the transactional boot persist already re-approved the
+   * durable record before this runs).
+   */
+  function applyRecoveredSettlement(dispatchId, taskId, record, orphanStop, settlement) {
     if (isSettlementProven(settlement.proof)) {
       settleDispatchOnce(dispatchId, taskId, {
         proof: settlement.proof,
@@ -578,8 +676,6 @@ export async function createSupervisor(options = {}) {
       });
       return;
     }
-    // Fail-closed park: keep the dispatch in settling and retain every control
-    // artifact so a later owner/retry can still prove the stop truthfully.
     commit({
       type: 'cleanup_recorded',
       payload: {
