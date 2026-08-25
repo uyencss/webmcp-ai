@@ -403,6 +403,10 @@ export async function createSupervisor(options = {}) {
   const residualSweptKeys = new Set();
   // Idempotent recovered-database releases: `<dispatchId>:rtdb` receipts.
   const recoveredDbKeys = new Set();
+  // Idempotent recovery-parking receipts: `<dispatchId>:park` records that a
+  // nonterminal dispatch was retained because its identity could not be
+  // proven — replayed so later restarts never duplicate the evidence.
+  const recoveryParkKeys = new Set();
   let journal = [];
   const taskPackets = new Map();
   let commit = () => {
@@ -445,6 +449,8 @@ export async function createSupervisor(options = {}) {
         residualSweptKeys.add(key);
       } else if (key.endsWith(':rtdb')) {
         recoveredDbKeys.add(key);
+      } else if (key.endsWith(':park')) {
+        recoveryParkKeys.add(key);
       }
     }
     for (const [packetTaskId, packet] of loadTaskPackets(layout)) taskPackets.set(packetTaskId, packet);
@@ -493,20 +499,46 @@ export async function createSupervisor(options = {}) {
           continue;
         }
 
+        // TRI-STATE identity classification for every durable record:
+        //   matched          → proven alive with the exact startIdentity;
+        //   proven-absent    → ESRCH, or a SUCCESSFUL mismatch probe proving
+        //                      the original exited (pid belongs to someone
+        //                      else we never touch);
+        //   unavailable      → probe failed while presence was alive, or no
+        //                      provable identity at all, or the stop ladder
+        //                      ended unproven. This is NEVER treated as
+        //                      recycled or absent: binding, capability file
+        //                      and cleanup lease are all RETAINED and the
+        //                      dispatch parks recovery-pending.
         let live = false;
+        let parkedUnproven = false;
         let orphanStop = null;
         let launchIntentStop = null;
         if (record && typeof record === 'object' && record.controlOnly !== true && bindingControlCapable(record)) {
           live = await recordIdentityReproven(record, identityDeps);
         }
-        if (!live && record) {
-          // A still-running orphaned owned process must never outlive its
-          // typed lost reconciliation: stop it ONLY through proven identity.
-          orphanStop = await stopOrphanedByProvenIdentity(record, identityDeps);
-          nextBindings.delete(dispatch.dispatchId);
-        } else if (live) {
+        if (live) {
           nextBindings.set(dispatch.dispatchId, { record });
           reattachedAtBoot.add(dispatch.dispatchId);
+        } else if (record) {
+          // Identity-guarded stop attempt: signals fly ONLY when presence
+          // AND exact start identity are both proven right now; an
+          // unavailable probe or drift abort returns WITHOUT signalling.
+          orphanStop = await stopOrphanedByProvenIdentity(record, identityDeps);
+          const classification = classifyRecoveredStop(orphanStop);
+          if (isSettlementProven(classification.proof)) {
+            nextBindings.delete(dispatch.dispatchId);
+          } else if (record.controlOnly === true) {
+            // A telemetry-only binding NEVER carried process identity: there
+            // is nothing a later restart could newly prove, so the honest
+            // outcome stays the typed degraded loss (contract-pinned).
+            nextBindings.delete(dispatch.dispatchId);
+          } else {
+            // Unproven fate with REAL recorded identity: retain every
+            // control artifact fail-closed and park for a later retry.
+            parkedUnproven = true;
+            nextBindings.set(dispatch.dispatchId, { record });
+          }
         } else {
           // No runtime binding survived the crash — but a BOUND launch intent
           // with a proven identity still gives recovery safe authority over
@@ -518,7 +550,7 @@ export async function createSupervisor(options = {}) {
             );
           }
         }
-        reconciledEffects.push({ dispatch, live, record, orphanStop, launchIntentStop });
+        reconciledEffects.push({ dispatch, live, record, orphanStop, launchIntentStop, parkedUnproven });
       }
 
       // Residual sweep plan: bindings AND capability files AND launch intents
@@ -592,7 +624,29 @@ export async function createSupervisor(options = {}) {
         await applyRecoveredSettlement(effect.dispatch.dispatchId, effect.dispatch.taskId, effect.record, effect.orphanStop, effect.settlement);
       }
       for (const effect of reconciledEffects) {
-        const { dispatch, live, record, orphanStop } = effect;
+        const { dispatch, live, record, orphanStop, parkedUnproven } = effect;
+        if (parkedUnproven) {
+          // TRI-STATE retention: an unproven fate parks the dispatch in its
+          // nonterminal state with every control artifact intact. It is
+          // neither absence nor final loss — the next restart retries the
+          // classification from the same durable truth.
+          const parkKey = `${dispatch.dispatchId}:park`;
+          if (!recoveryParkKeys.has(parkKey)) {
+            recoveryParkKeys.add(parkKey);
+            commit({
+              type: 'cleanup_recorded',
+              payload: {
+                dispatchId: dispatch.dispatchId,
+                taskId: dispatch.taskId,
+                disposition: 'recovery-identity-unproven-retained',
+                idempotencyKey: parkKey,
+                ...(orphanStop ? { recoveredStop: orphanStop } : {}),
+                retainedArtifacts: true,
+              },
+            });
+          }
+          continue;
+        }
         if (!live && record) {
           // Provider-owned runtime databases are released through their
           // cleanup lease BEFORE the binding pointer disappears.
@@ -1293,12 +1347,13 @@ export async function createSupervisor(options = {}) {
     // Presence + identity proof BEFORE anything else.
     let presenceAlive = false;
     let identityMatches = false;
+    let nowIdentity = null;
     const identityDeps = identityDepsOf();
     try {
       process.kill(pid, 0);
       presenceAlive = true;
-      const nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
-      identityMatches = nowIdentity === startIdentity;
+      nowIdentity = await identityDeps.getStartIdentity(pid).catch(() => null);
+      identityMatches = typeof nowIdentity === 'string' && nowIdentity === startIdentity;
     } catch {
       presenceAlive = false;
     }
@@ -1308,6 +1363,29 @@ export async function createSupervisor(options = {}) {
       return { ok: true, interrupted: false, stopped: true, resolved: true, disposition: 'already-exited' };
     }
     if (!identityMatches) {
+      // TRI-STATE gate: only a SUCCESSFUL probe that MISMATCHED proves the
+      // original exited (pid recycled). A FAILED/unavailable probe proves
+      // nothing — the worker may still be alive, so retain the binding and
+      // refuse typed instead of releasing ownership.
+      if (typeof nowIdentity !== 'string' || nowIdentity.length === 0) {
+        commit({
+          type: 'cleanup_recorded',
+          payload: {
+            dispatchId,
+            taskId: record.taskId,
+            disposition: 'control-identity-unavailable-retained',
+            processIdentity: { ...(record.processIdentity ?? {}) },
+          },
+        });
+        return {
+          ok: false,
+          interrupted: false,
+          stopped: false,
+          resolved: false,
+          error: { code: 'WORKER_IDENTITY_UNPROVEN', message: 'identity probe unavailable; binding retained without any stop claim' },
+          reason,
+        };
+      }
       // PID recycled: the original worker is provably gone and the newcomer
       // is NEVER signalled. Release our binding without touching that pid.
       await releaseBindingAfterProvenStop(dispatchId, record, 'pid-recycled-original-exited');

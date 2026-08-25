@@ -33,6 +33,10 @@ const stateDir = readArg('--state-dir');
 const coordinationId = readArg('--coordination-id');
 const fixture = readArg('--fixture');
 const workspace = readArg('--workspace');
+// --hold 1: keep the owner ALIVE after dispatch.start returns; the harness
+// SIGKILLs it externally to simulate a crash AFTER the runtime binding was
+// durably recorded (as opposed to the pre-binding handshake window).
+const holdOwner = readArg('--hold') === '1';
 
 if (!stateDir || !coordinationId || !fixture || !workspace) {
   process.stderr.write('usage: crash-owner-driver --state-dir DIR --coordination-id ID --fixture KIND --workspace DIR\n');
@@ -98,7 +102,7 @@ const sup = await createSupervisor({
   env: {
     ...process.env,
     WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir,
-    WEBMCP_AI_TEST_CRASH_AFTER_SPAWN: '*',
+    ...(holdOwner ? {} : { WEBMCP_AI_TEST_CRASH_AFTER_SPAWN: '*' }),
   },
   mode: 'create',
   coordinationId,
@@ -148,7 +152,16 @@ if (!created.ok) {
   process.exit(3);
 }
 process.stdout.write(`${JSON.stringify({ taskId: created.result.taskId })}\n`);
-await call('dispatch.start', { taskId: created.result.taskId, adapterId: kind });
+const startResult = await call('dispatch.start', { taskId: created.result.taskId, adapterId: kind });
+if (holdOwner) {
+  if (!startResult.ok) {
+    process.stderr.write(`dispatch.start failed: ${JSON.stringify(startResult.error)}\n`);
+    process.exit(3);
+  }
+  process.stdout.write(`${JSON.stringify({ started: true, dispatchId: startResult.result.dispatchId })}\n`);
+  // Hold until the harness SIGKILLs us — the spawned worker survives.
+  setInterval(() => {}, 1_000);
+}
 
 // The crash hook fires mid-dispatch.start; if it somehow did not, park here
 // so the harness observes a loud timeout instead of a silent false green.
