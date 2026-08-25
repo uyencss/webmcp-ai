@@ -447,7 +447,11 @@ export async function createSupervisor(options = {}) {
         settledCompletionKeys.add(key);
       } else if (key.endsWith(':residual')) {
         residualSweptKeys.add(key);
-      } else if (key.endsWith(':rtdb')) {
+      } else if (key.endsWith(':rtdb')
+        && delivery.payload?.disposition === 'recovered-runtime-database-released'
+        && delivery.payload?.absenceProven === true) {
+        // Only a SUCCESSFULLY completed cleanup consumes the one-shot
+        // idempotency key. An unproven attempt must stay retryable.
         recoveredDbKeys.add(key);
       } else if (key.endsWith(':park')) {
         recoveryParkKeys.add(key);
@@ -630,28 +634,23 @@ export async function createSupervisor(options = {}) {
           // nonterminal state with every control artifact intact. It is
           // neither absence nor final loss — the next restart retries the
           // classification from the same durable truth.
-          const parkKey = `${dispatch.dispatchId}:park`;
-          if (!recoveryParkKeys.has(parkKey)) {
-            recoveryParkKeys.add(parkKey);
-            commit({
-              type: 'cleanup_recorded',
-              payload: {
-                dispatchId: dispatch.dispatchId,
-                taskId: dispatch.taskId,
-                disposition: 'recovery-identity-unproven-retained',
-                idempotencyKey: parkKey,
-                ...(orphanStop ? { recoveredStop: orphanStop } : {}),
-                retainedArtifacts: true,
-              },
-            });
-          }
+          parkRetainedDispatch(dispatch, orphanStop);
           continue;
         }
         if (!live && record) {
           // Provider-owned runtime databases are released through their
-          // cleanup lease BEFORE the binding pointer disappears.
+          // cleanup lease BEFORE the binding pointer disappears — and the
+          // pointer only drops when that release actually COMPLETED.
+          let dbUnresolved = false;
           if (record.cleanupLease) {
             await attemptRecoveredDbRelease(dispatch.dispatchId, dispatch.taskId, record);
+            dbUnresolved = !dbReleaseCompleted(dispatch.dispatchId);
+          }
+          if (dbUnresolved) {
+            runtimeBindings.set(dispatch.dispatchId, { record });
+            persistRuntimeBindingRecords(layout, runtimeBindings);
+            parkRetainedDispatch(dispatch, orphanStop, 'recovery-db-cleanup-unproven-retained');
+            continue;
           }
           revokeDispatchCapabilityFile(record);
           commit({
@@ -709,9 +708,13 @@ export async function createSupervisor(options = {}) {
         // The orphan stop is PROVEN here (only proven stops produce a
         // launchIntentStop effect), so a provider runtime database may be
         // released through its durable lease before the last pointer goes.
-        if (intent.cleanupLease && typeof intent.cleanupLease === 'object'
-          && isSettlementProven(classifyRecoveredStop(effect.launchIntentStop).proof)) {
+        if (intent.cleanupLease && typeof intent.cleanupLease === 'object') {
           await attemptRecoveredDbRelease(dispatchId, effect.dispatch.taskId, { cleanupLease: intent.cleanupLease });
+          if (!dbReleaseCompleted(dispatchId)) {
+            // Release stayed unproven: the bound intent (and its lease) is
+            // RETAINED so a later recovery finishes the obligation.
+            continue;
+          }
         }
         removeLaunchIntent(layout, dispatchId);
         commit({
@@ -743,22 +746,33 @@ export async function createSupervisor(options = {}) {
         const intentStopProof = plan.proveStopIntent
           ? classifyRecoveredStop(intentStop).proof
           : null;
-        const boundIntentUnresolved = plan.retainBoundIntent === true
-          || (plan.proveStopIntent !== null && !isSettlementProven(intentStopProof));
         // A proven stop unlocks the provider runtime database release through
         // its durable lease — before the last pointer disappears.
+        let leaseReleaseUnresolved = false;
         if (plan.intentLease && plan.proveStopIntent && isSettlementProven(intentStopProof)) {
           await attemptRecoveredDbRelease(
             dispatchId,
             store.state.dispatches[dispatchId]?.taskId ?? null,
             { cleanupLease: plan.intentLease },
           );
+          leaseReleaseUnresolved = !dbReleaseCompleted(dispatchId);
         }
-        // A residual provider binding may still own a runtime database.
+        const boundIntentUnresolved = plan.retainBoundIntent === true
+          || (plan.proveStopIntent !== null && !isSettlementProven(intentStopProof))
+          || leaseReleaseUnresolved;
+        // A residual provider binding may still own a runtime database: the
+        // pointer (and callback capability) only drops when the release
+        // COMPLETED; otherwise everything is retained for a later retry.
+        let residualDbUnresolved = false;
         if (plan.record?.cleanupLease) {
           await attemptRecoveredDbRelease(dispatchId, store.state.dispatches[dispatchId]?.taskId ?? null, plan.record);
+          residualDbUnresolved = !dbReleaseCompleted(dispatchId);
+          if (residualDbUnresolved) {
+            runtimeBindings.set(dispatchId, { record: plan.record });
+            persistRuntimeBindingRecords(layout, runtimeBindings);
+          }
         }
-        if (plan.record) revokeDispatchCapabilityFile(plan.record);
+        if (plan.record && !residualDbUnresolved) revokeDispatchCapabilityFile(plan.record);
         for (const capPath of plan.capPaths) {
           try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
         }
@@ -780,6 +794,7 @@ export async function createSupervisor(options = {}) {
             disposition: 'residual-artifact-swept',
             idempotencyKey: key,
             ...(intentStop ? { launchIntentStop: intentStop } : {}),
+            ...(residualDbUnresolved ? { retainedRuntimeBinding: true } : {}),
             ...(retainedLaunchIntents > 0 ? { retainedLaunchIntents } : {}),
           },
         });
@@ -826,12 +841,36 @@ export async function createSupervisor(options = {}) {
    * idempotency receipt; insufficient proof RETAINS all artifacts and is
    * reported truthfully as cleanup-unproven.
    */
+  /**
+   * Park a nonterminal dispatch whose fate (identity or DB release) is
+   * unproven: exactly-once keyed retention evidence, artifacts intact.
+   */
+  function parkRetainedDispatch(dispatch, orphanStop = null, dispositionText = 'recovery-identity-unproven-retained') {
+    const parkKey = `${dispatch.dispatchId}:park`;
+    if (recoveryParkKeys.has(parkKey)) return;
+    recoveryParkKeys.add(parkKey);
+    commit({
+      type: 'cleanup_recorded',
+      payload: {
+        dispatchId: dispatch.dispatchId,
+        taskId: dispatch.taskId,
+        disposition: dispositionText,
+        idempotencyKey: parkKey,
+        ...(orphanStop ? { recoveredStop: orphanStop } : {}),
+        retainedArtifacts: true,
+      },
+    });
+  }
+
+  /** Completed-cleanup lookup: only a RELEASED receipt counts. */
+  function dbReleaseCompleted(dispatchId) {
+    return recoveredDbKeys.has(`${dispatchId}:rtdb`);
+  }
+
   async function attemptRecoveredDbRelease(dispatchId, taskId, record) {
     if (!record?.cleanupLease) return;
     if (stopping) return;
     const key = `${dispatchId}:rtdb`;
-    if (recoveredDbKeys.has(key)) return;
-    recoveredDbKeys.add(key);
     let outcome;
     try {
       outcome = await releaseRecoveredRuntimeDatabase(record, { env });
@@ -843,18 +882,34 @@ export async function createSupervisor(options = {}) {
         reason: String(error?.message ?? 'release refused').slice(0, 200),
       };
     }
+    if (outcome.released === true && outcome.absenceProven === true) {
+      // Completion is the ONLY thing that consumes the idempotency key.
+      recoveredDbKeys.add(key);
+      commit({
+        type: 'cleanup_recorded',
+        payload: {
+          dispatchId,
+          ...(taskId ? { taskId } : {}),
+          disposition: 'recovered-runtime-database-released',
+          absenceProven: true,
+          removedFiles: outcome.removedFiles ?? [],
+          idempotencyKey: key,
+        },
+      });
+      return;
+    }
+    // UNPROVEN attempt: journal the honest evidence WITHOUT consuming the
+    // key and WITHOUT dropping any lease/proof inputs — a later recovery
+    // retries from the same durable truth.
     commit({
       type: 'cleanup_recorded',
       payload: {
         dispatchId,
         ...(taskId ? { taskId } : {}),
-        disposition: outcome.released
-          ? 'recovered-runtime-database-released'
-          : 'recovered-runtime-database-cleanup-unproven',
-        ...(outcome.released
-          ? { absenceProven: true, removedFiles: outcome.removedFiles ?? [] }
-          : { reason: outcome.reason ?? 'unproven', retainedArtifacts: true }),
-        idempotencyKey: key,
+        disposition: 'recovered-runtime-database-cleanup-unproven',
+        reason: outcome.reason ?? outcome.disposition ?? 'unproven',
+        retainedArtifacts: true,
+        idempotencyKey: `${key}:attempt`,
       },
     });
   }
@@ -996,6 +1051,34 @@ export async function createSupervisor(options = {}) {
     // truthfully — the next owner completes them from durable state.
     if (stopping) return;
     if (isSettlementProven(settlement.proof)) {
+      // Process death may be proven while a provider runtime database is
+      // still unreleased. OWNERSHIP DROPS ONLY WHEN BOTH settle: attempt the
+      // release now, and if it stays unproven retain binding + lease for the
+      // next recovery instead of settling past an unresolved obligation.
+      if (record?.cleanupLease && !dbReleaseCompleted(dispatchId)) {
+        await attemptRecoveredDbRelease(dispatchId, taskId, record);
+      }
+      if (record?.cleanupLease && !dbReleaseCompleted(dispatchId)) {
+        const parkKey = `${dispatchId}:park`;
+        if (!recoveryParkKeys.has(parkKey)) {
+          recoveryParkKeys.add(parkKey);
+          commit({
+            type: 'cleanup_recorded',
+            payload: {
+              dispatchId,
+              taskId,
+              disposition: 'recovery-settlement-db-cleanup-unproven-retained',
+              idempotencyKey: parkKey,
+              retainedArtifacts: true,
+            },
+          });
+        }
+        if (!runtimeBindings.has(dispatchId)) {
+          runtimeBindings.set(dispatchId, { record });
+          persistRuntimeBindingRecords(layout, runtimeBindings);
+        }
+        return;
+      }
       settleDispatchOnce(dispatchId, taskId, {
         proof: settlement.proof,
         disposition: 'recovered-post-terminal-cleanup',
