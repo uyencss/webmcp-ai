@@ -9,7 +9,7 @@ import { AiCliError } from '../../errors.mjs';
 import { writeAtomicJson } from '../atomic-file.mjs';
 import { validateAdapter } from './index.mjs';
 import { normalizeOpenCodeEvent, createEventDeduper } from './opencode-events.mjs';
-import { createPlatformIdentityDeps, proveProcessGroupEmpty } from '../process-identity.mjs';
+import { awaitProcessGroupEmpty, createPlatformIdentityDeps, isPidLive, proveProcessGroupEmpty } from '../process-identity.mjs';
 import { resolveOpencodeCliDb } from '../../providers/opencode.mjs';
 
 function sha256(value) {
@@ -1006,6 +1006,48 @@ export function createOpenCodeServerAdapter(options = {}) {
         }
         exitProven = groupEmpty;
         stopped = true;
+      } else if (child) {
+        // The server LEADER was ALREADY gone before stopServer() was ever
+        // called — no signal ladder involved at all (a server that started,
+        // did its work, and exited normally while a background child it
+        // spawned lingers). Node's own child-object bookkeeping
+        // (isChildLive()===false) is 100% reliable proof OUR exact leader
+        // is dead, but the numeric groupId is just that dead leader's OLD
+        // pid, and an UNBOUNDED amount of real time may have passed since
+        // it exited (unlike the live-leader sweep above, whose whole
+        // window is bounded by the awaitChildExit grace periods). Before
+        // trusting `-groupId` as "our own orphaned descendants", rule out
+        // the OS having recycled that exact pid for an unrelated process —
+        // see owned-process.mjs's close() for the full reasoning: if
+        // anything at all currently occupies that literal pid, fail closed
+        // (exitProven stays false) rather than risk signalling a
+        // stranger's process group.
+        const groupId = child.pid;
+        const hasGroup = process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1;
+        if (hasGroup) {
+          if (isPidLive(groupId)) {
+            exitProven = false;
+          } else {
+            let groupEmpty = proveProcessGroupEmpty(groupId) === 'empty';
+            if (!groupEmpty) {
+              stopped = true;
+              sweepProcessGroup(child, 'SIGTERM');
+              await new Promise((resolveTick) => setTimeout(resolveTick, 300));
+              groupEmpty = proveProcessGroupEmpty(groupId) === 'empty';
+              if (!groupEmpty) {
+                sweepProcessGroup(child, 'SIGKILL');
+                // Bounded re-probe: a group JUST SIGKILLed can still read
+                // 'alive' for a few ms purely because the kernel has not
+                // reaped it yet, not because anything survived.
+                groupEmpty = (await awaitProcessGroupEmpty(groupId)) === 'empty';
+              }
+            }
+            exitProven = groupEmpty;
+          }
+        }
+        // else: no group id recorded at all — exitProven stays at its
+        // initial !isChildLive(child) (true): the documented pid-only
+        // degrade, no group primitive to prove anything further with.
       }
       let released = false;
       let removedFiles;

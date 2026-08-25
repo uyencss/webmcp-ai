@@ -137,3 +137,40 @@ export function proveProcessGroupEmpty(groupId, platform = process.platform) {
     return 'alive';
   }
 }
+
+/**
+ * Cheap liveness probe for a bare pid (signal 0). Used to detect whether a
+ * NUMERIC pid our records point at is currently occupied by ANY process —
+ * ours or, after enough real time has passed, an unrelated one that the OS
+ * happened to recycle it onto.
+ */
+export function isPidLive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bounded-retry wrapper around proveProcessGroupEmpty: a group that was
+ * just SIGKILLed can show 'alive' for a few milliseconds purely because the
+ * kernel has not reaped it yet, not because anything survived. This polls
+ * a SHORT, FIXED budget before giving up — it never trades away the
+ * fail-closed contract: if the deadline is reached and the group still
+ * reads 'alive' (or the probe is 'unsupported'), that exact value is
+ * returned, unchanged, and the caller must still treat it as unproven.
+ */
+export async function awaitProcessGroupEmpty(groupId, platform = process.platform, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 500;
+  const intervalMs = options.intervalMs ?? 30;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const proof = proveProcessGroupEmpty(groupId, platform);
+    if (proof !== 'alive') return proof;
+    if (Date.now() >= deadline) return proof;
+    await new Promise((resolveTick) => setTimeout(resolveTick, intervalMs));
+  }
+}

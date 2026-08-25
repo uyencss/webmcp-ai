@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { validateAdapter } from './index.mjs';
-import { createPlatformIdentityDeps, proveProcessGroupEmpty } from '../process-identity.mjs';
+import { awaitProcessGroupEmpty, createPlatformIdentityDeps, isPidLive, proveProcessGroupEmpty } from '../process-identity.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 
 /**
@@ -417,16 +417,37 @@ export function createClaudeStreamAdapter(options = {}) {
     async close({ binding }) {
       const child = binding?.__child;
       const gone = () => !child || child.exitCode !== null || child.signalCode !== null;
-      if (gone()) return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
-      const graceMs = options.closeGraceMsForTest ?? 800;
-      const forceGraceMs = options.forceCloseGraceMsForTest ?? 2000;
-      const signalsAttempted = [];
       // Group sweep authority comes from the RECORDED process identity (the
       // detached spawn made this child its own group leader) — ChildProcess
       // objects expose no `.detached` flag at runtime, so that must never be
       // the gate.
       const groupId = binding?.processIdentity?.processGroupId;
       const hasGroup = process.platform !== 'win32' && Number.isInteger(groupId) && groupId > 1;
+      if (gone()) {
+        if (!hasGroup) return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
+        // The leader was ALREADY gone before close() was ever called: no
+        // signal ladder involved at all (a worker that simply finished and
+        // exited while a background child it spawned lingers). An UNBOUNDED
+        // amount of real time may have passed since the leader died, so
+        // before trusting `-groupId` as "our own orphaned descendants",
+        // rule out the OS having recycled that exact pid for an unrelated
+        // process — see owned-process.mjs's close() for the full reasoning.
+        // If anything at all currently occupies that literal pid, fail
+        // closed rather than risk signalling a stranger's process group.
+        if (isPidLive(groupId)) {
+          return { ok: true, disposition: 'group-signalled', signalsAttempted: [] };
+        }
+        const initialProof = proveProcessGroupEmpty(groupId);
+        if (initialProof !== 'alive') {
+          return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
+        }
+        // Group still has live members despite the leader's prior exit:
+        // fall through into the same ladder used below for a leader that
+        // was still alive at call time.
+      }
+      const graceMs = options.closeGraceMsForTest ?? 800;
+      const forceGraceMs = options.forceCloseGraceMsForTest ?? 2000;
+      const signalsAttempted = [];
       const signalOnce = (signal) => {
         if (hasGroup) {
           try {
@@ -460,6 +481,15 @@ export function createClaudeStreamAdapter(options = {}) {
         signalOnce('SIGKILL');
         await awaitExit(forceGraceMs);
         done = proven();
+      }
+      if (!done && hasGroup) {
+        // A group that was just SIGKILLed can still read 'alive' for a few
+        // milliseconds purely because the kernel has not reaped it yet, not
+        // because anything survived. A short bounded re-probe avoids a
+        // wasted finalize-retry round-trip WITHOUT trading away fail-closed:
+        // if the group is still alive when the budget runs out, that exact
+        // (unproven) reading is what gets returned below.
+        done = (await awaitProcessGroupEmpty(groupId)) === 'empty';
       }
       if (!done) {
         // Signals were sent but survival remains possible. NEVER claim stopped.

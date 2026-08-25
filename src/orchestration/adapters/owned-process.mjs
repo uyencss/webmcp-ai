@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { ORCHESTRATION_LIMITS } from '../constants.mjs';
-import { createPlatformIdentityDeps, proveProcessGroupEmpty } from '../process-identity.mjs';
+import { awaitProcessGroupEmpty, createPlatformIdentityDeps, isPidLive, proveProcessGroupEmpty } from '../process-identity.mjs';
 import { createAtomicExclusiveFile } from '../atomic-file.mjs';
 import { reserveRefsBytes } from '../refs-quota.mjs';
 import { sanitizeValue } from '../redaction.mjs';
@@ -140,9 +140,37 @@ export function createOwnedProcessAdapter(options = {}) {
         }
         return { ok: true, disposition: 'group-signalled', signalsAttempted: [...signalsAttempted] };
       }
-      const hasExited = settled;
-      if (hasExited()) {
-        return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
+      if (settled()) {
+        // The leader was ALREADY gone before close() was ever called — a
+        // normal worker that finished its own work and exited while a
+        // background/detached child it spawned lingers, no signal ladder
+        // involved at all. Node's own child-object bookkeeping (settled())
+        // is 100% reliable proof that OUR exact leader is dead, but the
+        // numeric groupId is just that dead leader's OLD pid number, and an
+        // UNBOUNDED amount of real time may have passed since it exited
+        // (unlike the live-leader ladder below, whose whole window is
+        // bounded by our own signal-grace timeouts). Before trusting
+        // `-groupId` as "our own orphaned descendants", rule out the OS
+        // having recycled that exact pid for an unrelated process: if
+        // anything at all currently occupies that literal pid, NOTHING
+        // about `-groupId`'s membership can be trusted as ours (a brand
+        // new unrelated process could only ever end up sharing that pgid
+        // number by itself BEING that pid and founding a new group with
+        // it), so fail closed rather than risk signalling a stranger's
+        // process group.
+        // (platform !== 'win32' && groupId > 1 already guaranteed here —
+        // the branch above already returned for win32/no-group.)
+        if (isPidLive(groupId)) {
+          return { ok: true, disposition: 'group-signalled', signalsAttempted: [] };
+        }
+        const initialProof = proveProcessGroupEmpty(groupId, platform);
+        if (initialProof !== 'alive') {
+          return { ok: true, disposition: 'already-exited', signalsAttempted: [] };
+        }
+        // The group still has live members despite the leader's own prior
+        // exit: fall through into the SAME ladder used below for a leader
+        // that was still alive at call time — no grandchild may outlive a
+        // closed worker just because its leader beat close() to the exit.
       }
       const signalsAttempted = [];
       const signalGroup = (signal) => {
@@ -195,6 +223,16 @@ export function createOwnedProcessAdapter(options = {}) {
         signalGroup('SIGKILL');
         await waitForExit();
         groupProof = proveProcessGroupEmpty(groupId, platform);
+      }
+      if (groupProof !== 'empty') {
+        // A group that was JUST SIGKILLed can still read 'alive' for a few
+        // milliseconds purely because the kernel has not reaped it yet, not
+        // because anything survived. A short bounded re-probe avoids
+        // wasting a whole finalize-retry round-trip on that race, WITHOUT
+        // trading away the fail-closed contract: if the group is still
+        // alive when the budget runs out, that exact (unproven) reading is
+        // what gets returned below.
+        groupProof = await awaitProcessGroupEmpty(groupId, platform);
       }
       if (groupProof === 'empty') {
         return { ok: true, disposition: 'group-stopped', exitProven: true, signalsAttempted: [...signalsAttempted] };
