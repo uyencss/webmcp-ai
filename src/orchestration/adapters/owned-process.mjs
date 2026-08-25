@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdirSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { AiCliError } from '../../errors.mjs';
 import { ORCHESTRATION_LIMITS } from '../constants.mjs';
 import { createPlatformIdentityDeps } from '../process-identity.mjs';
 import { createAtomicExclusiveFile } from '../atomic-file.mjs';
+import { reserveRefsBytes } from '../refs-quota.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 import { validateAdapter } from './index.mjs';
 
@@ -33,27 +34,9 @@ export function createOwnedProcessAdapter(options = {}) {
   // byte sizes.
   const maxRefsTotalBytes = options.maxRefsTotalBytesForTest ?? ORCHESTRATION_LIMITS.maxRefsTotalBytes;
 
-  /**
-   * COORDINATION-TOTAL accounting, rebuilt from the durable refs directory on
-   * every decision: the bound applies to the WHOLE coordination's evidence
-   * (every dispatch namespace AND acceptance-command spills), never to a
-   * single dispatch. Each drain runs synchronously on the event loop, so the
-   * scan -> decide -> exclusive-create sequence below is atomic within the
-   * single-writer supervisor process — safe under sequential and concurrent
-   * spills alike, and trivially rebuilt after recovery.
-   */
-  const durableRefsBytes = (dir) => {
-    let total = 0;
-    try {
-      for (const name of readdirSync(dir)) {
-        try {
-          const stats = statSync(join(dir, name));
-          if (stats.isFile()) total += stats.size;
-        } catch { /* raced removal contributes nothing */ }
-      }
-    } catch { /* empty or missing refs dir */ }
-    return total;
-  };
+  // COORDINATION-TOTAL accounting now lives in the shared quota primitive
+  // (refs-quota.mjs): disk-derived, shared by every refs/ writer, typed on
+  // overflow and trivially rebuilt after recovery.
 
   async function gracefulKill(child, recordSignal) {
     for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -282,23 +265,34 @@ export function createOwnedProcessAdapter(options = {}) {
             });
             return;
           }
+          // Coordination-TOTAL bound via the shared quota primitive: the
+          // reservation uses the ACTUAL sanitized bytes about to be written
+          // (never the raw size), recounted from durable disk state, so every
+          // writer into refs/ shares one honest ceiling.
+          const sanitizedSpill = sanitizeValue(buffered);
+          const spillText = typeof sanitizedSpill === 'string'
+            ? sanitizedSpill
+            : JSON.stringify(sanitizedSpill);
+          try {
+            reserveRefsBytes(activeRefsDir, Buffer.byteLength(spillText, 'utf8'), {
+              limitBytes: maxRefsTotalBytes,
+              writerId: `owned-spill:${ns}:${streamLabel}`,
+            });
+          } catch (error) {
+            if (error?.code === 'REFS_LIMIT_REACHED') {
+              emit('progress', {
+                summary: `${streamLabel} output dropped: coordination refs retention bound reached`,
+                stream: streamLabel,
+                bytes,
+                retentionOverflow: true,
+              });
+              return;
+            }
+            throw error;
+          }
           mkdirSync(activeRefsDir, { recursive: true, mode: 0o700 });
           const name = `ref_${ns}__${String(nextSeq()).padStart(6, '0')}__${streamLabel}.txt`;
-          // Coordination-TOTAL bound, recounted from durable state right now.
-          if (durableRefsBytes(activeRefsDir) + bytes > maxRefsTotalBytes) {
-            emit('progress', {
-              summary: `${streamLabel} output dropped: coordination refs retention bound reached`,
-              stream: streamLabel,
-              bytes,
-              retentionOverflow: true,
-            });
-            return;
-          }
-          const sanitizedSpill = sanitizeValue(buffered);
-          createAtomicExclusiveFile(
-            join(activeRefsDir, name),
-            typeof sanitizedSpill === 'string' ? sanitizedSpill : JSON.stringify(sanitizedSpill),
-          );
+          createAtomicExclusiveFile(join(activeRefsDir, name), spillText);
           spilledCount += 1;
           emit('progress', {
             summary: `${streamLabel} output spilled to bounded ref`,

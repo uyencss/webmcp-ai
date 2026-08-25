@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
-import { writeAtomicFile, writeAtomicJson } from './atomic-file.mjs';
+import { writeAtomicJson, createAtomicExclusiveFile } from './atomic-file.mjs';
 import {
   CRITICAL_DELIVERY_TYPES,
   DELIVERY_PROTOCOL,
@@ -15,6 +15,7 @@ import {
 import { appendDeliveryLine, journalSizeBytes, recoverJournal } from './journal.mjs';
 import { sanitizeEvent, sanitizeEnvironmentMetadata } from './redaction.mjs';
 import { acknowledgeThrough, applyDelivery, classifyCallback, createInitialState } from './state-machine.mjs';
+import { reserveRefsBytes } from './refs-quota.mjs';
 
 const REF_RETENTION_MS = 24 * 60 * 60 * 1000;
 
@@ -121,7 +122,15 @@ function spillLargePayload(store, sequence, payload, clock) {
     );
   }
   const refName = `ref_${String(sequence).padStart(6, '0')}.json`;
-  writeAtomicFile(join(store.layout.refsDir, refName), serialized);
+  // Coordination-TOTAL refs quota: the spill reserves its EXACT serialized
+  // byte size against the shared refs directory before any bytes land, so
+  // large Delivery spills can never bypass maxRefsTotalBytes regardless of
+  // what other writers did. The write itself is an exclusive create: durable
+  // evidence is never overwritten.
+  reserveRefsBytes(store.layout.refsDir, Buffer.byteLength(serialized, 'utf8'), {
+    writerId: `store-spill:${sequence}`,
+  });
+  createAtomicExclusiveFile(join(store.layout.refsDir, refName), serialized);
   return {
     ref: join('refs', refName),
     mediaType: 'application/json',

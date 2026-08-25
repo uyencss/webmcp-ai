@@ -6,7 +6,8 @@ import { join, isAbsolute, relative, resolve } from 'node:path';
 import { AiCliError } from '../errors.mjs';
 import { ORCHESTRATION_LIMITS } from './constants.mjs';
 import { sanitizeValue, boundText } from './redaction.mjs';
-import { writeAtomicFile } from './atomic-file.mjs';
+import { createAtomicExclusiveFile } from './atomic-file.mjs';
+import { reserveRefsBytes } from './refs-quota.mjs';
 
 const RECEIPT_SCHEMA = 'webmcp.ai-acceptance-receipt/v0';
 
@@ -328,6 +329,7 @@ export async function runAcceptanceCommand(spec) {
     const bytes = Buffer.byteLength(combined);
 
     let outputRef = null;
+    let outputRefOverflowReason = null;
     if (bytes > ORCHESTRATION_LIMITS.maxInlinePayloadBytes && spec.stateDir) {
       mkdirSync(join(spec.stateDir, 'refs'), { recursive: true, mode: 0o700 });
       // Spilled tool output passes the same redaction boundary as everything
@@ -337,8 +339,45 @@ export async function runAcceptanceCommand(spec) {
         ? sanitizeValue(combined)
         : JSON.stringify(sanitizeValue(combined));
       const bounded = boundText(sanitizedText, { maxBytes: ORCHESTRATION_LIMITS.maxInlinePayloadBytes, label: 'acceptance-output' });
-      const name = `ref_${sha256(combined).slice(0, 16)}.txt`;
-      writeAtomicFile(join(spec.stateDir, 'refs', name), bounded.text);
+      const baseName = `ref_${sha256(combined).slice(0, 16)}`;
+      // Coordination-TOTAL refs quota: acceptance spills reserve their exact
+      // sanitized byte size against the SHARED refs directory before any
+      // write; overflow is typed and leaves no file behind.
+      try {
+        reserveRefsBytes(join(spec.stateDir, 'refs'), Buffer.byteLength(bounded.text), {
+          writerId: `acceptance-spill:${baseName}`,
+        });
+      } catch (error) {
+        if (error?.code === 'REFS_LIMIT_REACHED') {
+          resolveRun({
+            argvDigest: `sha256:${sha256(JSON.stringify(argv))}`,
+            exitCode: child.status,
+            signal: child.signal ?? null,
+            timedOut: false,
+            durationMs: elapsedMs,
+            stdoutBytes: Buffer.byteLength(stdoutText),
+            stderrBytes: Buffer.byteLength(stderrText),
+            outputRef: null,
+            outputRefOverflowReason: 'refs-quota',
+            intendedRed: Boolean(spec.intendedRed),
+          });
+          return;
+        }
+        throw error;
+      }
+      // Exclusive create with content-addressed naming: an identical digest
+      // means identical bytes, so a collision REUSES the existing ref instead
+      // of overwriting durable evidence.
+      let name = `${baseName}.txt`;
+      for (let attempt = 0;; attempt += 1) {
+        try {
+          createAtomicExclusiveFile(join(spec.stateDir, 'refs', name), bounded.text);
+          break;
+        } catch (error) {
+          if (attempt >= 16 || error?.code !== 'ORCHESTRATION_INVALID_INPUT') throw error;
+          name = `${baseName}-${attempt + 1}.txt`;
+        }
+      }
       outputRef = join('refs', name);
     }
 
@@ -352,6 +391,7 @@ export async function runAcceptanceCommand(spec) {
       stdoutBytes: Buffer.byteLength(stdoutText),
       stderrBytes: Buffer.byteLength(stderrText),
       outputRef,
+      ...(outputRefOverflowReason ? { outputRefOverflowReason } : {}),
       ...(spec.intendedRed ? {} : {}),
       intendedRed: Boolean(spec.intendedRed),
     });
@@ -612,7 +652,7 @@ export async function verifyDispatch(context) {
       repositoryIdentityReproven,
     },
     tests: testResults.map(({
-      argvDigest, verdict: label, exitCode, signal, timedOut, denied, outputRef, durationMs, reason,
+      argvDigest, verdict: label, exitCode, signal, timedOut, denied, outputRef, outputRefOverflowReason, durationMs, reason,
     }) => ({
       argvDigest,
       verdict: label,
@@ -621,6 +661,9 @@ export async function verifyDispatch(context) {
       ...(timedOut ? { timedOut: true } : {}),
       ...(denied ? { denied: true, reason } : {}),
       ...(outputRef ? { outputRef } : {}),
+      ...(outputRefOverflowReason
+        ? { outputRef: null, outputRefOverflowReason }
+        : {}),
       durationMs: durationMs ?? null,
     })),
     workerClaimMatched,
