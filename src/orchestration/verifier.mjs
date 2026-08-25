@@ -126,6 +126,38 @@ export function pathsOverlap(firstPath, secondPath) {
   return isWithin(left, right) || isWithin(right, left);
 }
 
+/**
+ * Canonical protected/write-root policy: EVERY protected path / allowed write
+ * root pair is canonicalized (existing prefix resolved through symlinks,
+ * missing tails kept lexical and ordered) and refused when the two spellings
+ * are EQUAL after canonicalization or overlap in either containment
+ * direction. Lexically-disjoint aliases that resolve onto one location are
+ * therefore rejected BEFORE any task admission or worker launch, closing the
+ * symlink-substitution bypass of the purely lexical packet check.
+ */
+export function assertNoProtectedWriteOverlap({ protectedPaths = [], allowedWriteRoots = [] } = {}) {
+  for (const guardedRaw of protectedPaths ?? []) {
+    const guardedCanonical = canonicalizeExistingPrefix(String(guardedRaw));
+    for (const writableRaw of allowedWriteRoots ?? []) {
+      const writableCanonical = canonicalizeExistingPrefix(String(writableRaw));
+      if (guardedCanonical === writableCanonical) {
+        throw new AiCliError(
+          'POLICY_DENIED',
+          'protected path and allowed write root are equal after canonicalization; '
+            + `aliasing ${String(guardedRaw)} <-> ${String(writableRaw)} is refused`,
+        );
+      }
+      if (isWithin(guardedCanonical, writableCanonical) || isWithin(writableCanonical, guardedCanonical)) {
+        throw new AiCliError(
+          'POLICY_DENIED',
+          'protected path and allowed write root overlap after canonicalization; '
+            + `${String(guardedRaw)} vs ${String(writableRaw)} is refused`,
+        );
+      }
+    }
+  }
+}
+
 function parsePorcelainV2(stdout) {
   const out = [];
   const records = stdout.split('\u0000');

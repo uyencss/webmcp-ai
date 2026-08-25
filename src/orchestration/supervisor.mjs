@@ -43,7 +43,7 @@ import { validateWorkerCallback } from './contracts.mjs';
 import { computeAdapterDigest, computeAdapterMaturity } from './adapters/index.mjs';
 import { loadCanaryReceipts, probeExecutableVersion, resolveExecutableDigest } from './canary.mjs';
 import { sanitizeEvent } from './redaction.mjs';
-import { captureWorkspaceBaseline, canonicalizeExistingPrefix } from './verifier.mjs';
+import { captureWorkspaceBaseline, canonicalizeExistingPrefix, assertNoProtectedWriteOverlap } from './verifier.mjs';
 import { verifyDispatch as defaultVerifyDispatch } from './verifier.mjs';
 import {
   SETTLEMENT_PROOF,
@@ -1315,6 +1315,11 @@ export async function createSupervisor(options = {}) {
   async function runPublicDispatch(adapter, { taskId, packet }) {
     assertPublicDispatchMaturity(adapter);
     assertConfinementFor(packet, adapter);
+    // Pre-launch RE-CHECK of the canonical protected/write policy: symlink
+    // state may have changed since task admission (TOCTOU substitution), so
+    // the refusal must happen here — BEFORE the first durable commit, before
+    // baseline capture, and long before any worker spawns.
+    assertNoProtectedWriteOverlap(packet);
 
     const dispatchId = `disp_${randomUUID()}`;
     const bindingId = `worker_${randomUUID().slice(0, 12)}`;
@@ -1752,6 +1757,10 @@ export async function createSupervisor(options = {}) {
     },
     'task.create': async (input, envelope) => {
       const packet = validateTaskPacket(input.packet ?? {});
+      // Canonical overlap policy: lexical disjointness is NOT enough. Alias
+      // spellings (symlinks) resolving onto a protected location are refused
+      // BEFORE any durable task record exists.
+      assertNoProtectedWriteOverlap(packet);
       const taskId = `task_${randomUUID()}`;
       mkdirSync(join(layout.coordinationDir, 'tasks'), { recursive: true, mode: 0o700 });
       writeAtomicJson(join(layout.coordinationDir, 'tasks', `${taskId}.json`), { taskId, packet });
