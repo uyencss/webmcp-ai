@@ -296,3 +296,98 @@ test('R11B-3: residual bindings/capabilities behind settled journals are swept i
   );
   assert.equal(sweepsAfter.length, 1, 'repeat recovery must not append another sweep receipt');
 });
+
+// ---- R13 BUG 2: residual sweep must not revoke a capability it is
+// simultaneously retaining the binding for. -------------------------------
+//
+// The comment above the residual sweep (supervisor.mjs ~807-809) states the
+// runtime-database pointer AND its callback capability drop together, ONLY
+// when the release is PROVEN complete; otherwise everything is retained for
+// a later retry. This test seeds a residual binding whose cleanup lease can
+// never complete (ownershipMode !== 'runtime-owned', an immediate, purely
+// in-memory "unproven" outcome with no real filesystem/adapter interaction)
+// so `residualDbUnresolved` is forced true, then asserts the capability file
+// backing that retained binding survives the sweep.
+
+test('R13-BUG2: residual sweep retains the callback capability when db release stays unresolved', async (t) => {
+  const stateDir = tempDir(t, 'residual-db-unresolved');
+  const coordinationId = COORD();
+  const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir } });
+  ensureOrchestrationRoots(roots);
+  const layout = createCoordinationLayout(roots.stateRoot, coordinationId);
+  writeAtomicJson(layout.manifestPath, {
+    schema: MANIFEST_SCHEMA,
+    coordinationId,
+    fenceEpoch: 1,
+    processGeneration: 1,
+    createdAt: new Date().toISOString(),
+    owner: null,
+  });
+  createAuthority(layout);
+  const store = openCoordinationStore(layout);
+  for (const [type, payload] of [
+    ['task_created', { taskId: 'task_res2' }],
+    ['dispatch_created', { dispatchId: 'disp_res2', taskId: 'task_res2' }],
+    ['dispatch_state_changed', { dispatchId: 'disp_res2', taskId: 'task_res2', state: 'active' }],
+    ['worker_done', { dispatchId: 'disp_res2', taskId: 'task_res2', outcome: 'completed', source: 'seed' }],
+    ['cleanup_recorded', { dispatchId: 'disp_res2', taskId: 'task_res2', disposition: 'group-stopped', proof: 'proven-exit', idempotencyKey: 'disp_res2:settle' }],
+    ['dispatch_state_changed', { dispatchId: 'disp_res2', taskId: 'task_res2', state: 'settled' }],
+  ]) {
+    commitDelivery(store, { type, payload });
+  }
+
+  // Crash window leftover: a residual provider binding still holding a
+  // cleanup lease whose db release can never be proven (ownershipMode is
+  // deliberately NOT 'runtime-owned', which `releaseRecoveredRuntimeDatabase`
+  // rejects immediately, in memory, before touching any real path).
+  writeAtomicJson(join(layout.coordinationDir, 'runtime-bindings.json'), {
+    schema: 'webmcp.ai-supervisor-runtime-bindings/v0',
+    bindings: {
+      disp_res2: {
+        bindingId: 'worker_res2',
+        adapterId: 'owned-process',
+        capability: 'owned-process',
+        taskId: 'task_res2',
+        fenceEpoch: 1,
+        callbackCapabilityDigest: 'sha256:fixture2',
+        cleanupLease: { ownershipMode: 'user-owned' },
+      },
+    },
+  });
+  writeDispatchCapability({
+    coordinationDir: layout.coordinationDir,
+    endpoint: join(layout.coordinationDir, 'fixture.sock'),
+    coordinationId,
+    taskId: 'task_res2',
+    dispatchId: 'disp_res2',
+    bindingId: 'worker_res2',
+    fenceEpoch: 1,
+    capabilityToken: 'cap_fixture_residual_unresolved',
+  });
+
+  const sup = await recoverSupervisor(t, stateDir, coordinationId);
+  await new Promise((resolveTick) => setTimeout(resolveTick, 400));
+  void sup;
+
+  const capPath = join(layout.coordinationDir, 'dispatch-capabilities', 'disp_res2.cap');
+  assert.equal(existsSync(capPath), true,
+    'a capability file backing a RETAINED residual binding must survive the sweep');
+
+  assert.ok(bindingsRecord(stateDir, coordinationId)['disp_res2'],
+    'the residual binding itself must stay durably retained while db release is unresolved');
+
+  const retained = journalRecords(stateDir, coordinationId).filter(
+    (record) => record.type === 'cleanup_recorded'
+      && record.payload?.dispatchId === 'disp_res2'
+      && record.payload?.disposition === 'residual-artifacts-retained',
+  );
+  assert.ok(retained.length >= 1, 'expected at least one residual-artifacts-retained receipt');
+  assert.equal(retained[0].payload?.retainedRuntimeBinding, true);
+
+  const swept = journalRecords(stateDir, coordinationId).filter(
+    (record) => record.type === 'cleanup_recorded'
+      && record.payload?.dispatchId === 'disp_res2'
+      && record.payload?.disposition === 'residual-artifact-swept',
+  );
+  assert.equal(swept.length, 0, 'a retained binding must never be reported as swept');
+});

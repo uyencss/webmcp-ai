@@ -817,8 +817,14 @@ export async function createSupervisor(options = {}) {
           }
         }
         if (plan.record && !residualDbUnresolved) revokeDispatchCapabilityFile(plan.record);
-        for (const capPath of plan.capPaths) {
-          try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
+        // Same retention rule applies to any capability file scanned off disk
+        // for this dispatch: an unresolved db release keeps the binding (and
+        // therefore its callback capability) alive for a later retry, so the
+        // file backing it must not be swept out from under it here.
+        if (!residualDbUnresolved) {
+          for (const capPath of plan.capPaths) {
+            try { rmSync(capPath, { force: true }); } catch { /* best effort */ }
+          }
         }
         const anythingRetained = boundIntentUnresolved || residualDbUnresolved;
         let retainedLaunchIntents = 0;
