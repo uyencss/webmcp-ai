@@ -12,6 +12,7 @@ import {
   DISPATCH_ADMISSION_CODES,
   ID_PREFIXES,
 } from './constants.mjs';
+import { validateSelectionReceipt } from './selection-receipt.mjs';
 
 export const LINEAGE_INDEX_SCHEMA = 'webmcp-ai-lineage-index/1';
 export const LINEAGE_RECORD_SCHEMA = 'webmcp-ai-lineage-record/1';
@@ -517,9 +518,10 @@ export function mergeLineageRecords(existingRecords = [], incomingRecords = []) 
 }
 
 /**
- * Derives a LineageIndex from an array of validated SelectionReceipts.
+ * Derives a LineageIndex from an array of validated SelectionReceipts, preserving
+ * existing trusted lineage records and contributor binding identities.
  */
-export function reconcileLineageFromReceipts(receipts = [], extraTrustedByDispatchId = {}) {
+export function reconcileLineageFromReceipts(receipts = [], optionsOrExtra = {}) {
   if (!Array.isArray(receipts)) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'receipts must be an array', { exitCode: 2 });
   }
@@ -530,11 +532,86 @@ export function reconcileLineageFromReceipts(receipts = [], extraTrustedByDispat
       { exitCode: 2 },
     );
   }
-  const records = [];
-  for (const receipt of receipts) {
-    const extra = extraTrustedByDispatchId[receipt.dispatchId] ?? {};
-    records.push(buildLineageRecordFromReceipt(receipt, extra));
+
+  let existingRecords = [];
+  let defaultBindingId = null;
+  let extraTrustedByDispatchId = {};
+
+  if (isPlainObject(optionsOrExtra)) {
+    if (
+      optionsOrExtra.existingRecords !== undefined
+      || optionsOrExtra.existingIndex !== undefined
+      || optionsOrExtra.defaultBindingId !== undefined
+      || optionsOrExtra.extraTrustedByDispatchId !== undefined
+    ) {
+      if (optionsOrExtra.existingIndex !== undefined) {
+        const validatedIndex = validateLineageIndex(optionsOrExtra.existingIndex);
+        existingRecords = validatedIndex.records;
+      } else if (optionsOrExtra.existingRecords !== undefined) {
+        if (!Array.isArray(optionsOrExtra.existingRecords)) {
+          throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'existingRecords must be an array', { exitCode: 2 });
+        }
+        existingRecords = optionsOrExtra.existingRecords.map((r) => validateLineageRecord(r));
+      }
+      if (optionsOrExtra.defaultBindingId !== undefined && optionsOrExtra.defaultBindingId !== null) {
+        if (typeof optionsOrExtra.defaultBindingId !== 'string' || optionsOrExtra.defaultBindingId.trim().length === 0) {
+          throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'defaultBindingId must be null or non-empty string', { exitCode: 2 });
+        }
+        defaultBindingId = optionsOrExtra.defaultBindingId;
+      }
+      if (optionsOrExtra.extraTrustedByDispatchId !== undefined) {
+        if (!isPlainObject(optionsOrExtra.extraTrustedByDispatchId)) {
+          throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'extraTrustedByDispatchId must be an object', { exitCode: 2 });
+        }
+        extraTrustedByDispatchId = optionsOrExtra.extraTrustedByDispatchId;
+      }
+    } else {
+      extraTrustedByDispatchId = optionsOrExtra;
+    }
   }
+
+  const existingMap = new Map();
+  for (const rawRecord of existingRecords) {
+    const record = validateLineageRecord(rawRecord);
+    existingMap.set(record.dispatchId, record);
+  }
+
+  const records = [];
+  for (const rawReceipt of receipts) {
+    const receipt = validateSelectionReceipt(rawReceipt);
+    const existing = existingMap.get(receipt.dispatchId);
+    if (existing) {
+      // Receipt matches an existing validated durable index record:
+      // Verify receipt and digest match; fail closed on mismatch
+      if (
+        existing.receiptDigest !== receipt.receiptDigest
+        || existing.taskId !== receipt.taskId
+        || existing.role !== (receipt.role ?? null)
+        || existing.provider !== (receipt.provider ?? null)
+        || existing.model !== (receipt.actualModel ?? receipt.model ?? 'indeterminate')
+        || existing.agent !== (receipt.agent ?? null)
+        || existing.decision !== (receipt.decision === 'denied' ? 'denied' : 'eligible')
+      ) {
+        throw new AiCliError(
+          'ORCHESTRATION_INDETERMINATE',
+          `Conflicting receipt or digest mismatch for existing lineage record ${receipt.dispatchId}`,
+          { exitCode: 2 },
+        );
+      }
+      // Reconcile using that record's bindingId; never replace a known bindingId with null
+      records.push(existing);
+    } else {
+      // Receipt has no existing index record:
+      // Use explicit extraTrustedByDispatchId if provided, else current supervisor-managed bindingId if available
+      const extra = extraTrustedByDispatchId[receipt.dispatchId] ?? {};
+      const bindingId = extra.bindingId ?? defaultBindingId ?? null;
+      records.push(buildLineageRecordFromReceipt(receipt, {
+        ...extra,
+        bindingId,
+      }));
+    }
+  }
+
   return buildLineageIndex(records);
 }
 

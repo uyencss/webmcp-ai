@@ -164,6 +164,37 @@ test('lineage: reconcileLineageFromReceipts derives index from validated receipt
   assert.equal(index.records[1].dispatchId, 'disp_02');
 });
 
+test('lineage: reconcileLineageFromReceipts preserves existing bindingId and uses defaultBindingId for new receipts', () => {
+  const r1 = makeReceipt({ dispatchId: 'disp_01', taskId: 'task_01', role: 'writer' });
+  const r2 = makeReceipt({ dispatchId: 'disp_02', taskId: 'task_02', role: 'coordinator' });
+
+  const existingRec1 = buildLineageRecordFromReceipt(r1, { bindingId: 'bind_writer_persisted' });
+
+  // 1. When existing record matches receipt, preserve existing bindingId
+  const indexWithExisting = reconcileLineageFromReceipts([r1, r2], {
+    existingRecords: [existingRec1],
+    defaultBindingId: 'bind_fallback_01',
+  });
+  assert.equal(indexWithExisting.records.length, 2);
+  const rec1Reconciled = indexWithExisting.records.find((r) => r.dispatchId === 'disp_01');
+  const rec2Reconciled = indexWithExisting.records.find((r) => r.dispatchId === 'disp_02');
+
+  assert.equal(rec1Reconciled.bindingId, 'bind_writer_persisted');
+  assert.equal(rec1Reconciled.contributorDigest, existingRec1.contributorDigest);
+  assert.equal(rec2Reconciled.bindingId, 'bind_fallback_01');
+
+  // 2. When no existing record and no defaultBindingId, bindingId is null
+  const indexWithoutDefault = reconcileLineageFromReceipts([r2]);
+  assert.equal(indexWithoutDefault.records[0].bindingId, null);
+
+  // 3. Receipt digest mismatch with existing record fails closed
+  const tamperedReceipt = makeReceipt({ dispatchId: 'disp_01', taskId: 'task_01', role: 'coordinator' });
+  assert.throws(
+    () => reconcileLineageFromReceipts([tamperedReceipt], { existingRecords: [existingRec1] }),
+    (err) => err.code === 'ORCHESTRATION_INDETERMINATE',
+  );
+});
+
 test('lineage: checkLineageIndependence enforces final-auditor independence against trusted records', () => {
   const writerReceipt = makeReceipt({
     dispatchId: 'disp_writer_01',

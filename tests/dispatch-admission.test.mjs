@@ -886,3 +886,160 @@ test('R3: Supervisor maintains lineage-index.json and revalidates it at verify',
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('R3: Supervisor preserves trusted lineage bindingId across restart and admits subsequent dispatches', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-r3-restart-'));
+  const git = (...args) => execFileSync('git', ['-C', tmpDir, ...args], { encoding: 'utf8' });
+  git('init', '-q');
+  git('config', 'user.email', 'test@local');
+  git('config', 'user.name', 'tester');
+  writeFileSync(join(tmpDir, 'README.md'), '# seed\n');
+  git('add', '-A');
+  git('commit', '-qm', 'seed');
+
+  const binding = makeBinding({ bindingId: 'worker_persisted_bind_01' });
+  const policy = DEFAULT_ROLE_POLICY;
+  const fixtureAdapter = makeCompleteFixtureWriter();
+
+  const trustedConfig = createTrustedCoordinatorConfig({
+    allowFixtureDispatch: true,
+    confinement: 'disposable-workspace',
+    disposableRoot: tmpDir,
+  });
+
+  // 1. Start supervisor 1
+  const supervisor1 = await createSupervisor({
+    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: tmpDir },
+    adapters: [fixtureAdapter],
+    trustedCoordinatorConfig: trustedConfig,
+    rolePolicy: policy,
+    managedBinding: binding,
+    verifyDispatch: async () => ({
+      verdict: 'accepted',
+      workerClaimMatched: true,
+      tests: [],
+    }),
+  });
+
+  const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: tmpDir } });
+  const coordinationId = supervisor1.coordinationId;
+  const coordinationDir = join(roots.stateRoot, 'coordinations', coordinationId);
+
+  const makeCaller = (sup) => async (operation, input) => {
+    const capability = readClientCapability({ coordinationDir });
+    const res = await requestIpc(
+      sup.endpoint,
+      {
+        protocol: ORCHESTRATION_PROTOCOL,
+        requestId: `req_${Math.random().toString(36).slice(2, 8)}`,
+        coordinationId,
+        fenceEpoch: sup.fenceEpoch,
+        capability,
+        operation,
+        input,
+      },
+      { timeoutMs: 10_000 },
+    );
+    if (!res.ok) {
+      const err = new Error(res.error?.message || 'IPC call failed');
+      err.code = res.error?.code;
+      err.details = res.error?.details;
+      throw err;
+    }
+    return res.result;
+  };
+
+  const call1 = makeCaller(supervisor1);
+
+  let dispatchId1;
+  try {
+    const taskInput1 = {
+      ...makeTask(),
+      adapterId: 'fixture-writer',
+      workspace: tmpDir,
+    };
+    const taskResult1 = await call1('task.create', { packet: taskInput1 });
+    const taskId1 = taskResult1.taskId;
+
+    const dispatchResult1 = await call1('dispatch.start', {
+      taskId: taskId1,
+      adapterId: 'fixture-writer',
+      selection: {
+        targetProvider: 'anthropic',
+        model: 'claude-3-7-sonnet',
+      },
+    });
+    dispatchId1 = dispatchResult1.dispatchId;
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify lineage-index.json before restart
+    const lineageIndexPath = join(coordinationDir, 'lineage-index.json');
+    assert.ok(existsSync(lineageIndexPath), 'lineage-index.json must exist');
+    const indexBefore = JSON.parse(readFileSync(lineageIndexPath, 'utf8'));
+    const recBefore = indexBefore.records.find((r) => r.dispatchId === dispatchId1);
+    assert.ok(recBefore, 'Record must exist before restart');
+    assert.equal(recBefore.bindingId, 'worker_persisted_bind_01');
+  } finally {
+    await supervisor1.stop();
+  }
+
+  // 2. Restart supervisor on same coordination with same managed binding
+  const supervisor2 = await createSupervisor({
+    mode: 'recover',
+    coordinationId,
+    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: tmpDir },
+    adapters: [fixtureAdapter],
+    trustedCoordinatorConfig: trustedConfig,
+    rolePolicy: policy,
+    managedBinding: binding,
+    verifyDispatch: async () => ({
+      verdict: 'accepted',
+      workerClaimMatched: true,
+      tests: [],
+    }),
+  });
+
+  const call2 = makeCaller(supervisor2);
+
+  try {
+    // 3. Assert durable lineage-index.json retains original bindingId after restart recovery
+    const lineageIndexPath = join(coordinationDir, 'lineage-index.json');
+    const indexAfter = JSON.parse(readFileSync(lineageIndexPath, 'utf8'));
+    const recAfter = indexAfter.records.find((r) => r.dispatchId === dispatchId1);
+    assert.ok(recAfter, 'Record must exist after restart');
+    assert.equal(recAfter.bindingId, 'worker_persisted_bind_01');
+    assert.notEqual(recAfter.bindingId, null);
+
+    // 4. Create and start subsequent managed dispatch on recovered supervisor
+    const taskInput2 = {
+      ...makeTask(),
+      adapterId: 'fixture-writer',
+      workspace: tmpDir,
+    };
+    const taskResult2 = await call2('task.create', { packet: taskInput2 });
+    const taskId2 = taskResult2.taskId;
+
+    const dispatchResult2 = await call2('dispatch.start', {
+      taskId: taskId2,
+      adapterId: 'fixture-writer',
+      selection: {
+        targetProvider: 'anthropic',
+        model: 'claude-3-7-sonnet',
+      },
+    });
+
+    assert.ok(dispatchResult2.dispatchId.startsWith('disp_'), 'Subsequent dispatch must be admitted and started');
+    await new Promise((r) => setTimeout(r, 100));
+
+    // 5. Verify subsequent dispatch was added to lineage index and can be verified
+    const verifyResult2 = await call2('dispatch.verify', { taskId: taskId2, dispatchId: dispatchResult2.dispatchId });
+    assert.equal(verifyResult2.verdict, 'accepted');
+
+    const indexFinal = JSON.parse(readFileSync(lineageIndexPath, 'utf8'));
+    assert.equal(indexFinal.records.length, 2);
+  } finally {
+    await supervisor2.stop();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+

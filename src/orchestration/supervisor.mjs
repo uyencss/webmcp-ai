@@ -658,7 +658,10 @@ export async function createSupervisor(options = {}) {
       if (lineageCorrupted) {
         supervisorLineageIndex = null;
       } else {
-        const reconciledIndex = reconcileLineageFromReceipts(receipts);
+        const reconciledIndex = reconcileLineageFromReceipts(receipts, {
+          existingRecords: loadedIndex?.records ?? [],
+          defaultBindingId: supervisorManagedBinding?.bindingId ?? null,
+        });
         if (loadedIndex) {
           const mergedRecords = mergeLineageRecords(loadedIndex.records, reconciledIndex.records);
           supervisorLineageIndex = buildLineageIndex(mergedRecords);
