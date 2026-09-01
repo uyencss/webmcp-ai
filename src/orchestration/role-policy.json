@@ -1,0 +1,106 @@
+{
+  "schema": "webmcp-ai-role-policy/1",
+  "policyVersion": 1,
+  "roles": {
+    "coordinator": {
+      "allowedAssurances": [
+        "diagnostic",
+        "code-bounded",
+        "reasoning-high",
+        "release-final"
+      ],
+      "capabilities": [
+        "coordinate",
+        "delegate",
+        "inspect"
+      ],
+      "canCoordinate": true,
+      "canWrite": false,
+      "canAccept": false,
+      "readOnly": true
+    },
+    "writer": {
+      "allowedAssurances": [
+        "code-bounded",
+        "reasoning-high"
+      ],
+      "capabilities": [
+        "write-code",
+        "execute-tests"
+      ],
+      "canCoordinate": false,
+      "canWrite": true,
+      "canAccept": false,
+      "readOnly": false
+    },
+    "task-reviewer": {
+      "allowedAssurances": [
+        "code-bounded",
+        "reasoning-high",
+        "release-final"
+      ],
+      "capabilities": [
+        "review-code",
+        "inspect-diff"
+      ],
+      "canCoordinate": false,
+      "canWrite": false,
+      "canAccept": false,
+      "readOnly": true
+    },
+    "final-auditor": {
+      "allowedAssurances": [
+        "release-final"
+      ],
+      "capabilities": [
+        "audit-release",
+        "verify-integrity",
+        "accept"
+      ],
+      "canCoordinate": false,
+      "canWrite": false,
+      "canAccept": true,
+      "readOnly": true,
+      "requireFresh": true,
+      "requireDisjointLineage": true
+    },
+    "observer": {
+      "allowedAssurances": [
+        "diagnostic",
+        "code-bounded"
+      ],
+      "capabilities": [
+        "inspect",
+        "log"
+      ],
+      "canCoordinate": false,
+      "canWrite": false,
+      "canAccept": false,
+      "readOnly": true
+    }
+  },
+  "assurances": {
+    "diagnostic": {
+      "description": "Diagnostic and triage tier with read-only inspection",
+      "minimumRank": 0
+    },
+    "code-bounded": {
+      "description": "Bounded code creation, modification, and local verification",
+      "minimumRank": 1
+    },
+    "reasoning-high": {
+      "description": "Deep reasoning, comprehensive review, and analytical verification",
+      "minimumRank": 2
+    },
+    "release-final": {
+      "description": "Final release audit and non-repudiable integrity verification",
+      "minimumRank": 3
+    }
+  },
+  "rules": {
+    "coordinatorSelfAcceptDenial": true,
+    "finalAuditorDisjointLineage": true,
+    "finalAuditorReadOnlyNoWriteRoot": true,
+    "noDowngrade": true
+  }
+}
