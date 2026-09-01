@@ -1,0 +1,207 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "webmcp-ai-dispatch-selection-receipt/1",
+  "title": "Dispatch Selection Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "taskId",
+    "dispatchId",
+    "role",
+    "riskTier",
+    "rolePolicyRevision",
+    "modelBindingRevision",
+    "bindingRevision",
+    "provider",
+    "agent",
+    "requestedModel",
+    "actualModel",
+    "effort",
+    "variant",
+    "fallbackFrom",
+    "fallbackDecision",
+    "contributorLineageDigest",
+    "sessionFreshness",
+    "decision",
+    "evaluatedAt",
+    "receiptDigest"
+  ],
+  "properties": {
+    "schema": {
+      "const": "webmcp-ai-dispatch-selection-receipt/1"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^task_"
+    },
+    "dispatchId": {
+      "type": "string",
+      "pattern": "^disp_"
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "coordinator",
+        "writer",
+        "task-reviewer",
+        "final-auditor",
+        "observer",
+        null
+      ]
+    },
+    "riskTier": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical",
+        "release",
+        null
+      ]
+    },
+    "rolePolicyRevision": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "modelBindingRevision": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bindingRevision": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,9}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agent": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requestedModel": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "actualModel": {
+      "type": "string"
+    },
+    "effort": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "variant": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fallbackFrom": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fallbackDecision": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "contributorLineageDigest": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "sessionFreshness": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "fresh",
+        "reused",
+        "not-required",
+        "unspecified",
+        null
+      ]
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "eligible",
+        "denied"
+      ]
+    },
+    "evaluatedAt": {
+      "type": "string"
+    },
+    "receiptDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

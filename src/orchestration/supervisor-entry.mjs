@@ -1,10 +1,12 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { AiCliError } from '../errors.mjs';
 import { ORCHESTRATION_PROTOCOL } from './constants.mjs';
+import { resolveOrchestrationRoots } from './paths.mjs';
+import { validateManagedBinding } from './managed-binding.mjs';
 import {
   createPublicAdapters,
   createTrustedCoordinatorConfig,
@@ -154,12 +156,51 @@ async function main() {
     adapters = createPublicAdapters(trustedConfig);
   }
 
+  let managedBinding = null;
+  const managedBindingId = trustedConfig?.managedBindingId ?? null;
+  if (managedBindingId) {
+    if (typeof managedBindingId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(managedBindingId)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'managedBindingId must be a bounded identifier', { exitCode: 2 });
+    }
+    const roots = resolveOrchestrationRoots({ env: process.env });
+    const bindingPath = join(roots.stateRoot, 'managed-host', 'bindings', `${managedBindingId}.json`);
+    if (existsSync(bindingPath)) {
+      try {
+        const fileStats = lstatSync(bindingPath);
+        if (!fileStats.isFile() || fileStats.isSymbolicLink()) {
+          throw new AiCliError('POLICY_DENIED', 'managed binding file is unavailable', { exitCode: 2 });
+        }
+        if (process.platform !== 'win32') {
+          const mode = statSync(bindingPath).mode & 0o777;
+          if (mode !== 0o600) {
+            throw new AiCliError('POLICY_DENIED', 'managed binding file must be mode 0600', { exitCode: 2 });
+          }
+        }
+      } catch (error) {
+        if (error instanceof AiCliError) throw error;
+        throw new AiCliError('POLICY_DENIED', 'managed binding file is unavailable', { exitCode: 2 });
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(readFileSync(bindingPath, 'utf8'));
+      } catch {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'managed binding file is invalid JSON', { exitCode: 2 });
+      }
+      try {
+        managedBinding = validateManagedBinding(parsed);
+      } catch {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'managed binding validation failed', { exitCode: 2 });
+      }
+    }
+  }
+
   activeSupervisor = await createSupervisor({
     env: process.env,
     mode,
     ...(coordinationId ? { coordinationId } : {}),
     manifest: { owner: bootstrap.owner },
     ...(adapters.length > 0 ? { adapters, trustedCoordinatorConfig: trustedConfig } : {}),
+    ...(managedBinding ? { managedBinding } : {}),
   });
 
   emit({

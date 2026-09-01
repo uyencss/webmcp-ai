@@ -41,6 +41,7 @@ export function createTrustedCoordinatorConfig(options = {}) {
     // keyed by adapter id (e.g. { 'opencode-server': 'canary-proven' }).
     // Only machine-local trusted configuration may grant this.
     providerNativeGate: Object.freeze({ ...(options.providerNativeGate ?? {}) }),
+    managedBindingId: options.managedBindingId ?? null,
     ownedProcessCommand: options.ownedProcessCommand ?? null,
     openCodeBin: options.openCodeBin ?? env.OPENCODE_BIN ?? 'opencode',
     openCodeArgs: options.openCodeArgs ?? [],
@@ -61,6 +62,7 @@ const TRUSTED_CONFIG_ALLOWED_FIELDS = new Set([
   'confinement',
   'disposableRoot',
   'providerNativeGate',
+  'managedBindingId',
   'ownedProcess',
   'publicAdapters',
 ]);
@@ -138,12 +140,18 @@ export function loadTrustedCoordinatorConfigFile(path) {
       throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'ownedProcess.env must be an object', { exitCode: 2 });
     }
   }
+  if (parsed.managedBindingId !== undefined && parsed.managedBindingId !== null) {
+    if (typeof parsed.managedBindingId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.managedBindingId)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'managedBindingId must be a bounded identifier string', { exitCode: 2 });
+    }
+  }
   const env = process.env;
   return createTrustedCoordinatorConfig({
     stateDir: parsed.stateDir ?? null,
     confinement: parsed.confinement ?? null,
     disposableRoot: parsed.disposableRoot ?? null,
     providerNativeGate: parsed.providerNativeGate ?? {},
+    managedBindingId: parsed.managedBindingId ?? null,
     ownedProcessCommand: parsed.ownedProcess
       ? { command: parsed.ownedProcess.command, args: parsed.ownedProcess.args ?? [], env: { ...parsed.ownedProcess.env } }
       : null,

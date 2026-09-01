@@ -45,7 +45,16 @@
             "REFS_LIMIT_REACHED",
             "JOURNAL_CORRUPT",
             "SNAPSHOT_CORRUPT",
-            "UNSUPPORTED_CAPABILITY"
+            "UNSUPPORTED_CAPABILITY",
+            "AI_ROLE_POLICY_REQUIRED",
+            "AI_ROLE_POLICY_DIGEST_MISMATCH",
+            "AI_MODEL_BINDING_UNAVAILABLE",
+            "AI_MODEL_ROLE_INELIGIBLE",
+            "AI_MODEL_IDENTITY_INDETERMINATE",
+            "AI_FALLBACK_NOT_AUTHORIZED",
+            "AI_FALLBACK_ASSURANCE_DOWNGRADE",
+            "AI_AUDITOR_NOT_INDEPENDENT",
+            "AI_FINAL_AUDITOR_UNAVAILABLE"
           ]
         },
         "message": { "type": "string" },

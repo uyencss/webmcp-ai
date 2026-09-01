@@ -2,25 +2,43 @@ import { isAbsolute, relative, resolve } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 import {
+  CLOSED_RISK_TIERS,
+  DISPATCH_ADMISSION_CODES,
   GUARANTEE_TIERS,
   ID_PREFIXES,
   OPERATIONS,
   ORCHESTRATION_LIMITS,
   ORCHESTRATION_MODES,
   ORCHESTRATION_PROTOCOL,
+  SELECTION_RECEIPT_SCHEMA,
+  TASK_PACKET_PROTOCOL_V1_R2,
   WORKER_CALLBACK_OPERATIONS,
   WORKER_CALLBACK_PROTOCOL,
 } from './constants.mjs';
+import {
+  CLOSED_ASSURANCES,
+  CLOSED_CAPABILITIES,
+  CLOSED_ROLES,
+  isClosedAssurance,
+  isClosedCapability,
+  isClosedRole,
+  isValidDigest,
+} from './role-policy.mjs';
 
 export {
+  CLOSED_RISK_TIERS,
   DELIVERY_TYPES,
+  DISPATCH_ADMISSION_CODES,
   GUARANTEE_TIERS,
   OPERATIONS,
   ORCHESTRATION_ERROR_CODES,
   ORCHESTRATION_LIMITS,
   ORCHESTRATION_MODES,
   ORCHESTRATION_PROTOCOL,
+  SELECTION_RECEIPT_SCHEMA,
+  TASK_PACKET_PROTOCOL_V1_R2,
 } from './constants.mjs';
+
 
 function invalid(message, details) {
   return new AiCliError('ORCHESTRATION_INVALID_INPUT', message, { exitCode: 2, details });
@@ -172,7 +190,7 @@ export function validateCallRequest(value) {
   });
 }
 
-const TASK_PACKET_FIELDS = new Set([
+const BASE_TASK_PACKET_FIELDS = new Set([
   'objective',
   'workspace',
   'initialRevision',
@@ -186,13 +204,128 @@ const TASK_PACKET_FIELDS = new Set([
   'timeBudgetMs',
   'mode',
   'guaranteeTier',
+  'adapterId',
 ]);
+
+const V1_R2_TASK_PACKET_FIELDS = new Set([
+  ...BASE_TASK_PACKET_FIELDS,
+  'packetVersion',
+  'role',
+  'riskTier',
+  'modelRequirements',
+  'rolePolicyRevision',
+  'modelBindingRevision',
+  'bindingRevision',
+  'fallbackPolicy',
+  'independencePolicy',
+  'lineage',
+]);
+
+const LEGACY_TASK_PACKET_FIELDS = new Set([
+  ...BASE_TASK_PACKET_FIELDS,
+  'role',
+  'riskTier',
+  'assurance',
+  'requiredCapabilities',
+  'lineage',
+  'isFinalAcceptance',
+  'freshSession',
+  'readOnly',
+  'writeRoot',
+  'allowWrite',
+  'writeAccess',
+  'action',
+  'operation',
+  'canAccept',
+  'modelRequirements',
+  'rolePolicyRevision',
+  'modelBindingRevision',
+  'bindingRevision',
+  'fallbackPolicy',
+  'independencePolicy',
+]);
+
+const MODEL_REQUIREMENTS_FIELDS = new Set([
+  'minimumAssurance',
+  'requiredCapabilities',
+]);
+
+const FALLBACK_POLICY_FIELDS = new Set([
+  'mode',
+  'allowedBindingIds',
+  'allowFallback',
+  'fallbackChain',
+  'allowEffortDowngrade',
+  'primaryAssurance',
+  'primaryEffort',
+  'fallbackIndex',
+]);
+
+const INDEPENDENCE_POLICY_FIELDS = new Set([
+  'readOnly',
+  'mustNotMatchDispatchIds',
+  'mustNotContributeToLineage',
+  'requireFresh',
+  'freshSession',
+  'requireDisjointLineage',
+  'disjointLineage',
+]);
+
+const CLOSED_RISK_TIERS_SET = new Set(CLOSED_RISK_TIERS);
+
+function isBoundedRevision(value) {
+  return isValidDigest(value)
+    || (typeof value === 'number' && Number.isInteger(value) && value >= 1)
+    || (typeof value === 'string' && /^[1-9][0-9]{0,9}$/.test(value));
+}
+
+const FORBIDDEN_TASK_KEY_PATTERN = /^(provider|model|account|profile|credential|credentials|secret|token|password|apikey|api_key|auth|cookie|jwt|private_key|privateKey|prompt|systemPrompt|template|env|machine|machineId|machine_id|host|hostname|ip|endpoint|session|sessionId|session_id)$/i;
+
+function scanTaskForbiddenMaterial(value, path = 'packet') {
+  if (value === null || value === undefined) {
+    return;
+  }
+  if (typeof value === 'string') {
+    if (value.includes('{{') && value.includes('}}')) {
+      throw invalid(`task packet contains prohibited prompt template material at ${path}`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => scanTaskForbiddenMaterial(item, `${path}[${index}]`));
+    return;
+  }
+  if (isPlainObject(value)) {
+    for (const [key, val] of Object.entries(value)) {
+      if (FORBIDDEN_TASK_KEY_PATTERN.test(key)) {
+        throw invalid(`task packet contains prohibited non-portable key ${key} at ${path}`);
+      }
+      scanTaskForbiddenMaterial(val, `${path}.${key}`);
+    }
+  }
+}
+
 const COMMAND_POLICY_FIELDS = new Set(['allowedExecutables']);
 const TASK_ID_PATTERN = /^task_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/;
 
 export function validateTaskPacket(value) {
   const packet = requirePlainObject(value, 'task packet');
-  checkUnknownFields(packet, TASK_PACKET_FIELDS, 'task packet');
+  const isVersioned = packet.packetVersion !== undefined;
+
+  if (isVersioned) {
+    if (typeof packet.packetVersion !== 'string' || packet.packetVersion !== TASK_PACKET_PROTOCOL_V1_R2) {
+      throw new AiCliError(
+        'ORCHESTRATION_UNSUPPORTED_VERSION',
+        `unsupported task packetVersion ${String(packet.packetVersion)}; expected ${TASK_PACKET_PROTOCOL_V1_R2}`,
+        { exitCode: 2 },
+      );
+    }
+    checkUnknownFields(packet, V1_R2_TASK_PACKET_FIELDS, 'task packet');
+  } else {
+    checkUnknownFields(packet, LEGACY_TASK_PACKET_FIELDS, 'task packet');
+  }
+
+  scanTaskForbiddenMaterial(packet, 'task packet');
 
   const objective = typeof packet.objective === 'string' ? packet.objective.trim() : '';
   if (!objective) throw invalid('task packet objective must be a non-empty string');
@@ -293,6 +426,177 @@ export function validateTaskPacket(value) {
     throw invalid('guarantee tier unsupported can never back a dispatchable task packet');
   }
 
+  let normalizedModelRequirements = null;
+  let normalizedAssurance = null;
+  let normalizedRequiredCapabilities = null;
+
+  if (packet.modelRequirements !== undefined) {
+    const reqs = requirePlainObject(packet.modelRequirements, 'modelRequirements');
+    checkUnknownFields(reqs, MODEL_REQUIREMENTS_FIELDS, 'modelRequirements');
+    if (typeof reqs.minimumAssurance !== 'string' || !isClosedAssurance(reqs.minimumAssurance)) {
+      throw invalid(`modelRequirements.minimumAssurance must be one of ${CLOSED_ASSURANCES.join(', ')}`);
+    }
+    normalizedAssurance = reqs.minimumAssurance;
+    if (reqs.requiredCapabilities !== undefined) {
+      if (!Array.isArray(reqs.requiredCapabilities)) {
+        throw invalid('modelRequirements.requiredCapabilities must be an array of strings');
+      }
+      for (const cap of reqs.requiredCapabilities) {
+        if (!isClosedCapability(cap)) {
+          throw invalid(`modelRequirements.requiredCapabilities contains unrecognized capability: ${cap}`);
+        }
+      }
+      normalizedRequiredCapabilities = [...reqs.requiredCapabilities];
+    }
+    normalizedModelRequirements = {
+      minimumAssurance: reqs.minimumAssurance,
+      ...(normalizedRequiredCapabilities ? { requiredCapabilities: normalizedRequiredCapabilities } : {}),
+    };
+  }
+
+  let normalizedFallbackPolicy = null;
+  if (packet.fallbackPolicy !== undefined) {
+    const fp = requirePlainObject(packet.fallbackPolicy, 'fallbackPolicy');
+    checkUnknownFields(fp, FALLBACK_POLICY_FIELDS, 'fallbackPolicy');
+    if (fp.allowFallback !== undefined && typeof fp.allowFallback !== 'boolean') {
+      throw invalid('fallbackPolicy.allowFallback must be a boolean');
+    }
+    if (fp.mode !== undefined && !['explicit-only', 'block-on-downgrade'].includes(fp.mode)) {
+      throw invalid('fallbackPolicy.mode must be explicit-only or block-on-downgrade');
+    }
+    if (fp.allowedBindingIds !== undefined) {
+      if (!Array.isArray(fp.allowedBindingIds)
+        || fp.allowedBindingIds.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
+        throw invalid('fallbackPolicy.allowedBindingIds must be an array of non-empty strings');
+      }
+    }
+    if (fp.fallbackChain !== undefined) {
+      if (!Array.isArray(fp.fallbackChain) || fp.fallbackChain.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
+        throw invalid('fallbackPolicy.fallbackChain must be an array of non-empty strings');
+      }
+    }
+    if (fp.allowEffortDowngrade !== undefined && typeof fp.allowEffortDowngrade !== 'boolean') {
+      throw invalid('fallbackPolicy.allowEffortDowngrade must be a boolean');
+    }
+    if (fp.primaryAssurance !== undefined && (!isClosedAssurance(fp.primaryAssurance))) {
+      throw invalid(`fallbackPolicy.primaryAssurance must be one of ${CLOSED_ASSURANCES.join(', ')}`);
+    }
+    if (fp.primaryEffort !== undefined && (typeof fp.primaryEffort !== 'string' || fp.primaryEffort.trim().length === 0)) {
+      throw invalid('fallbackPolicy.primaryEffort must be a non-empty string');
+    }
+    if (fp.fallbackIndex !== undefined && (!Number.isInteger(fp.fallbackIndex) || fp.fallbackIndex < 0)) {
+      throw invalid('fallbackPolicy.fallbackIndex must be a non-negative integer');
+    }
+    normalizedFallbackPolicy = { ...fp };
+  }
+
+  let normalizedIndependencePolicy = null;
+  if (packet.independencePolicy !== undefined) {
+    const ip = requirePlainObject(packet.independencePolicy, 'independencePolicy');
+    checkUnknownFields(ip, INDEPENDENCE_POLICY_FIELDS, 'independencePolicy');
+    for (const boolField of [
+      'readOnly',
+      'mustNotContributeToLineage',
+      'requireFresh',
+      'freshSession',
+      'requireDisjointLineage',
+      'disjointLineage',
+    ]) {
+      if (ip[boolField] !== undefined && typeof ip[boolField] !== 'boolean') {
+        throw invalid(`independencePolicy.${boolField} must be a boolean`);
+      }
+    }
+    if (ip.mustNotMatchDispatchIds !== undefined) {
+      if (!Array.isArray(ip.mustNotMatchDispatchIds)
+        || ip.mustNotMatchDispatchIds.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
+        throw invalid('independencePolicy.mustNotMatchDispatchIds must be an array of non-empty strings');
+      }
+    }
+    normalizedIndependencePolicy = { ...ip };
+  }
+
+  // Versioned packet validation
+  if (isVersioned) {
+    if (typeof packet.role !== 'string' || !isClosedRole(packet.role)) {
+      throw invalid(`task packet role must be one of ${CLOSED_ROLES.join(', ')}`);
+    }
+    if (typeof packet.riskTier !== 'string' || !CLOSED_RISK_TIERS_SET.has(packet.riskTier)) {
+      throw invalid(`task packet riskTier must be one of ${CLOSED_RISK_TIERS.join(', ')}`);
+    }
+    if (packet.modelRequirements === undefined) {
+      throw invalid('versioned task packet requires modelRequirements object');
+    }
+    if (normalizedRequiredCapabilities === null) {
+      throw invalid('versioned task packet requires modelRequirements.requiredCapabilities');
+    }
+    for (const [field, value] of [
+      ['rolePolicyRevision', packet.rolePolicyRevision],
+      ['modelBindingRevision', packet.modelBindingRevision],
+      ['bindingRevision', packet.bindingRevision],
+    ]) {
+      if (value === undefined || value === null) {
+        throw invalid(`versioned task packet requires ${field}`);
+      }
+    }
+    if (normalizedFallbackPolicy === null) {
+      throw invalid('versioned task packet requires fallbackPolicy object');
+    }
+    if (normalizedIndependencePolicy === null) {
+      throw invalid('versioned task packet requires independencePolicy object');
+    }
+
+    if (packet.rolePolicyRevision !== undefined && packet.rolePolicyRevision !== null) {
+      if (!isBoundedRevision(packet.rolePolicyRevision)) {
+        throw invalid('rolePolicyRevision must be a positive revision or sha256 digest');
+      }
+    }
+    if (packet.modelBindingRevision !== undefined && packet.modelBindingRevision !== null) {
+      if (!isBoundedRevision(packet.modelBindingRevision)) {
+        throw invalid('modelBindingRevision must be a positive revision or sha256 digest');
+      }
+    }
+    if (packet.bindingRevision !== undefined && packet.bindingRevision !== null) {
+      if (!isBoundedRevision(packet.bindingRevision)) {
+        throw invalid('bindingRevision must be a positive revision or sha256 digest');
+      }
+    }
+
+    // Final auditor strict requirements
+    if (packet.role === 'final-auditor') {
+      if (normalizedAssurance !== 'release-final') {
+        throw invalid('final-auditor role strictly requires release-final assurance');
+      }
+      if (allowedWriteRoots.length > 0) {
+        throw invalid('final-auditor role must be strictly read-only with no write roots');
+      }
+      if (normalizedIndependencePolicy.readOnly !== true || normalizedIndependencePolicy.freshSession !== true) {
+        throw invalid('final-auditor role requires freshSession=true and readOnly=true');
+      }
+    }
+  } else {
+    // Unversioned legacy packet
+    if (packet.role !== undefined && !isClosedRole(packet.role)) {
+      throw invalid(`task packet role must be one of ${CLOSED_ROLES.join(', ')}`);
+    }
+    if (packet.riskTier !== undefined && !CLOSED_RISK_TIERS_SET.has(packet.riskTier)) {
+      throw invalid(`task packet riskTier must be one of ${CLOSED_RISK_TIERS.join(', ')}`);
+    }
+    if (packet.assurance !== undefined) {
+      if (!isClosedAssurance(packet.assurance)) {
+        throw invalid(`task packet assurance must be one of ${CLOSED_ASSURANCES.join(', ')}`);
+      }
+      normalizedAssurance = packet.assurance;
+    }
+    if (packet.role === 'final-auditor') {
+      if (normalizedAssurance !== 'release-final') {
+        throw invalid('final-auditor role strictly requires release-final assurance');
+      }
+      if (allowedWriteRoots.length > 0) {
+        throw invalid('final-auditor role must be strictly read-only with no write roots');
+      }
+    }
+  }
+
   return deepFreeze({
     objective,
     workspace,
@@ -307,6 +611,19 @@ export function validateTaskPacket(value) {
     timeBudgetMs,
     ...(packet.mode !== undefined ? { mode: packet.mode } : {}),
     ...(packet.guaranteeTier !== undefined ? { guaranteeTier: packet.guaranteeTier } : {}),
+    ...(packet.packetVersion !== undefined ? { packetVersion: packet.packetVersion } : {}),
+    ...(packet.role !== undefined ? { role: packet.role } : {}),
+    ...(packet.riskTier !== undefined ? { riskTier: packet.riskTier } : {}),
+    ...(normalizedModelRequirements ? { modelRequirements: normalizedModelRequirements } : {}),
+    ...(normalizedAssurance ? { assurance: normalizedAssurance } : {}),
+    ...(normalizedRequiredCapabilities ? { requiredCapabilities: normalizedRequiredCapabilities } : {}),
+    ...(packet.rolePolicyRevision !== undefined ? { rolePolicyRevision: packet.rolePolicyRevision } : {}),
+    ...(packet.modelBindingRevision !== undefined ? { modelBindingRevision: packet.modelBindingRevision } : {}),
+    ...(packet.bindingRevision !== undefined ? { bindingRevision: packet.bindingRevision } : {}),
+    ...(normalizedFallbackPolicy ? { fallbackPolicy: normalizedFallbackPolicy } : {}),
+    ...(normalizedIndependencePolicy ? { independencePolicy: normalizedIndependencePolicy } : {}),
+    ...(packet.adapterId !== undefined ? { adapterId: packet.adapterId } : {}),
+    ...(Array.isArray(packet.lineage) ? { lineage: packet.lineage } : {}),
   });
 }
 

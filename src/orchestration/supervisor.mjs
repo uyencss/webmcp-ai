@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { AiCliError } from '../errors.mjs';
 import {
@@ -16,9 +17,21 @@ import {
   OPERATIONS,
   ORCHESTRATION_LIMITS,
   ORCHESTRATION_PROTOCOL,
+  TASK_PACKET_PROTOCOL_V1_R2,
   TERMINAL_WORKER_DELIVERY_TYPES,
   WORKER_CALLBACK_OPERATIONS,
 } from './constants.mjs';
+import { validateRolePolicy } from './role-policy.mjs';
+import {
+  validateManagedBinding,
+} from './managed-binding.mjs';
+import {
+  evaluateDispatchAdmission,
+} from './dispatch-admission.mjs';
+import {
+  buildSelectionReceipt,
+  validateSelectionReceipt,
+} from './selection-receipt.mjs';
 import { validateTaskPacket } from './contracts.mjs';
 import { createAdapterRegistry } from './adapters/index.mjs';
 import { replayJournal } from './journal.mjs';
@@ -94,7 +107,62 @@ function isWithin(candidate, rootPath) {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-const DISPATCH_START_FIELDS = new Set(['taskId', 'adapterId', 'capability']);
+const DISPATCH_START_FIELDS = new Set(['taskId', 'adapterId', 'capability', 'selection']);
+const ALLOWED_SELECTION_FIELDS = new Set([
+  'provider',
+  'agent',
+  'model',
+  'effort',
+  'variant',
+  'isFallback',
+  'fallback',
+  'allowFallback',
+  'fallbackChain',
+  'fallbackIndex',
+  'primaryAssurance',
+  'primaryEffort',
+  'allowEffortDowngrade',
+  'expectedBindingId',
+  'targetProvider',
+  'targetModel',
+  'expectedEffort',
+  'expectedVariant',
+  'expectedAgent',
+  'expectedRevision',
+  'expectedApprovalDigest',
+  'expectedCalibrationEvidenceDigest',
+  'expectedExecutableIdentityDigest',
+  'expectedPolicyDigest',
+  'fallbackFrom',
+  'fallbackDecision',
+  'requestedModel',
+]);
+
+const FORBIDDEN_SELECTION_KEY_PATTERN = /^(bindingPath|binding_path|bindingFile|binding|rawBinding|credential|credentials|secret|token|password|apikey|api_key|auth|cookie|jwt|private_key|privateKey|prompt|systemPrompt|template|machine|machineId|machine_id|host|hostname|ip|endpoint|session|sessionId|session_id|env|process|path|filePath|dir)$/i;
+
+function scanSelectionForbiddenMaterial(value, path = 'selection') {
+  if (value === null || value === undefined) {
+    return;
+  }
+  if (typeof value === 'string') {
+    if (value.includes('{{') && value.includes('}}')) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `selection contains prohibited prompt template material at ${path}`, { exitCode: 2 });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => scanSelectionForbiddenMaterial(item, `${path}[${index}]`));
+    return;
+  }
+  if (typeof value === 'object') {
+    for (const [key, val] of Object.entries(value)) {
+      if (FORBIDDEN_SELECTION_KEY_PATTERN.test(key)) {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `selection contains prohibited selector or key ${key} at ${path}`, { exitCode: 2 });
+      }
+      scanSelectionForbiddenMaterial(val, `${path}.${key}`);
+    }
+  }
+}
 
 function strictDispatchStartInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -109,6 +177,20 @@ function strictDispatchStartInput(input) {
       `dispatch.start input has forbidden field(s): ${unknown.sort().join(', ')}`,
       { exitCode: 2 },
     );
+  }
+  if (input.selection !== undefined && input.selection !== null) {
+    if (typeof input.selection !== 'object' || Array.isArray(input.selection)) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'selection must be an object', { exitCode: 2 });
+    }
+    const unknownSelection = Object.keys(input.selection).filter((k) => !ALLOWED_SELECTION_FIELDS.has(k));
+    if (unknownSelection.length > 0) {
+      throw new AiCliError(
+        'ORCHESTRATION_INVALID_INPUT',
+        `selection has forbidden field(s): ${unknownSelection.sort().join(', ')}`,
+        { exitCode: 2 },
+      );
+    }
+    scanSelectionForbiddenMaterial(input.selection, 'selection');
   }
 }
 
@@ -440,6 +522,51 @@ export async function createSupervisor(options = {}) {
   // Idempotent recovery-parking receipts: `<dispatchId>:park` records that a
   // nonterminal dispatch was retained because its identity could not be
   // proven — replayed so later restarts never duplicate the evidence.
+  let supervisorRolePolicy = null;
+  if (options.rolePolicy) {
+    supervisorRolePolicy = validateRolePolicy(options.rolePolicy);
+  } else {
+    const localPolicyPath = join(dirname(fileURLToPath(import.meta.url)), 'role-policy.json');
+    if (existsSync(localPolicyPath)) {
+      try {
+        const raw = readFileSync(localPolicyPath, 'utf8');
+        supervisorRolePolicy = validateRolePolicy(JSON.parse(raw));
+      } catch {
+        // A missing or malformed packaged policy remains unavailable. Strict
+        // packets are denied at admission instead of silently using a default.
+        supervisorRolePolicy = null;
+      }
+    }
+  }
+
+  let supervisorManagedBinding = null;
+  if (options.managedBinding) {
+    supervisorManagedBinding = validateManagedBinding(options.managedBinding);
+  } else if (trustedConfig?.managedBindingId) {
+    const bindingId = trustedConfig.managedBindingId;
+    if (typeof bindingId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(bindingId)) {
+      const bindingPath = join(roots.stateRoot, 'managed-host', 'bindings', `${bindingId}.json`);
+      if (existsSync(bindingPath)) {
+        try {
+          const fileStats = lstatSync(bindingPath);
+          const validMode = process.platform === 'win32' || (fileStats.mode & 0o777) === 0o600;
+          if (fileStats.isFile() && !fileStats.isSymbolicLink() && validMode) {
+            supervisorManagedBinding = validateManagedBinding(JSON.parse(readFileSync(bindingPath, 'utf8')));
+          }
+        } catch {
+          supervisorManagedBinding = null;
+        }
+      }
+    }
+  }
+
+  function writeSelectionReceipt(receipt) {
+    const dir = join(layout.coordinationDir, 'selection-receipts');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const targetPath = join(dir, `${receipt.dispatchId}.json`);
+    writeAtomicJson(targetPath, receipt);
+  }
+
   const recoveryParkKeys = new Set();
   let journal = [];
   const taskPackets = new Map();
@@ -1735,16 +1862,27 @@ export async function createSupervisor(options = {}) {
    * restart-recoverable control handle → finalize after terminal state and
    * resource reconciliation.
    */
-  async function runPublicDispatch(adapter, { taskId, packet }) {
+  async function runPublicDispatch(adapter, {
+    taskId,
+    packet,
+    capability: _cap = null,
+    dispatchId: explicitDispatchId = null,
+    selectionReceipt = null,
+    selectionReceiptDigest = null,
+    precreated = false,
+  }) {
+    const dispatchId = explicitDispatchId ?? `disp_${randomUUID()}`;
+
+    // These checks remain before baseline/capability/launch. For an R2
+    // managed dispatch, dispatch_created was deliberately persisted only
+    // after the selection receipt and before this preflight; legacy observe
+    // dispatches retain their historical create-after-preflight ordering.
     assertPublicDispatchMaturity(adapter);
     assertConfinementFor(packet, adapter);
-    // Pre-launch RE-CHECK of the canonical protected/write policy: symlink
-    // state may have changed since task admission (TOCTOU substitution), so
-    // the refusal must happen here — BEFORE the first durable commit, before
-    // baseline capture, and long before any worker spawns.
+    // Re-check protected/write geometry after the receipt barrier so a TOCTOU
+    // substitution still fails closed before any worker can exist.
     assertNoProtectedWriteOverlap(packet);
 
-    const dispatchId = `disp_${randomUUID()}`;
     const bindingId = `worker_${randomUUID().slice(0, 12)}`;
     const capabilityToken = generateDispatchCapabilityToken();
     const fenceEpoch = store.state.fenceEpoch;
@@ -1761,18 +1899,21 @@ export async function createSupervisor(options = {}) {
       writeAtomicJson(join(layout.coordinationDir, 'tasks', `${taskId}.baseline.json`), baseline);
     }
 
-    commit({
-      type: 'dispatch_created',
-      dispatchId,
-      taskId,
-      payload: {
+    if (!precreated) {
+      commit({
+        type: 'dispatch_created',
         dispatchId,
         taskId,
-        adapterId: adapter.id,
-        capability: adapter.lifecycle.kind,
-        baselineCaptured: baseline !== null,
-      },
-    });
+        payload: {
+          dispatchId,
+          taskId,
+          adapterId: adapter.id,
+          capability: adapter.lifecycle.kind,
+          baselineCaptured: baseline !== null,
+          ...(selectionReceiptDigest ? { selectionReceiptDigest } : {}),
+        },
+      });
+    }
 
     const taskContext = { ...packet, taskId };
 
@@ -2348,6 +2489,15 @@ export async function createSupervisor(options = {}) {
           throw new AiCliError('DECISION_GATE_BLOCKING', `unresolved dependency ${dependencyId} blocks this task`);
         }
       }
+      const existingDispatch = Object.values(store.state.dispatches).find(
+        (entry) => entry?.taskId === taskId && NONTERMINAL_DISPATCH_STATES.has(entry.state),
+      );
+      if (existingDispatch) {
+        throw new AiCliError(
+          'ORCHESTRATION_INVALID_INPUT',
+          `task ${taskId} already has a nonterminal dispatch`,
+        );
+      }
       // Task JSON may choose an adapter id but never command/path/argv; the
       // registry only contains validated adapters with honest maturity.
       const adapterId = input.adapterId ?? packet?.adapterId ?? null;
@@ -2355,7 +2505,146 @@ export async function createSupervisor(options = {}) {
       if (!adapter || adapter.maturity === 'unavailable' || !adapter.lifecycle) {
         throw unsupportedAdapterBoundary('dispatch.start');
       }
-      return runPublicDispatch(adapter, { taskId, packet, capability: input.capability ?? null });
+
+      const isManagedAdmission = packet.packetVersion === TASK_PACKET_PROTOCOL_V1_R2
+        || packet.role === 'final-auditor';
+      if (!isManagedAdmission) {
+        // Legacy packets stay on the bounded observe/migration path and must
+        // not receive a managed role-policy eligibility receipt.
+        return runPublicDispatch(adapter, { taskId, packet, capability: input.capability ?? null });
+      }
+
+      const requestedSelection = input.selection ?? {};
+      const normalizedSelection = {
+        ...requestedSelection,
+        ...(requestedSelection.targetProvider === undefined && requestedSelection.provider === undefined
+          && supervisorManagedBinding?.provider !== undefined
+          ? { targetProvider: supervisorManagedBinding.provider }
+          : {}),
+        ...(requestedSelection.targetModel === undefined && requestedSelection.model === undefined
+          && requestedSelection.requestedModel === undefined && supervisorManagedBinding?.model !== undefined
+          ? { targetModel: supervisorManagedBinding.model }
+          : {}),
+        ...(requestedSelection.expectedEffort === undefined && requestedSelection.effort === undefined
+          && supervisorManagedBinding?.effort !== undefined && supervisorManagedBinding.effort !== null
+          ? { expectedEffort: supervisorManagedBinding.effort }
+          : {}),
+        ...(requestedSelection.expectedVariant === undefined && requestedSelection.variant === undefined
+          && supervisorManagedBinding?.variant !== undefined && supervisorManagedBinding.variant !== null
+          ? { expectedVariant: supervisorManagedBinding.variant }
+          : {}),
+        ...(requestedSelection.expectedAgent === undefined && requestedSelection.agent === undefined
+          && supervisorManagedBinding?.agent !== undefined && supervisorManagedBinding.agent !== null
+          ? { expectedAgent: typeof supervisorManagedBinding.agent === 'string'
+            ? supervisorManagedBinding.agent : supervisorManagedBinding.agent.id ?? null }
+          : {}),
+        ...(requestedSelection.expectedBindingId === undefined && supervisorManagedBinding?.bindingId
+          ? { expectedBindingId: supervisorManagedBinding.bindingId }
+          : {}),
+      };
+
+      const admissionResult = evaluateDispatchAdmission({
+        task: packet,
+        policy: supervisorRolePolicy,
+        binding: supervisorManagedBinding,
+        selection: normalizedSelection,
+        adapterId: adapter.id,
+        lineage: packet?.lineage ?? [],
+        now: Date.now(),
+      });
+
+      const dispatchId = `disp_${randomUUID()}`;
+
+      const receipt = buildSelectionReceipt({
+        taskId,
+        dispatchId,
+        role: admissionResult.role,
+        riskTier: admissionResult.riskTier,
+        rolePolicyRevision: admissionResult.rolePolicyRevision,
+        modelBindingRevision: admissionResult.modelBindingRevision,
+        bindingRevision: admissionResult.bindingRevision,
+        provider: admissionResult.eligible ? (admissionResult.provider ?? adapter.id) : null,
+        agent: admissionResult.agent,
+        requestedModel: admissionResult.requestedModel,
+        actualModel: admissionResult.actualModel,
+        effort: admissionResult.effort,
+        variant: admissionResult.variant,
+        fallbackFrom: admissionResult.fallbackFrom,
+        fallbackDecision: admissionResult.fallbackDecision,
+        contributorLineageDigest: admissionResult.contributorLineageDigest,
+        sessionFreshness: admissionResult.sessionFreshness,
+        decision: admissionResult.eligible ? 'eligible' : 'denied',
+        evaluatedAt: admissionResult.evaluatedAt,
+      });
+
+      try {
+        writeSelectionReceipt(receipt);
+      } catch {
+        throw new AiCliError('ORCHESTRATION_INDETERMINATE', 'Failed to persist selection receipt', { exitCode: 2 });
+      }
+
+      if (!admissionResult.eligible) {
+        const summary = admissionResult.violations.map((v) => v.message).join('; ') || 'Dispatch admission denied';
+        throw new AiCliError('POLICY_DENIED', `Dispatch admission denied: ${summary}`, {
+          exitCode: 2,
+          details: {
+            code: admissionResult.canonicalCode,
+            violations: admissionResult.violations.map((v) => ({ code: v.code, field: v.field })),
+            receiptDigest: receipt.receiptDigest,
+            role: admissionResult.role,
+            assurance: admissionResult.assurance,
+          },
+        });
+      }
+
+      try {
+        // The receipt is durable before this journal event. All later
+        // maturity/confinement/baseline/capability/launch work is owned by
+        // runPublicDispatch and cannot occur before this barrier.
+        commit({
+          type: 'dispatch_created',
+          dispatchId,
+          taskId,
+          payload: {
+            dispatchId,
+            taskId,
+            adapterId: adapter.id,
+            capability: adapter.lifecycle.kind,
+            baselineCaptured: false,
+            selectionReceiptDigest: receipt.receiptDigest,
+          },
+        });
+      } catch {
+        throw new AiCliError('ORCHESTRATION_INDETERMINATE', 'Failed to persist dispatch admission state', { exitCode: 2 });
+      }
+
+      try {
+        return await runPublicDispatch(adapter, {
+          taskId,
+          packet,
+          capability: input.capability ?? null,
+          dispatchId,
+          selectionReceiptDigest: receipt.receiptDigest,
+          precreated: true,
+        });
+      } catch (error) {
+        // Once the R2 barrier created a durable dispatch, preflight failure
+        // must leave a truthful terminal state rather than a phantom create.
+        if (store.state.dispatches[dispatchId]?.state === 'created') {
+          try {
+            commit({
+              type: 'dispatch_state_changed',
+              dispatchId,
+              taskId,
+              payload: { dispatchId, taskId, state: 'failed', reason: 'preflight-failed' },
+            });
+          } catch {
+            // Preserve the original failure; recovery will reconcile the
+            // durable created state if this owner loses the commit race.
+          }
+        }
+        throw error;
+      }
     },
     'dispatch.reply': async () => { throw unsupportedAdapterBoundary('dispatch.reply'); },
     'dispatch.guidance': async () => { throw unsupportedAdapterBoundary('dispatch.guidance'); },
@@ -2424,6 +2713,50 @@ export async function createSupervisor(options = {}) {
           'ORCHESTRATION_INVALID_INPUT',
           `dispatch ${dispatch.dispatchId} is ${dispatch.state}; independent verification requires a settled dispatch`,
         );
+      }
+
+      // Selection receipt verification for versioned packets
+      if (packet.packetVersion === TASK_PACKET_PROTOCOL_V1_R2) {
+        const receiptPath = join(layout.coordinationDir, 'selection-receipts', `${dispatch.dispatchId}.json`);
+        let storedReceipt = null;
+        if (existsSync(receiptPath)) {
+          try {
+            storedReceipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+          } catch {
+            storedReceipt = null;
+          }
+        }
+        if (!storedReceipt) {
+          throw new AiCliError(
+            'ORCHESTRATION_INDETERMINATE',
+            `no selection receipt found for dispatch ${dispatch.dispatchId}`,
+          );
+        }
+        try {
+          validateSelectionReceipt(storedReceipt);
+        } catch (err) {
+          throw new AiCliError(
+            'ORCHESTRATION_INDETERMINATE',
+            `selection receipt failed validation: ${err.message}`,
+          );
+        }
+        if (storedReceipt.taskId !== taskId || storedReceipt.dispatchId !== dispatch.dispatchId || storedReceipt.decision !== 'eligible') {
+          throw new AiCliError(
+            'ORCHESTRATION_INDETERMINATE',
+            'selection receipt identity or admission decision mismatch',
+          );
+        }
+        const createdDelivery = journal.find(
+          (d) => d.type === 'dispatch_created' && d.payload?.dispatchId === dispatch.dispatchId,
+        );
+        if (createdDelivery?.payload?.selectionReceiptDigest) {
+          if (storedReceipt.receiptDigest !== createdDelivery.payload.selectionReceiptDigest) {
+            throw new AiCliError(
+              'ORCHESTRATION_INDETERMINATE',
+              'selection receipt digest does not match recorded dispatch_created digest',
+            );
+          }
+        }
       }
 
       // Supervisor-owned pre-dispatch baseline sidecar is the ONLY baseline.
