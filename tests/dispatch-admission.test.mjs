@@ -1042,4 +1042,3 @@ test('R3: Supervisor preserves trusted lineage bindingId across restart and admi
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
-
