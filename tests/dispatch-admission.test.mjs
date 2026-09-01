@@ -27,6 +27,9 @@ import {
   validateTaskPacket,
 } from '../src/orchestration/contracts.mjs';
 import {
+  computeContributorDigest,
+} from '../src/orchestration/lineage.mjs';
+import {
   validateSelectionReceipt,
 } from '../src/orchestration/selection-receipt.mjs';
 import {
@@ -596,6 +599,224 @@ test('Supervisor barrier: persists denied receipt and throws POLICY_DENIED befor
     assert.equal(deniedReceipt.decision, 'denied');
     assert.equal(deniedReceipt.actualModel, 'indeterminate');
     validateSelectionReceipt(deniedReceipt);
+  } finally {
+    await supervisor.stop();
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('R3: evaluateDispatchAdmission enforces final-auditor requirements with trustedLineage', () => {
+  const auditorBinding = makeAuditorBinding();
+  const validTask = {
+    packetVersion: TASK_PACKET_PROTOCOL_V1_R2,
+    objective: 'Final audit task',
+    workspace: '/Users/ttcenter/project',
+    role: 'final-auditor',
+    riskTier: 'release',
+    modelRequirements: {
+      minimumAssurance: 'release-final',
+      requiredCapabilities: ['audit-release', 'verify-integrity', 'accept'],
+    },
+    rolePolicyRevision: computePolicyDigest(DEFAULT_ROLE_POLICY),
+    modelBindingRevision: 2,
+    bindingRevision: 2,
+    fallbackPolicy: {
+      mode: 'explicit-only',
+      allowedBindingIds: [],
+    },
+    independencePolicy: {
+      readOnly: true,
+      freshSession: true,
+      mustNotMatchDispatchIds: ['disp_writer_01'],
+    },
+    allowedWriteRoots: [],
+  };
+
+  const writerFacts = {
+    role: 'writer',
+    provider: 'anthropic',
+    model: 'claude-3-7-sonnet',
+    agent: 'writer-agent',
+    bindingId: 'bind_test_writer_01',
+  };
+  const trustedWriterRecord = {
+    schema: 'webmcp-ai-lineage-record/1',
+    taskId: 'task_writer_01',
+    dispatchId: 'disp_writer_01',
+    role: 'writer',
+    riskTier: 'high',
+    rolePolicyRevision: 1,
+    modelBindingRevision: 1,
+    bindingRevision: 1,
+    provider: 'anthropic',
+    agent: 'writer-agent',
+    requestedModel: 'claude-3-7-sonnet',
+    model: 'claude-3-7-sonnet',
+    bindingId: 'bind_test_writer_01',
+    effort: 'high',
+    variant: 'thinking',
+    sessionFreshness: 'fresh',
+    decision: 'eligible',
+    contributorDigest: computeContributorDigest(writerFacts),
+    receiptDigest: 'sha256:' + 'b'.repeat(64),
+    evaluatedAt: '2026-09-02T00:00:00.000Z',
+  };
+
+  // 1. Success case: independent auditor with distinct provider/model/binding
+  const successResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro' },
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(successResult.eligible, true);
+  assert.equal(successResult.canonicalCode, null);
+  assert.equal(successResult.role, 'final-auditor');
+  assert.equal(successResult.assurance, 'release-final');
+  assert.equal(successResult.sessionFreshness, 'fresh');
+
+  // 2. Reject non-fresh session
+  const nonFreshResult = evaluateDispatchAdmission({
+    task: { ...validTask, independencePolicy: { ...validTask.independencePolicy, freshSession: false } },
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(nonFreshResult.eligible, false);
+  assert.equal(nonFreshResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 3. Reject write roots for final-auditor
+  const writeRootResult = evaluateDispatchAdmission({
+    task: { ...validTask, allowedWriteRoots: ['/Users/ttcenter/project/src'] },
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(writeRootResult.eligible, false);
+  assert.equal(writeRootResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 4. Reject candidate matching prior writer in trustedLineage
+  const sharedBindingAuditor = makeAuditorBinding({
+    bindingId: 'bind_test_writer_01',
+    provider: 'anthropic',
+    model: 'claude-3-7-sonnet',
+  });
+  const sharedResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: sharedBindingAuditor,
+    selection: { targetProvider: 'anthropic', model: 'claude-3-7-sonnet' },
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(sharedResult.eligible, false);
+  assert.equal(sharedResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 5. Reject candidate matching mustNotMatchDispatchIds
+  const matchDispatchResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    selection: { dispatchId: 'disp_writer_01' },
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(matchDispatchResult.eligible, false);
+  assert.equal(matchDispatchResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+});
+
+test('R3: Supervisor maintains lineage-index.json and revalidates it at verify', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-r3-sup-'));
+  const git = (...args) => execFileSync('git', ['-C', tmpDir, ...args], { encoding: 'utf8' });
+  git('init', '-q');
+  git('config', 'user.email', 'test@local');
+  git('config', 'user.name', 'tester');
+  writeFileSync(join(tmpDir, 'README.md'), '# seed\n');
+  git('add', '-A');
+  git('commit', '-qm', 'seed');
+
+  const binding = makeBinding();
+  const policy = DEFAULT_ROLE_POLICY;
+  const fixtureAdapter = makeCompleteFixtureWriter();
+
+  const trustedConfig = createTrustedCoordinatorConfig({
+    allowFixtureDispatch: true,
+    confinement: 'disposable-workspace',
+    disposableRoot: tmpDir,
+  });
+
+  const supervisor = await createSupervisor({
+    env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: tmpDir },
+    adapters: [fixtureAdapter],
+    trustedCoordinatorConfig: trustedConfig,
+    rolePolicy: policy,
+    managedBinding: binding,
+    verifyDispatch: async () => ({
+      verdict: 'accepted',
+      workerClaimMatched: true,
+      tests: [],
+    }),
+  });
+
+  const roots = resolveOrchestrationRoots({ env: { WEBMCP_AI_ORCHESTRATION_STATE_DIR: tmpDir } });
+  const coordinationId = supervisor.coordinationId;
+  const coordinationDir = join(roots.stateRoot, 'coordinations', coordinationId);
+  const capability = readClientCapability({ coordinationDir });
+
+  const call = async (operation, input) => {
+    const res = await requestIpc(
+      supervisor.endpoint,
+      {
+        protocol: ORCHESTRATION_PROTOCOL,
+        requestId: `req_${Math.random().toString(36).slice(2, 8)}`,
+        coordinationId,
+        fenceEpoch: supervisor.fenceEpoch,
+        capability,
+        operation,
+        input,
+      },
+      { timeoutMs: 10_000 },
+    );
+    if (!res.ok) {
+      const err = new Error(res.error?.message || 'IPC call failed');
+      err.code = res.error?.code;
+      err.details = res.error?.details;
+      throw err;
+    }
+    return res.result;
+  };
+
+  try {
+    const taskInput = {
+      ...makeTask(),
+      adapterId: 'fixture-writer',
+      workspace: tmpDir,
+    };
+
+    const taskResult = await call('task.create', { packet: taskInput });
+    const taskId = taskResult.taskId;
+
+    const dispatchResult = await call('dispatch.start', {
+      taskId,
+      adapterId: 'fixture-writer',
+      selection: {
+        targetProvider: 'anthropic',
+        model: 'claude-3-7-sonnet',
+      },
+    });
+
+    const dispatchId = dispatchResult.dispatchId;
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify lineage-index.json exists and contains record for this dispatch
+    const lineageIndexPath = join(coordinationDir, 'lineage-index.json');
+    assert.ok(existsSync(lineageIndexPath), 'lineage-index.json must exist');
+    const lineageIndex = JSON.parse(readFileSync(lineageIndexPath, 'utf8'));
+    assert.equal(lineageIndex.schema, 'webmcp-ai-lineage-index/1');
+    assert.ok(lineageIndex.records.some((r) => r.dispatchId === dispatchId));
+
+    // Verify dispatch.verify revalidates lineage and selection receipt
+    const verifyResult = await call('dispatch.verify', { taskId, dispatchId });
+    assert.equal(verifyResult.verdict, 'accepted');
   } finally {
     await supervisor.stop();
     rmSync(tmpDir, { recursive: true, force: true });

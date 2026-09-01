@@ -32,6 +32,16 @@ import {
   buildSelectionReceipt,
   validateSelectionReceipt,
 } from './selection-receipt.mjs';
+import {
+  LINEAGE_INDEX_FILENAME,
+  LINEAGE_INDEX_SCHEMA,
+  buildLineageIndex,
+  buildLineageRecordFromReceipt,
+  mergeLineageRecords,
+  reconcileLineageFromReceipts,
+  validateLineageIndex,
+  validateLineageRecord,
+} from './lineage.mjs';
 import { validateTaskPacket } from './contracts.mjs';
 import { createAdapterRegistry } from './adapters/index.mjs';
 import { replayJournal } from './journal.mjs';
@@ -560,12 +570,40 @@ export async function createSupervisor(options = {}) {
     }
   }
 
+  function lineageIndexPathFor(l) {
+    return join(l.coordinationDir, LINEAGE_INDEX_FILENAME);
+  }
+
+  function loadDurableLineageIndex(l) {
+    const p = lineageIndexPathFor(l);
+    if (!existsSync(p)) return null;
+    try {
+      const raw = JSON.parse(readFileSync(p, 'utf8'));
+      return validateLineageIndex(raw);
+    } catch (error) {
+      throw new AiCliError(
+        'ORCHESTRATION_INDETERMINATE',
+        `lineage-index.json is malformed or conflicting: ${error?.message || error}`,
+        { exitCode: 2 },
+      );
+    }
+  }
+
+  function persistDurableLineageIndex(l, index) {
+    const validated = validateLineageIndex(index);
+    writeAtomicJson(lineageIndexPathFor(l), validated);
+    return validated;
+  }
+
   function writeSelectionReceipt(receipt) {
     const dir = join(layout.coordinationDir, 'selection-receipts');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const targetPath = join(dir, `${receipt.dispatchId}.json`);
     writeAtomicJson(targetPath, receipt);
   }
+
+  let supervisorLineageIndex = null;
+  let lineageCorrupted = false;
 
   const recoveryParkKeys = new Set();
   let journal = [];
@@ -598,6 +636,39 @@ export async function createSupervisor(options = {}) {
       recoverAuthority(layout, priorSnapshot);
       capabilityToken = readClientCapability(layout);
       store = openCoordinationStore(layout);
+    }
+
+    // Reconcile and load durable lineage index from durable index + selection receipts
+    try {
+      const loadedIndex = loadDurableLineageIndex(layout);
+      const receiptsDir = join(layout.coordinationDir, 'selection-receipts');
+      const receipts = [];
+      if (existsSync(receiptsDir)) {
+        for (const name of readdirSync(receiptsDir)) {
+          if (!name.endsWith('.json')) continue;
+          try {
+            const rawReceipt = JSON.parse(readFileSync(join(receiptsDir, name), 'utf8'));
+            receipts.push(validateSelectionReceipt(rawReceipt));
+          } catch {
+            lineageCorrupted = true;
+          }
+        }
+      }
+      if (lineageCorrupted) {
+        supervisorLineageIndex = null;
+      } else {
+        const reconciledIndex = reconcileLineageFromReceipts(receipts);
+        if (loadedIndex) {
+          const mergedRecords = mergeLineageRecords(loadedIndex.records, reconciledIndex.records);
+          supervisorLineageIndex = buildLineageIndex(mergedRecords);
+        } else {
+          supervisorLineageIndex = reconciledIndex;
+        }
+        persistDurableLineageIndex(layout, supervisorLineageIndex);
+      }
+    } catch {
+      lineageCorrupted = true;
+      supervisorLineageIndex = null;
     }
 
     journal = replayJournal(layout).deliveries.slice();
@@ -2514,6 +2585,10 @@ export async function createSupervisor(options = {}) {
         return runPublicDispatch(adapter, { taskId, packet, capability: input.capability ?? null });
       }
 
+      if (lineageCorrupted) {
+        throw new AiCliError('POLICY_DENIED', 'lineage state is corrupted or unverified; admission refused');
+      }
+
       const requestedSelection = input.selection ?? {};
       const normalizedSelection = {
         ...requestedSelection,
@@ -2550,6 +2625,7 @@ export async function createSupervisor(options = {}) {
         selection: normalizedSelection,
         adapterId: adapter.id,
         lineage: packet?.lineage ?? [],
+        trustedLineage: supervisorLineageIndex,
         now: Date.now(),
       });
 
@@ -2581,6 +2657,21 @@ export async function createSupervisor(options = {}) {
         writeSelectionReceipt(receipt);
       } catch {
         throw new AiCliError('ORCHESTRATION_INDETERMINATE', 'Failed to persist selection receipt', { exitCode: 2 });
+      }
+
+      // Update and persist trusted lineage index atomically before launch
+      try {
+        const lineageRecord = buildLineageRecordFromReceipt(receipt, {
+          bindingId: supervisorManagedBinding?.bindingId ?? null,
+        });
+        const updatedRecords = mergeLineageRecords(
+          supervisorLineageIndex?.records ?? [],
+          [lineageRecord],
+        );
+        supervisorLineageIndex = buildLineageIndex(updatedRecords);
+        persistDurableLineageIndex(layout, supervisorLineageIndex);
+      } catch (err) {
+        throw new AiCliError('ORCHESTRATION_INDETERMINATE', `Failed to persist lineage index: ${err.message}`, { exitCode: 2 });
       }
 
       if (!admissionResult.eligible) {
@@ -2756,6 +2847,28 @@ export async function createSupervisor(options = {}) {
               'selection receipt digest does not match recorded dispatch_created digest',
             );
           }
+        }
+
+        // Revalidate lineage binding in lineage index
+        const loadedIndex = loadDurableLineageIndex(layout);
+        if (!loadedIndex) {
+          throw new AiCliError(
+            'ORCHESTRATION_INDETERMINATE',
+            'lineage index missing or unverified for dispatch verification',
+          );
+        }
+        const matchingRecord = loadedIndex.records.find((r) => r.dispatchId === dispatch.dispatchId);
+        if (!matchingRecord) {
+          throw new AiCliError(
+            'ORCHESTRATION_INDETERMINATE',
+            `no lineage record found for dispatch ${dispatch.dispatchId}`,
+          );
+        }
+        if (matchingRecord.receiptDigest !== storedReceipt.receiptDigest || matchingRecord.taskId !== taskId) {
+          throw new AiCliError(
+            'ORCHESTRATION_INDETERMINATE',
+            'lineage record binding mismatch with selection receipt',
+          );
         }
       }
 

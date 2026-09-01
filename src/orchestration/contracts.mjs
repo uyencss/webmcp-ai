@@ -511,8 +511,24 @@ export function validateTaskPacket(value) {
         || ip.mustNotMatchDispatchIds.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
         throw invalid('independencePolicy.mustNotMatchDispatchIds must be an array of non-empty strings');
       }
+      if (ip.mustNotMatchDispatchIds.length > 64) {
+        throw invalid('independencePolicy.mustNotMatchDispatchIds exceeds max entries limit of 64');
+      }
+      for (const id of ip.mustNotMatchDispatchIds) {
+        requireId(id, ID_PREFIXES.dispatch, 'independencePolicy.mustNotMatchDispatchIds entry');
+      }
     }
     normalizedIndependencePolicy = { ...ip };
+  }
+
+  if (packet.lineage !== undefined) {
+    if (!Array.isArray(packet.lineage)) {
+      throw invalid('task packet lineage must be an array');
+    }
+    if (packet.lineage.length > 256) {
+      throw invalid('task packet lineage exceeds max entries limit of 256');
+    }
+    scanTaskForbiddenMaterial(packet.lineage, 'task packet lineage');
   }
 
   // Versioned packet validation
@@ -569,7 +585,9 @@ export function validateTaskPacket(value) {
       if (allowedWriteRoots.length > 0) {
         throw invalid('final-auditor role must be strictly read-only with no write roots');
       }
-      if (normalizedIndependencePolicy.readOnly !== true || normalizedIndependencePolicy.freshSession !== true) {
+      const isFresh = (normalizedIndependencePolicy.freshSession === true || normalizedIndependencePolicy.requireFresh === true)
+        && packet.isReusedSession !== true;
+      if (normalizedIndependencePolicy.readOnly !== true || !isFresh) {
         throw invalid('final-auditor role requires freshSession=true and readOnly=true');
       }
     }

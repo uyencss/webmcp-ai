@@ -240,6 +240,37 @@ test('validateTaskPacket rejects non-absolute roots, overlaps, executable string
   assert.equal(normalized.delegationDepth, ORCHESTRATION_LIMITS.defaultDelegationDepth);
   assert.equal(Object.isFrozen(normalized.allowedWriteRoots), true);
   assert.equal(Object.isFrozen(normalized), true);
+
+  // Independence policy and lineage validation
+  assert.throws(
+    () => validateTaskPacket({
+      ...baseTask,
+      independencePolicy: {
+        mustNotMatchDispatchIds: ['invalid_no_prefix'],
+      },
+    }),
+    (error) => error.code === 'ORCHESTRATION_INVALID_INPUT',
+  );
+
+  assert.throws(
+    () => validateTaskPacket({
+      ...baseTask,
+      lineage: [{ secret: 'bearer secret-token' }],
+    }),
+    (error) => error.code === 'ORCHESTRATION_INVALID_INPUT',
+  );
+
+  const withLineageAndPolicy = validateTaskPacket({
+    ...baseTask,
+    independencePolicy: {
+      readOnly: true,
+      freshSession: true,
+      mustNotMatchDispatchIds: ['disp_writer_01'],
+    },
+    lineage: ['disp_writer_01'],
+  });
+  assert.deepEqual(withLineageAndPolicy.independencePolicy.mustNotMatchDispatchIds, ['disp_writer_01']);
+  assert.equal(withLineageAndPolicy.lineage.length, 1);
 });
 
 test('worker callbacks reject coordinator operations and unknown envelope fields', () => {
