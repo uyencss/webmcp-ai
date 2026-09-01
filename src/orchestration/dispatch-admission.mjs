@@ -446,13 +446,16 @@ export function evaluateDispatchAdmission({
         field: 'task.assurance',
       });
     }
-    const isFresh = (task.freshSession === true || independencePolicy.freshSession === true || independencePolicy.requireFresh === true)
-      && task.isReusedSession !== true && independencePolicy.isReusedSession !== true && selection.isReusedSession !== true;
-    if (!isFresh) {
+    const isAttestedFresh = selection?.sessionFreshness === 'fresh' && selection?.isReusedSession !== true;
+    const isPolicyFresh = (task.freshSession === true || independencePolicy.freshSession === true || independencePolicy.requireFresh === true)
+      && task.isReusedSession !== true && independencePolicy.isReusedSession !== true
+      && task.freshSession !== false && independencePolicy.freshSession !== false;
+    const isAuditorFresh = isAttestedFresh && isPolicyFresh;
+    if (!isAuditorFresh) {
       violations.push({
         canonicalCode: DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT,
         message: 'Final auditor must execute in a fresh independent session',
-        field: 'task.freshSession',
+        field: 'sessionFreshness',
       });
     }
     const hasWriteRoots = (Array.isArray(task.allowedWriteRoots) && task.allowedWriteRoots.length > 0)
@@ -474,22 +477,18 @@ export function evaluateDispatchAdmission({
         ? effectiveBinding.agent
         : (effectiveBinding?.agent?.id ?? selection.expectedAgent ?? selection.agent ?? null),
       bindingId: effectiveBinding?.bindingId ?? null,
-      sessionFreshness: isFresh ? 'fresh' : 'reused',
+      sessionFreshness: selection?.sessionFreshness ?? (isAuditorFresh ? 'fresh' : 'unspecified'),
       readOnly: !hasWriteRoots && (task.readOnly === true || independencePolicy.readOnly === true),
       writeRoots: task.allowedWriteRoots ?? [],
-      isReusedSession: !isFresh,
+      isReusedSession: !isAuditorFresh || selection?.isReusedSession === true,
     };
-
-    const effectiveTrusted = trustedRecords.length > 0
-      ? trustedRecords
-      : (Array.isArray(lineage) && lineage.length > 0 && isPlainObject(lineage[0]) ? lineage : []);
 
     const indepCheck = checkLineageIndependence({
       candidate: candidateFacts,
-      trustedRecords: effectiveTrusted,
+      trustedRecords,
       taskPolicy: {
         ...independencePolicy,
-        freshSession: isFresh,
+        freshSession: isAuditorFresh,
         readOnly: !hasWriteRoots && (task.readOnly === true || independencePolicy.readOnly === true),
         allowedWriteRoots: task.allowedWriteRoots ?? [],
       },
@@ -534,7 +533,7 @@ export function evaluateDispatchAdmission({
         : {}),
     };
 
-    const evaluatorLineage = trustedRecords.length > 0
+    const evaluatorLineage = isFinalAuditor
       ? trustedRecords.map((r) => ({
           role: r.role,
           model: r.model,
@@ -542,7 +541,15 @@ export function evaluateDispatchAdmission({
           bindingId: r.bindingId,
           agentId: r.agent,
         }))
-      : lineage;
+      : (trustedRecords.length > 0
+          ? trustedRecords.map((r) => ({
+              role: r.role,
+              model: r.model,
+              provider: r.provider,
+              bindingId: r.bindingId,
+              agentId: r.agent,
+            }))
+          : lineage);
 
     r1Result = evaluateModelRoleEligibility({
       task: normalizedTask,
@@ -574,7 +581,7 @@ export function evaluateDispatchAdmission({
     } catch {
       contributorLineageDigest = null;
     }
-  } else if (Array.isArray(lineage) && lineage.length > 0) {
+  } else if (!isFinalAuditor && Array.isArray(lineage) && lineage.length > 0) {
     try {
       contributorLineageDigest = computeCanonicalDigest(lineage);
     } catch {
@@ -622,11 +629,16 @@ export function evaluateDispatchAdmission({
     ? (isEligible ? 'fallback-authorized' : 'denied')
     : (isEligible ? 'none' : 'denied');
 
-  const isFreshSessionAttested = (task.freshSession === true || independencePolicy.freshSession === true || independencePolicy.requireFresh === true)
-    && task.isReusedSession !== true && independencePolicy.isReusedSession !== true && selection.isReusedSession !== true;
+  const isAuditorFreshAttested = isFinalAuditor
+    && selection?.sessionFreshness === 'fresh'
+    && selection?.isReusedSession !== true
+    && (task.freshSession === true || independencePolicy.freshSession === true || independencePolicy.requireFresh === true)
+    && task.isReusedSession !== true && independencePolicy.isReusedSession !== true
+    && task.freshSession !== false && independencePolicy.freshSession !== false;
+
   const sessionFreshness = isFinalAuditor
-    ? (isFreshSessionAttested ? 'fresh' : 'reused')
-    : (isFreshSessionAttested ? 'fresh' : (isVersioned ? 'not-required' : 'unspecified'));
+    ? (isAuditorFreshAttested ? 'fresh' : (selection?.sessionFreshness ?? 'unspecified'))
+    : (selection?.sessionFreshness ?? ((task.freshSession === true || independencePolicy.freshSession === true) ? 'fresh' : (isVersioned ? 'not-required' : 'unspecified')));
 
   const sanitizedViolations = violations.map((v) => sanitizeAdmissionViolation(v, primaryCanonicalCode));
 

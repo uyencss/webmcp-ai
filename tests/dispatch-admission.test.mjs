@@ -662,12 +662,12 @@ test('R3: evaluateDispatchAdmission enforces final-auditor requirements with tru
     evaluatedAt: '2026-09-02T00:00:00.000Z',
   };
 
-  // 1. Success case: independent auditor with distinct provider/model/binding
+  // 1. Success case: independent auditor with distinct provider/model/binding and explicit fresh session
   const successResult = evaluateDispatchAdmission({
     task: validTask,
     policy: DEFAULT_ROLE_POLICY,
     binding: auditorBinding,
-    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro' },
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro', sessionFreshness: 'fresh' },
     trustedLineage: [trustedWriterRecord],
   });
   assert.equal(successResult.eligible, true);
@@ -676,11 +676,56 @@ test('R3: evaluateDispatchAdmission enforces final-auditor requirements with tru
   assert.equal(successResult.assurance, 'release-final');
   assert.equal(successResult.sessionFreshness, 'fresh');
 
-  // 2. Reject non-fresh session
+  // 1b. Reject when task policy freshSession=true but selection sessionFreshness is missing
+  const missingAttestationResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro' },
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(missingAttestationResult.eligible, false);
+  assert.equal(missingAttestationResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 1c. Reject when task policy freshSession=true but selection sessionFreshness is unspecified
+  const unspecifiedAttestationResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro', sessionFreshness: 'unspecified' },
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(unspecifiedAttestationResult.eligible, false);
+  assert.equal(unspecifiedAttestationResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 1d. Reject when task policy freshSession=true but selection sessionFreshness is not-required
+  const notRequiredAttestationResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro', sessionFreshness: 'not-required' },
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(notRequiredAttestationResult.eligible, false);
+  assert.equal(notRequiredAttestationResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 1e. Reject when selection sessionFreshness is reused
+  const reusedAttestationResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro', sessionFreshness: 'reused' },
+    trustedLineage: [trustedWriterRecord],
+  });
+  assert.equal(reusedAttestationResult.eligible, false);
+  assert.equal(reusedAttestationResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 2. Reject non-fresh session in policy
   const nonFreshResult = evaluateDispatchAdmission({
     task: { ...validTask, independencePolicy: { ...validTask.independencePolicy, freshSession: false } },
     policy: DEFAULT_ROLE_POLICY,
     binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro', sessionFreshness: 'fresh' },
     trustedLineage: [trustedWriterRecord],
   });
   assert.equal(nonFreshResult.eligible, false);
@@ -691,6 +736,7 @@ test('R3: evaluateDispatchAdmission enforces final-auditor requirements with tru
     task: { ...validTask, allowedWriteRoots: ['/Users/ttcenter/project/src'] },
     policy: DEFAULT_ROLE_POLICY,
     binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro', sessionFreshness: 'fresh' },
     trustedLineage: [trustedWriterRecord],
   });
   assert.equal(writeRootResult.eligible, false);
@@ -706,7 +752,7 @@ test('R3: evaluateDispatchAdmission enforces final-auditor requirements with tru
     task: validTask,
     policy: DEFAULT_ROLE_POLICY,
     binding: sharedBindingAuditor,
-    selection: { targetProvider: 'anthropic', model: 'claude-3-7-sonnet' },
+    selection: { targetProvider: 'anthropic', model: 'claude-3-7-sonnet', sessionFreshness: 'fresh' },
     trustedLineage: [trustedWriterRecord],
   });
   assert.equal(sharedResult.eligible, false);
@@ -717,11 +763,29 @@ test('R3: evaluateDispatchAdmission enforces final-auditor requirements with tru
     task: validTask,
     policy: DEFAULT_ROLE_POLICY,
     binding: auditorBinding,
-    selection: { dispatchId: 'disp_writer_01' },
+    selection: { dispatchId: 'disp_writer_01', sessionFreshness: 'fresh' },
     trustedLineage: [trustedWriterRecord],
   });
   assert.equal(matchDispatchResult.eligible, false);
   assert.equal(matchDispatchResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
+
+  // 6. Regression: caller lineage cannot satisfy final-auditor disjointness when trusted lineage is empty
+  const callerLineageResult = evaluateDispatchAdmission({
+    task: validTask,
+    policy: DEFAULT_ROLE_POLICY,
+    binding: auditorBinding,
+    selection: { targetProvider: 'google-ai', model: 'gemini-2.5-pro', sessionFreshness: 'fresh' },
+    lineage: [{
+      role: 'writer',
+      model: 'claude-3-7-sonnet',
+      provider: 'anthropic',
+      bindingId: 'bind_test_writer_01',
+      agentId: 'writer-agent',
+    }],
+    trustedLineage: [],
+  });
+  assert.equal(callerLineageResult.eligible, false);
+  assert.equal(callerLineageResult.canonicalCode, DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT);
 });
 
 test('R3: Supervisor maintains lineage-index.json and revalidates it at verify', async () => {

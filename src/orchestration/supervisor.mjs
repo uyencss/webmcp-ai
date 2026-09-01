@@ -146,6 +146,7 @@ const ALLOWED_SELECTION_FIELDS = new Set([
   'fallbackFrom',
   'fallbackDecision',
   'requestedModel',
+  'sessionFreshness',
 ]);
 
 const FORBIDDEN_SELECTION_KEY_PATTERN = /^(bindingPath|binding_path|bindingFile|binding|rawBinding|credential|credentials|secret|token|password|apikey|api_key|auth|cookie|jwt|private_key|privateKey|prompt|systemPrompt|template|machine|machineId|machine_id|host|hostname|ip|endpoint|session|sessionId|session_id|env|process|path|filePath|dir)$/i;

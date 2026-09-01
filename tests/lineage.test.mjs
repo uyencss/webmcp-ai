@@ -236,7 +236,7 @@ test('lineage: checkLineageIndependence enforces final-auditor independence agai
   assert.equal(matchDispatchCheck.independent, false);
   assert.ok(matchDispatchCheck.violations.some((v) => v.code === 'AI_AUDITOR_NOT_INDEPENDENT'));
 
-  // 4. Auditor missing fresh session
+  // 4. Auditor missing fresh session or unproven attestation
   const staleAuditor = {
     ...independentAuditor,
     sessionFreshness: 'reused',
@@ -252,6 +252,54 @@ test('lineage: checkLineageIndependence enforces final-auditor independence agai
   assert.equal(staleCheck.independent, false);
   assert.ok(staleCheck.violations.some((v) => v.code === 'AI_AUDITOR_NOT_INDEPENDENT'));
 
+  // 4b. Auditor with policy=true but unspecified attestation is denied
+  const unspecifiedAuditor = {
+    ...independentAuditor,
+    sessionFreshness: 'unspecified',
+  };
+  const unspecifiedCheck = checkLineageIndependence({
+    candidate: unspecifiedAuditor,
+    trustedRecords: [writerRecord],
+    taskPolicy: {
+      readOnly: true,
+      freshSession: true,
+    },
+  });
+  assert.equal(unspecifiedCheck.independent, false);
+  assert.ok(unspecifiedCheck.violations.some((v) => v.code === 'AI_AUDITOR_NOT_INDEPENDENT'));
+
+  // 4c. Auditor with policy=true but not-required attestation is denied
+  const notReqAuditor = {
+    ...independentAuditor,
+    sessionFreshness: 'not-required',
+  };
+  const notReqCheck = checkLineageIndependence({
+    candidate: notReqAuditor,
+    trustedRecords: [writerRecord],
+    taskPolicy: {
+      readOnly: true,
+      freshSession: true,
+    },
+  });
+  assert.equal(notReqCheck.independent, false);
+  assert.ok(notReqCheck.violations.some((v) => v.code === 'AI_AUDITOR_NOT_INDEPENDENT'));
+
+  // 4d. Auditor with policy=true but missing/undefined attestation is denied
+  const missingAttestationAuditor = {
+    ...independentAuditor,
+    sessionFreshness: undefined,
+  };
+  const missingAttestationCheck = checkLineageIndependence({
+    candidate: missingAttestationAuditor,
+    trustedRecords: [writerRecord],
+    taskPolicy: {
+      readOnly: true,
+      freshSession: true,
+    },
+  });
+  assert.equal(missingAttestationCheck.independent, false);
+  assert.ok(missingAttestationCheck.violations.some((v) => v.code === 'AI_AUDITOR_NOT_INDEPENDENT'));
+
   // 5. Empty trusted lineage fails closed for final-auditor
   const emptyCheck = checkLineageIndependence({
     candidate: independentAuditor,
@@ -263,4 +311,39 @@ test('lineage: checkLineageIndependence enforces final-auditor independence agai
   });
   assert.equal(emptyCheck.independent, false);
   assert.ok(emptyCheck.violations.some((v) => v.code === 'AI_AUDITOR_NOT_INDEPENDENT'));
+});
+
+test('lineage: buildLineageIndex rejects 1025 distinct records without silent truncation', () => {
+  const records1025 = [];
+  for (let i = 0; i < 1025; i += 1) {
+    const id = `disp_${String(i).padStart(6, '0')}`;
+    const receipt = makeReceipt({ dispatchId: id, taskId: `task_${String(i).padStart(6, '0')}` });
+    records1025.push(buildLineageRecordFromReceipt(receipt, { bindingId: `bind_${String(i).padStart(6, '0')}` }));
+  }
+
+  assert.equal(records1025.length, 1025);
+
+  assert.throws(
+    () => buildLineageIndex(records1025),
+    (err) => {
+      assert.equal(err.code, 'ORCHESTRATION_INVALID_INPUT');
+      assert.match(err.message, /exceed max limit of 1024/);
+      return true;
+    },
+  );
+
+  // Exactly 1024 records succeed
+  const records1024 = records1025.slice(0, 1024);
+  const index = buildLineageIndex(records1024);
+  assert.equal(index.records.length, 1024);
+
+  // mergeLineageRecords also rejects > 1024 distinct records
+  assert.throws(
+    () => mergeLineageRecords(records1024, [records1025[1024]]),
+    (err) => {
+      assert.equal(err.code, 'ORCHESTRATION_INVALID_INPUT');
+      assert.match(err.message, /exceed max limit of 1024/);
+      return true;
+    },
+  );
 });

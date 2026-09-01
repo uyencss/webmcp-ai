@@ -423,6 +423,14 @@ export function buildLineageIndex(records = [], { updatedAt = new Date().toISOSt
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'records must be an array', { exitCode: 2 });
   }
 
+  if (records.length > MAX_LINEAGE_RECORDS) {
+    throw new AiCliError(
+      'ORCHESTRATION_INVALID_INPUT',
+      `Lineage records exceed max limit of ${MAX_LINEAGE_RECORDS}`,
+      { exitCode: 2 },
+    );
+  }
+
   const dedupedMap = new Map();
   for (const raw of records) {
     const record = validateLineageRecord(raw);
@@ -441,7 +449,15 @@ export function buildLineageIndex(records = [], { updatedAt = new Date().toISOSt
     }
   }
 
-  const recordList = Array.from(dedupedMap.values()).slice(0, MAX_LINEAGE_RECORDS);
+  if (dedupedMap.size > MAX_LINEAGE_RECORDS) {
+    throw new AiCliError(
+      'ORCHESTRATION_INVALID_INPUT',
+      `Lineage records exceed max limit of ${MAX_LINEAGE_RECORDS}`,
+      { exitCode: 2 },
+    );
+  }
+
+  const recordList = Array.from(dedupedMap.values());
   const draft = {
     schema: LINEAGE_INDEX_SCHEMA,
     records: recordList,
@@ -462,6 +478,10 @@ export function buildLineageIndex(records = [], { updatedAt = new Date().toISOSt
  * Conflicting records for the same dispatchId throw ORCHESTRATION_INDETERMINATE.
  */
 export function mergeLineageRecords(existingRecords = [], incomingRecords = []) {
+  if (!Array.isArray(existingRecords) || !Array.isArray(incomingRecords)) {
+    throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'Records must be arrays', { exitCode: 2 });
+  }
+
   const map = new Map();
 
   for (const raw of existingRecords) {
@@ -485,6 +505,14 @@ export function mergeLineageRecords(existingRecords = [], incomingRecords = []) 
     }
   }
 
+  if (map.size > MAX_LINEAGE_RECORDS) {
+    throw new AiCliError(
+      'ORCHESTRATION_INVALID_INPUT',
+      `Merged lineage records exceed max limit of ${MAX_LINEAGE_RECORDS}`,
+      { exitCode: 2 },
+    );
+  }
+
   return Object.freeze(Array.from(map.values()));
 }
 
@@ -494,6 +522,13 @@ export function mergeLineageRecords(existingRecords = [], incomingRecords = []) 
 export function reconcileLineageFromReceipts(receipts = [], extraTrustedByDispatchId = {}) {
   if (!Array.isArray(receipts)) {
     throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'receipts must be an array', { exitCode: 2 });
+  }
+  if (receipts.length > MAX_LINEAGE_RECORDS) {
+    throw new AiCliError(
+      'ORCHESTRATION_INVALID_INPUT',
+      `Lineage receipts exceed max limit of ${MAX_LINEAGE_RECORDS}`,
+      { exitCode: 2 },
+    );
   }
   const records = [];
   for (const receipt of receipts) {
@@ -538,9 +573,15 @@ export function checkLineageIndependence({
   }
 
   // 2. Fresh session requirement
-  const isFresh = candidate.sessionFreshness === 'fresh'
-    || (taskPolicy.freshSession === true && candidate.isReusedSession !== true && taskPolicy.isReusedSession !== true);
-  if (!isFresh || candidate.sessionFreshness === 'reused' || candidate.isReusedSession === true || taskPolicy.freshSession === false) {
+  const policyAllowsFresh = (taskPolicy.freshSession === true || taskPolicy.requireFresh === true)
+    && taskPolicy.freshSession !== false
+    && taskPolicy.requireFresh !== false
+    && taskPolicy.isReusedSession !== true;
+  const isCandidateAttestedFresh = candidate.sessionFreshness === 'fresh'
+    && candidate.isReusedSession !== true;
+
+  const isFresh = isCandidateAttestedFresh && policyAllowsFresh;
+  if (!isFresh) {
     violations.push({
       code: DISPATCH_ADMISSION_CODES.AI_AUDITOR_NOT_INDEPENDENT,
       message: 'Final auditor must execute in a fresh independent session',
