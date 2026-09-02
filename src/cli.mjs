@@ -42,15 +42,23 @@ Generate options:
   --session-id <id>       Resume only this explicit provider session
   --agent-mode <mode>     AGY/opencode only: plan (default) or accept-edits
   --agent <name>          AGY/opencode only: select a discovered custom agent
-  --tool-policy <policy>  provider-default (default) or compose-only
-  --timeout-ms <ms>       Process timeout (default: 600000)
+  --tool-policy <policy>  provider-default (default) or compose-only (legacy)
+  --access-profile <profile>  provider-default, compose-only, review-readonly, bounded-edit, gateway-tool
   --workspace <path>      Trusted working directory for the provider
+  --allowed-read-root <path>   Repeatable: additional readable root (absolute)
+  --allowed-write-root <path>  Repeatable: writable root inside workspace (absolute)
+  --protected-path <path>      Repeatable: protected path inside workspace (overrides writes)
+  --project-id <id>       Opaque project binding identifier
+  --store-revisions <json> JSON object of store revisions
+  --timeout-ms <ms>       Process timeout (default: 600000)
   --json                  Emit stable JSON on stdout
 
 Environment:
   AGY_BIN, CLAUDE_BIN, CODEX_BIN, OPENCODE_BIN   Override provider executables
 `;
 }
+
+const REPEATABLE_OPTIONS = new Set(['allowed-read-root', 'allowed-write-root', 'protected-path']);
 
 function parseOptions(args) {
   const options = {};
@@ -62,17 +70,27 @@ function parseOptions(args) {
       continue;
     }
     const equalAt = token.indexOf('=');
+    let name;
+    let value;
     if (equalAt >= 0) {
-      options[token.slice(2, equalAt)] = token.slice(equalAt + 1);
-      continue;
-    }
-    const name = token.slice(2);
-    const next = args[index + 1];
-    if (next !== undefined && !next.startsWith('--')) {
-      options[name] = next;
-      index += 1;
+      name = token.slice(2, equalAt);
+      value = token.slice(equalAt + 1);
     } else {
-      options[name] = true;
+      name = token.slice(2);
+      const next = args[index + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        value = next;
+        index += 1;
+      } else {
+        value = true;
+      }
+    }
+    if (REPEATABLE_OPTIONS.has(name)) {
+      if (!options[name]) options[name] = [];
+      if (value !== true) options[name].push(value);
+    } else {
+      // For non-repeatable, keep last value (standard); but allow building array for read/write roots via comma? Not needed
+      options[name] = value;
     }
   }
   return { options, positional };
@@ -87,12 +105,35 @@ function readJsonInput(path) {
   }
 }
 
+function collectArrayOption(options, name, fromJsonKey) {
+  const cliVals = options[name];
+  const jsonVals = fromJsonKey ? undefined : undefined;
+  // This helper is called with fromJson already; caller passes json value
+  if (Array.isArray(cliVals) && cliVals.length) return cliVals;
+  return undefined;
+}
+
 function generateInput(options) {
   const fromJson = options['input-json'] ? readJsonInput(options['input-json']) : {};
   const schema = options.schema ? readJsonInput(options.schema) : fromJson.schema;
   const prompt = options['prompt-file']
     ? readFileSync(options['prompt-file'], 'utf8')
     : (options.prompt ?? fromJson.prompt);
+  // Repeatable root options – CLI arrays take precedence if present, else JSON arrays
+  const allowedReadRoots = options['allowed-read-root']?.length ? options['allowed-read-root'] : fromJson.allowedReadRoots;
+  const allowedWriteRoots = options['allowed-write-root']?.length ? options['allowed-write-root'] : fromJson.allowedWriteRoots;
+  const protectedPaths = options['protected-path']?.length ? options['protected-path'] : fromJson.protectedPaths;
+  let storeRevisions = fromJson.storeRevisions;
+  if (options['store-revisions']) {
+    try {
+      storeRevisions = JSON.parse(options['store-revisions']);
+    } catch {
+      storeRevisions = options['store-revisions'];
+    }
+  } else if (fromJson.storeRevisions) {
+    storeRevisions = fromJson.storeRevisions;
+  }
+  // Also support camelCase JSON keys from protocol
   return {
     ...fromJson,
     provider: options.provider ?? fromJson.provider,
@@ -104,8 +145,15 @@ function generateInput(options) {
     agentMode: options['agent-mode'] ?? fromJson.agentMode,
     agent: options.agent ?? fromJson.agent,
     toolPolicy: options['tool-policy'] ?? fromJson.toolPolicy,
+    accessProfile: options['access-profile'] ?? fromJson.accessProfile,
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
     workspace: options.workspace ?? fromJson.workspace,
+    allowedReadRoots,
+    allowedWriteRoots,
+    protectedPaths,
+    projectId: options['project-id'] ?? fromJson.projectId,
+    storeRevisions,
+    gatewayCapabilityHandle: options['gateway-capability-handle'] ?? fromJson.gatewayCapabilityHandle,
   };
 }
 

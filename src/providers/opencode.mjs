@@ -1,6 +1,9 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
+import { buildOpenCodeConfig } from '../capabilities.mjs';
 import { AiCliError } from '../errors.mjs';
 
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -73,13 +76,37 @@ export const opencodeProvider = {
       });
     }
 
-    let permission;
+    const accessProfile = request.accessProfile || (request.toolPolicy === 'compose-only' ? 'compose-only' : 'provider-default');
+    if (accessProfile === 'gateway-tool') {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'gateway-tool requires a validated local Gateway broker capability', {
+        exitCode: 2,
+        details: { capability: 'accessProfile', accessProfile },
+      });
+    }
+
+    // Build deterministic per-invocation isolated config boundary from selected profile.
+    // This is the private configuration boundary: it contains explicit permission +
+    // external_directory scoped to declared roots, with mcp:{}, plugin:[], share disabled,
+    // and no inherited operator config. Isolation is enforced via explicit env controls.
+    let cfg;
+    try {
+      cfg = buildOpenCodeConfig({
+        accessProfile,
+        workspace: request.workspace,
+        allowedReadRoots: request.allowedReadRoots || [],
+        allowedWriteRoots: request.allowedWriteRoots || [],
+        protectedPaths: request.protectedPaths || [],
+      });
+    } catch (e) {
+      throw e;
+    }
+
+    let permission = cfg.permission;
+    let external_directory = cfg.external_directory;
     let auto = false;
-    if (request.toolPolicy === 'compose-only') {
-      // Pure text composition: deny every tool and never auto-approve.
-      permission = { '*': 'deny' };
-    } else if (agentMode === 'accept-edits') {
-      // Supervised write mode: read-only tools plus edits and a bash deny-list.
+
+    // Preserve legacy accept-edits behavior when accessProfile is provider-default but agentMode asks for edits
+    if (accessProfile === 'provider-default' && agentMode === 'accept-edits') {
       permission = {
         '*': 'deny',
         read: 'allow',
@@ -87,6 +114,7 @@ export const opencodeProvider = {
         glob: 'allow',
         lsp: 'allow',
         edit: 'allow',
+        write: 'allow',
         bash: {
           '*': 'allow',
           'rm *': 'deny',
@@ -97,15 +125,40 @@ export const opencodeProvider = {
         webfetch: 'deny',
         websearch: 'deny',
       };
+      // For legacy, keep external_directory from cfg (which is scoped to workspace)
       auto = true;
+    } else if (accessProfile === 'bounded-edit') {
+      auto = true;
+    } else if (accessProfile === 'compose-only') {
+      auto = false;
     } else {
-      // Default read-only advisor.
-      permission = {
-        '*': 'deny', read: 'allow', grep: 'allow', glob: 'allow', lsp: 'allow',
-      };
+      auto = false;
+    }
+    if (accessProfile === 'compose-only') {
+      permission = { '*': 'deny' };
+      external_directory = [];
     }
 
-    const agentName = request.agent || (agentMode === 'accept-edits' ? 'build' : 'plan');
+    // Rebuild baseConfig with isolated surface, preserving cfg's explicit mcp/plugin isolation
+    const baseConfig = {
+      ...cfg,
+      permission,
+      share: 'disabled',
+      autoupdate: false,
+      mdns: false,
+      cors: [],
+      plugin: [],
+      mcp: {},
+    };
+    if (external_directory && external_directory.length) {
+      baseConfig.external_directory = external_directory;
+    } else {
+      delete baseConfig.external_directory;
+    }
+    // Ensure no secret-bearing fields are introduced
+    // baseConfig must not contain private keys, credentials, etc – it only carries permission + boundary.
+
+    const agentName = request.agent || (auto ? 'build' : 'plan');
     const args = [
       'run', '--format', 'json', '--agent', agentName,
       ...(auto ? ['--auto'] : []),
@@ -115,25 +168,42 @@ export const opencodeProvider = {
       '--dir', request.workspace,
     ];
 
+    // Create private per-invocation config boundary directory.
+    // Deterministic content (cfg) is written to a disposable directory; the directory
+    // is private to this invocation and removed on cleanup. This prevents inheritance
+    // of the operator's ~/.config/opencode MCP configuration and project/user config.
+    const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
+    const xdgConfigHome = join(privateDir, 'xdg-config');
+    const openCodeConfig = join(privateDir, 'opencode.json');
+    const openCodeConfigDir = join(privateDir, 'opencode.d');
+    mkdirSync(xdgConfigHome, { recursive: true });
+    mkdirSync(openCodeConfigDir, { recursive: true });
+    // Write the isolated config file – this is the file that OPENCODE_CONFIG points to.
+    // It contains the same content as OPENCODE_CONFIG_CONTENT for defense-in-depth.
+    writeFileSync(openCodeConfig, JSON.stringify(baseConfig, null, 2), 'utf8');
+
     return {
       args,
       stdin: request.prompt,
-      // The client spreads invocation.env into the effective process
-      // environment. Injecting the isolated DB path and sandbox config here
-      // keeps them off disk; the DB resolver reads the same effective env the
-      // client passes in, so an explicit operator OPENCODE_DB is honored and
-      // prompts/Task JSON can never select the database.
       env: {
         OPENCODE_DB: resolveOpencodeCliDb(request.env),
-        OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission, share: 'disabled', autoupdate: false }),
+        XDG_CONFIG_HOME: xdgConfigHome,
+        OPENCODE_CONFIG: openCodeConfig,
+        OPENCODE_CONFIG_DIR: openCodeConfigDir,
+        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+        OPENCODE_PURE: '1',
+        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
+        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
+        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
         OPENCODE_DISABLE_AUTOUPDATE: '1',
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(baseConfig),
+      },
+      cleanup: () => {
+        try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
       },
     };
   },
   parseOutput({ stdout }) {
-    // opencode --format json emits NDJSON; every event carries the sessionID and
-    // assistant prose lives on type:"text" parts. The parser must not depend on a
-    // terminal step_finish event (upstream bug #26855 can drop it).
     let sessionId = null;
     let text = '';
     for (const line of stdout.split(/\r?\n/)) {
@@ -155,9 +225,6 @@ export const opencodeProvider = {
   },
   modelsInvocation: { args: ['models'], stdin: null },
   agentsInvocation: { args: ['agent', 'list'], stdin: null },
-  // Model and agent discovery open the provider too, so they must observe the
-  // exact same isolated database as generate. The client merges this into the
-  // effective environment for those commands.
   invocationEnv(env) {
     return { OPENCODE_DB: resolveOpencodeCliDb(env) };
   },

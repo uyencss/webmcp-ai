@@ -4,11 +4,18 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import {
+  buildSafeChildEnv,
+  computeCapabilityDigests,
+  validateCapabilityRequest,
+} from './capabilities.mjs';
 import { AiCliError } from './errors.mjs';
 import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 
 const DEFAULT_TIMEOUT_MS = 600_000;
+
+// Backward-compat legacy mapping for toolPolicy values
 const TOOL_POLICIES = new Set(['provider-default', 'compose-only']);
 
 function normalizeToolPolicy(value) {
@@ -29,15 +36,53 @@ function normalizeRequest(input) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AiCliError('INVALID_INPUT', 'timeoutMs must be a positive number', { exitCode: 2 });
   }
-  const toolPolicy = normalizeToolPolicy(input.toolPolicy);
-  if (!provider.capabilities?.toolPolicies?.includes(toolPolicy)) {
-    throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not support toolPolicy ${toolPolicy}`, {
+  // Validate capability fields with strict canonicalization and profile handling.
+  // validateCapabilityRequest handles accessProfile/toolPolicy merging, workspace, roots, protectedPaths, projectId/storeRevisions, and gateway-tool fail-closed.
+  const capability = validateCapabilityRequest({
+    accessProfile: input.accessProfile,
+    toolPolicy: input.toolPolicy,
+    workspace: input.workspace,
+    allowedReadRoots: input.allowedReadRoots,
+    allowedWriteRoots: input.allowedWriteRoots,
+    protectedPaths: input.protectedPaths,
+    projectId: input.projectId,
+    storeRevisions: input.storeRevisions,
+    gatewayCapabilityHandle: input.gatewayCapabilityHandle,
+    gatewayHandle: input.gatewayHandle,
+    mcpConfig: input.mcpConfig,
+  });
+
+  // Derive the effective toolPolicy for legacy provider capability checks and compose-only temp workspace handling
+  const toolPolicy = capability.accessProfile === 'compose-only' ? 'compose-only' : (input.toolPolicy ?? (capability.accessProfile === 'provider-default' ? 'provider-default' : capability.accessProfile));
+  // For legacy providers that only declare toolPolicies, map new profiles to unsupported
+  // Only opencode is expected to support review-readonly/bounded-edit; others fail closed.
+  const providerSupported = (() => {
+    if (capability.accessProfile === 'gateway-tool') return false;
+    if (['review-readonly', 'bounded-edit'].includes(capability.accessProfile)) {
+      return provider.id === 'opencode';
+    }
+    return true;
+  })();
+  if (!providerSupported) {
+    throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not support accessProfile ${capability.accessProfile}`, {
       exitCode: 2,
-      details: { capability: 'toolPolicy', toolPolicy },
+      details: { capability: 'accessProfile', accessProfile: capability.accessProfile },
     });
   }
+  // Retain legacy toolPolicy validation for backward compat
+  const legacyPolicy = normalizeToolPolicy(toolPolicy === 'review-readonly' || toolPolicy === 'bounded-edit' ? 'provider-default' : toolPolicy);
+  if (!provider.capabilities?.toolPolicies?.includes(legacyPolicy) && !['review-readonly', 'bounded-edit'].includes(capability.accessProfile)) {
+    throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not support toolPolicy ${legacyPolicy}`, {
+      exitCode: 2,
+      details: { capability: 'toolPolicy', toolPolicy: legacyPolicy },
+    });
+  }
+  // For old providers, keep toolPolicy for workspace handling; for opencode, capability.accessProfile drives config
+  const effectiveToolPolicy = capability.accessProfile === 'compose-only' ? 'compose-only' : legacyPolicy;
+
   return {
     provider,
+    capability,
     request: {
       prompt,
       model: input.model || null,
@@ -46,7 +91,14 @@ function normalizeRequest(input) {
       sessionId: input.sessionId || null,
       agentMode: input.agentMode || null,
       agent: input.agent || null,
-      toolPolicy,
+      toolPolicy: effectiveToolPolicy,
+      accessProfile: capability.accessProfile,
+      workspace: capability.workspace,
+      allowedReadRoots: capability.allowedReadRoots,
+      allowedWriteRoots: capability.allowedWriteRoots,
+      protectedPaths: capability.protectedPaths,
+      projectId: capability.projectId,
+      storeRevisions: capability.storeRevisions,
       timeoutMs,
     },
   };
@@ -54,23 +106,35 @@ function normalizeRequest(input) {
 
 export async function generate(input) {
   const startedAt = Date.now();
-  const { provider, request } = normalizeRequest(input);
+  const { provider, request, capability } = normalizeRequest(input);
   const env = input.env || process.env;
   const command = resolveProviderBin(provider, env);
-  const policyWorkspace = request.toolPolicy === 'compose-only'
+  // compose-only uses disposable temp workspace; otherwise use validated workspace
+  const isComposeOnly = request.accessProfile === 'compose-only' || request.toolPolicy === 'compose-only';
+  const policyWorkspace = isComposeOnly && !capability.workspace
     ? mkdtempSync(join(tmpdir(), `webmcp-ai-${provider.id}-compose-`))
     : null;
-  const workspace = policyWorkspace || input.workspace || process.cwd();
+  const workspace = policyWorkspace || capability.workspace || process.cwd();
   // The effective environment is handed to the provider adapter so env-derived
   // settings (e.g. the isolated OpenCode database) resolve from what actually
   // reaches the child process, never from process.env behind the caller.
-  const invocation = provider.buildInvocation({ ...request, workspace, env });
+  const invocation = provider.buildInvocation({
+    ...request, workspace, env, allowedReadRoots: capability.allowedReadRoots, allowedWriteRoots: capability.allowedWriteRoots, protectedPaths: capability.protectedPaths, projectId: capability.projectId, storeRevisions: capability.storeRevisions,
+  });
+
+  // Build child environment from explicit safe allowlist – never pass arbitrary process.env or secrets.
+  // Private OpenCode isolation values (OPENCODE_DB, OPENCODE_CONFIG_CONTENT, OPENCODE_CONFIG, etc.)
+  // are filtered through the same allowlist and take precedence over ambient values so they
+  // cannot be overridden by the caller environment.
+  const safeBase = buildSafeChildEnv(env, {});
+  const privateEnv = buildSafeChildEnv(invocation.env || {}, {});
+  const childEnv = { ...safeBase, ...privateEnv };
 
   try {
     const processResult = await runProcess(command, invocation.args, {
       stdin: invocation.stdin,
       cwd: workspace,
-      env: { ...env, ...(invocation.env || {}) },
+      env: childEnv,
       timeoutMs: request.timeoutMs,
       maxOutputBytes: input.maxOutputBytes,
       signal: input.signal,
@@ -81,6 +145,15 @@ export async function generate(input) {
         retryable: true,
       });
     }
+    const digests = computeCapabilityDigests({
+      workspace: workspace || capability.workspace,
+      allowedReadRoots: capability.allowedReadRoots,
+      allowedWriteRoots: capability.allowedWriteRoots,
+      protectedPaths: capability.protectedPaths,
+      projectId: capability.projectId,
+      storeRevisions: capability.storeRevisions,
+      accessProfile: capability.accessProfile,
+    });
     return {
       ok: true,
       provider: { id: provider.id, name: provider.name },
@@ -88,6 +161,7 @@ export async function generate(input) {
       response: { text: parsed.text, structured: parsed.structured },
       session: { id: parsed.sessionId, resumable: Boolean(parsed.sessionId) },
       timing: { elapsedMs: Date.now() - startedAt },
+      capability: digests,
     };
   } finally {
     invocation.cleanup?.();
@@ -115,7 +189,8 @@ export async function probeProviders({ env = process.env } = {}) {
       return { ...metadata, command, available: false, version: null };
     }
     try {
-      const result = await runProcess(command, ['--version'], { env, timeoutMs: 5_000, maxOutputBytes: 64 * 1024 });
+      const safeEnv = buildSafeChildEnv(env, {});
+      const result = await runProcess(command, ['--version'], { env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 64 * 1024 });
       return { ...metadata, command, available: true, version: result.stdout.trim() || result.stderr.trim() || null };
     } catch (error) {
       if (error.code === 'CLI_NOT_INSTALLED') return { ...metadata, command, available: false, version: null };
@@ -132,9 +207,11 @@ export async function listModels(providerId, { env = process.env } = {}) {
     });
   }
   const command = resolveProviderBin(provider, env);
+  const invocationEnv = provider.invocationEnv?.(env) ?? {};
+  const safeEnv = buildSafeChildEnv(env, invocationEnv);
   const result = await runProcess(command, provider.modelsInvocation.args, {
     stdin: provider.modelsInvocation.stdin,
-    env: { ...env, ...(provider.invocationEnv?.(env) ?? {}) },
+    env: safeEnv,
     timeoutMs: 10_000,
     maxOutputBytes: 1024 * 1024,
   });
@@ -149,9 +226,11 @@ export async function listAgents(providerId, { env = process.env } = {}) {
     });
   }
   const command = resolveProviderBin(provider, env);
+  const invocationEnv = provider.invocationEnv?.(env) ?? {};
+  const safeEnv = buildSafeChildEnv(env, invocationEnv);
   const result = await runProcess(command, provider.agentsInvocation.args, {
     stdin: provider.agentsInvocation.stdin,
-    env: { ...env, ...(provider.invocationEnv?.(env) ?? {}) },
+    env: safeEnv,
     timeoutMs: 10_000,
     maxOutputBytes: 1024 * 1024,
   });
