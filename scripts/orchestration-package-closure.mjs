@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const defaultRoot = fileURLToPath(new URL('..', import.meta.url));
-export const OWNER_BASE_COMMIT = '47bfccee8f5d6b1c944908cfb9903d87a4b6014b';
+export const OWNER_BASE_COMMIT = '29eed4d18f7797dfd24bf9e6aa2ce1f314d57f0e';
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));

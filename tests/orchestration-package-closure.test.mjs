@@ -12,7 +12,7 @@ import {
   runPackageClosure,
 } from '../scripts/orchestration-package-closure.mjs';
 
-const OWNER_BASE = '47bfccee8f5d6b1c944908cfb9903d87a4b6014b';
+const OWNER_BASE = '29eed4d18f7797dfd24bf9e6aa2ce1f314d57f0e';
 
 function tempRoot(t, name) {
   const dir = mkdtempSync(join(tmpdir(), `webmcp-ai-r7-${name}-`));
@@ -132,7 +132,7 @@ test('R7: installed artifact closes the package: install, imports, CLI and publi
 test('R8D: range gate applies only when the owner base exists locally', () => {
   const repoRoot = new URL('..', import.meta.url).pathname;
   // A historical commit that IS present in a full checkout.
-  assert.equal(rangeCheckApplies(repoRoot, '47bfccee8f5d6b1c944908cfb9903d87a4b6014b'), true);
+  assert.equal(rangeCheckApplies(repoRoot, '29eed4d18f7797dfd24bf9e6aa2ce1f314d57f0e'), true);
   // An arbitrary absent SHA must not break the permanent lifecycle.
   assert.equal(rangeCheckApplies(repoRoot, '0'.repeat(40)), false);
 });
