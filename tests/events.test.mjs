@@ -142,3 +142,144 @@ test('CLI --events emits marker JSONL on stderr and keeps stdout JSON', () => {
     rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test('classifier reads part.data.text and tolerates empty text parts', () => {
+  const nested = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'text', data: { text: 'nested hello' } },
+  }));
+  assert.deepEqual(nested, { state: 'researching', summary: 'nested hello' });
+  const direct = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'text', text: 'direct hello' },
+  }));
+  assert.deepEqual(direct, { state: 'researching', summary: 'direct hello' });
+  // Object part with no text or data.text falls back to an empty advisory summary.
+  const emptyPart = classifyProviderLine('opencode', JSON.stringify({ type: 'text', part: { type: 'text' } }));
+  assert.deepEqual(emptyPart, { state: 'researching', summary: '' });
+  const bareType = classifyProviderLine('opencode', JSON.stringify({ type: 'text' }));
+  assert.deepEqual(bareType, { state: 'researching', summary: '' });
+  const nonObjectPart = classifyProviderLine('opencode', JSON.stringify({ type: 'reasoning', part: 'oops' }));
+  assert.equal(nonObjectPart.state, 'researching');
+});
+
+test('classifier handles missing tool identity without crashing', () => {
+  const missing = classifyProviderLine('opencode', JSON.stringify({ type: 'my-tool-event', part: { type: 'tool' } }));
+  assert.equal(missing.state, 'editing');
+  assert.match(missing.summary, /tool:/);
+  // Whitespace-only tool falls through to the next identity key.
+  const fallback = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'tool', tool: '   ', name: 'picked-name' },
+  }));
+  assert.equal(fallback.state, 'editing');
+  assert.match(fallback.summary, /picked-name/);
+  const byCommand = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'tool', command: 'run-lint' },
+  }));
+  assert.equal(byCommand.state, 'editing');
+  assert.match(byCommand.summary, /run-lint/);
+  const byTitle = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'tool', title: 'Apply patch' },
+  }));
+  assert.equal(byTitle.state, 'editing');
+  // Tool event that only matches via the stringified payload still maps to testing.
+  const viaPayload = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'tool', tool: 'bash' }, note: 'run npm test now',
+  }));
+  assert.equal(viaPayload.state, 'testing');
+});
+
+test('classifier covers permission asked identity and replied resumption', () => {
+  const viaPermission = classifyProviderLine('opencode', JSON.stringify({
+    type: 'permission.asked', permission: { tool: 'edit' }, part: { type: 'tool', tool: 'fallback' },
+  }));
+  assert.deepEqual(viaPermission, { state: 'question', summary: 'permission asked: edit' });
+  const viaPart = classifyProviderLine('opencode', JSON.stringify({
+    type: 'permission.v2.asked', part: { type: 'tool', tool: 'write' },
+  }));
+  assert.equal(viaPart.state, 'question');
+  assert.match(viaPart.summary, /write/);
+  assert.deepEqual(
+    classifyProviderLine('opencode', JSON.stringify({ type: 'permission.replied' })),
+    { state: 'researching', summary: 'permission replied, resuming' },
+  );
+  assert.deepEqual(
+    classifyProviderLine('opencode', JSON.stringify({ type: 'permission.v2.replied' })),
+    { state: 'researching', summary: 'permission replied, resuming' },
+  );
+});
+
+test('classifier covers unknown JSON objects and session prefix edge', () => {
+  assert.deepEqual(classifyProviderLine('opencode', '{}'), { state: 'working', summary: '{}' });
+  const unknown = classifyProviderLine('opencode', JSON.stringify({ foo: 'bar' }));
+  assert.equal(unknown.state, 'working');
+  assert.match(unknown.summary, /bar/);
+  // sessionID with a message.* type must not take the session-created fast path.
+  const messageWithSession = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', sessionID: 'ses_2', part: { type: 'text', text: 'hi' },
+  }));
+  assert.deepEqual(messageWithSession, { state: 'researching', summary: 'hi' });
+  assert.deepEqual(
+    classifyProviderLine('opencode', JSON.stringify({ type: 'session.created' })),
+    { state: 'researching', summary: 'session.created' },
+  );
+  assert.equal(classifyProviderLine('opencode', JSON.stringify({ type: 'session.idle' })).state, 'researching');
+  assert.equal(classifyProviderLine('opencode', JSON.stringify({ type: 'file.edited' })).state, 'editing');
+  assert.deepEqual(
+    classifyProviderLine('opencode', JSON.stringify({ type: 'session.diff' })),
+    { state: 'editing', summary: 'session.diff' },
+  );
+  assert.deepEqual(
+    classifyProviderLine('opencode', JSON.stringify({ type: 'session.error' })),
+    { state: 'blocked', summary: 'session.error' },
+  );
+  const reasoning = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'reasoning', text: 'thinking' },
+  }));
+  assert.deepEqual(reasoning, { state: 'researching', summary: 'thinking' });
+});
+
+test('event summaries stay bounded for long JSON payloads', () => {
+  const longText = `x${'y'.repeat(500)}`;
+  const textEvent = classifyProviderLine('opencode', JSON.stringify({ type: 'text', part: { type: 'text', text: longText } }));
+  assert.ok(textEvent.summary.length <= 201);
+  const toolEvent = classifyProviderLine('opencode', JSON.stringify({
+    type: 'message.part.updated', part: { type: 'tool', tool: `edit-${'z'.repeat(500)}` },
+  }));
+  assert.ok(toolEvent.summary.length <= 201);
+  const unknownLong = classifyProviderLine('opencode', JSON.stringify({ note: longText }));
+  assert.ok(unknownLong.summary.length <= 201);
+});
+
+test('splitter and classifier tolerate nullish input', () => {
+  const lines = [];
+  const splitter = createLineSplitter((line) => lines.push(line));
+  splitter.push(null);
+  splitter.push(undefined);
+  splitter.push('');
+  splitter.flush();
+  assert.deepEqual(lines, []);
+  assert.equal(classifyProviderLine('agy', null), null);
+  assert.equal(classifyProviderLine('agy', undefined), null);
+  assert.equal(classifyProviderLine('opencode', '{not-json').state, 'working');
+});
+
+test('generate tolerates a throwing onEvent observer', async () => {
+  const ws = mkdtempSync(join(tmpdir(), 'events-throw-'));
+  try {
+    let calls = 0;
+    const result = await generate({
+      provider: 'opencode',
+      prompt: 'observer check',
+      workspace: ws,
+      accessProfile: 'full',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      onEvent: () => {
+        calls += 1;
+        throw new Error('observer blew up');
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.ok(calls >= 1);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});

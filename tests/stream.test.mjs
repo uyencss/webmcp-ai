@@ -91,3 +91,56 @@ test('CLI without --stream keeps provider output out of stderr', () => {
     rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test('CLI --stream --events keeps one JSON envelope on stdout and telemetry only on stderr', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'stream-events-combined-'));
+  try {
+    const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'combined check', '--workspace', ws, '--full', '--stream', '--events', '--json'], {
+      encoding: 'utf8',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    // Stdout keeps exactly one machine-readable JSON envelope.
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.response.text, 'reply:opencode:combined check');
+    assert.equal(result.stdout.includes('webmcp-ai-event'), false);
+    // Stderr carries both the raw provider stream and marker event JSONL.
+    assert.match(result.stderr, /reply:opencode:combined check/);
+    const eventLines = result.stderr.split('\n').filter((line) => line.includes('webmcp-ai-event'));
+    assert.ok(eventLines.length >= 2);
+    // Raw --stream bytes share the diagnostics channel without framing, so a
+    // raw chunk can prefix an event line; parse from the marker object.
+    const parsed = eventLines.map((line) => JSON.parse(line.slice(line.indexOf('{"event"'))));
+    assert.equal(parsed[0].state, 'queued');
+    assert.equal(parsed.at(-1).state, 'completed');
+    assert.ok(parsed.every((e) => e.event === 'webmcp-ai-event' && typeof e.seq === 'number' && typeof e.state === 'string'));
+    // Advisory lanes never leak the final envelope shape onto stderr.
+    assert.equal(result.stderr.includes('"response"'), false);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('generate supports combined onStream and onEvent observers', async () => {
+  const ws = mkdtempSync(join(tmpdir(), 'stream-events-gen-'));
+  try {
+    const streamed = [];
+    const events = [];
+    const result = await generate({
+      provider: 'opencode',
+      prompt: 'combined observers',
+      workspace: ws,
+      accessProfile: 'full',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      onStream: ({ stream, chunk }) => streamed.push([stream, String(chunk)]),
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.ok, true);
+    assert.ok(streamed.some(([, text]) => text.includes('reply:opencode:combined observers')));
+    assert.equal(events[0].state, 'queued');
+    assert.equal(events.at(-1).state, 'completed');
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});

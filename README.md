@@ -99,8 +99,7 @@ inside its existing read-only ephemeral sandbox there; AGY receives a
 workspace-local deny-all `PreToolUse` hook. The default
 `provider-default` policy preserves existing behavior.
 
-For full folder + tool access like the native CLI (edits, shell, MCP, web as
-the operator configured), pass `--full` (or `accessProfile: "full"`):
+For full folder + tool access, pass `--full` (or `accessProfile: "full"`):
 
 ```bash
 webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /abs/ws --full --json
@@ -108,7 +107,15 @@ webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /ab
 
 `--full` needs no `--allowed-write-root`/`--protected-path`. Never combine it
 with `--tool-policy compose-only`. Without `--full`, all profiles stay
-fail-closed. Ambient environment passes through under `--full` except the
+fail-closed. What `--full` grants is provider-specific: OpenCode v1 is the
+only provider that keeps ambient operator config/tools/MCP (with the session
+database isolated to `opencode-cli.db` via `OPENCODE_DB`); Codex uses the
+`workspace-write` sandbox instead of `read-only` but keeps `--ephemeral
+--ignore-user-config --ignore-rules`, so it does not inherit ambient user
+config/MCP; Claude drops the `--tools '' --safe-mode` text-only deny; AGY
+drops the forced `--sandbox`. The receipt reports
+`capability.accessProfile: "full"` with `fullPassthrough: true`. Ambient
+environment passes through under `--full` except the
 authority boundary (the whole `WEBMCP_*` namespace plus
 `OPENCODE_SERVER_PASSWORD`, `VAULT_TOKEN`, `VAULT_ADDR`); raise long-output
 caps with `--max-output-bytes <n>` (128MB default with `--full`). Add

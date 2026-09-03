@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+
+import { runCli } from '../src/cli.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
@@ -180,4 +182,167 @@ test('human-readable command output remains composable', () => {
   });
   assert.equal(generate.status, 0, generate.stderr);
   assert.equal(generate.stdout, 'reply:agy:human-output\n');
+});
+
+test('CLI --stream string flag forms map through isTrueFlag', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'cli-stream-flag-'));
+  try {
+    const base = ['generate', '--provider', 'opencode', '--prompt', 'flag form', '--workspace', ws, '--full', '--json'];
+    const enabled = run([...base, '--stream=true'], { env: { FAKE_PROVIDER: 'opencode' } });
+    assert.equal(enabled.status, 0, enabled.stderr);
+    assert.match(enabled.stderr, /reply:opencode:flag form/);
+    const enabledOne = run([...base, '--stream=1'], { env: { FAKE_PROVIDER: 'opencode' } });
+    assert.equal(enabledOne.status, 0, enabledOne.stderr);
+    assert.match(enabledOne.stderr, /reply:opencode:flag form/);
+    const enabledYes = run([...base, '--stream=yes'], { env: { FAKE_PROVIDER: 'opencode' } });
+    assert.equal(enabledYes.status, 0, enabledYes.stderr);
+    assert.match(enabledYes.stderr, /reply:opencode:flag form/);
+    const disabled = run([...base, '--stream=false'], { env: { FAKE_PROVIDER: 'opencode' } });
+    assert.equal(disabled.status, 0, disabled.stderr);
+    assert.equal(disabled.stderr.includes('reply:opencode:flag form'), false);
+    const disabledZero = run([...base, '--stream=0'], { env: { FAKE_PROVIDER: 'opencode' } });
+    assert.equal(disabledZero.status, 0, disabledZero.stderr);
+    assert.equal(disabledZero.stderr.includes('reply:opencode:flag form'), false);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI --events string flag forms map through isTrueFlag', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'cli-events-flag-'));
+  try {
+    const base = ['generate', '--provider', 'opencode', '--prompt', 'event flag', '--workspace', ws, '--full', '--json'];
+    const enabled = run([...base, '--events=true'], { env: { FAKE_PROVIDER: 'opencode' } });
+    assert.equal(enabled.status, 0, enabled.stderr);
+    assert.match(enabled.stderr, /webmcp-ai-event/);
+    const disabled = run([...base, '--events=false'], { env: { FAKE_PROVIDER: 'opencode' } });
+    assert.equal(disabled.status, 0, disabled.stderr);
+    assert.equal(disabled.stderr.includes('webmcp-ai-event'), false);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI --input-json file path and --prompt-file behave like stdin', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'cli-file-input-'));
+  try {
+    const inputPath = join(ws, 'input.json');
+    writeFileSync(inputPath, JSON.stringify({ provider: 'agy', prompt: 'from-file', model: 'sonnet' }));
+    const fromFile = run(['generate', '--input-json', inputPath, '--json'], { env: { FAKE_PROVIDER: 'agy' } });
+    assert.equal(fromFile.status, 0, fromFile.stderr);
+    assert.equal(JSON.parse(fromFile.stdout).response.text, 'reply:agy:from-file');
+
+    const promptPath = join(ws, 'prompt.md');
+    writeFileSync(promptPath, 'file-prompt-body');
+    const fromPromptFile = run(
+      ['generate', '--provider', 'agy', '--prompt-file', promptPath, '--json'],
+      { env: { FAKE_PROVIDER: 'agy' } },
+    );
+    assert.equal(fromPromptFile.status, 0, fromPromptFile.stderr);
+    assert.equal(JSON.parse(fromPromptFile.stdout).response.text, 'reply:agy:file-prompt-body');
+
+    const schemaPath = join(ws, 'schema.json');
+    writeFileSync(schemaPath, JSON.stringify({ type: 'object' }));
+    const withSchema = run(
+      ['generate', '--provider', 'codex', '--prompt', 'schema check', '--schema', schemaPath, '--json'],
+      { env: { FAKE_PROVIDER: 'codex' } },
+    );
+    assert.equal(withSchema.status, 0, withSchema.stderr);
+    assert.equal(JSON.parse(withSchema.stdout).ok, true);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI --store-revisions parses JSON and rejects non-object fallback', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'cli-store-rev-'));
+  try {
+    const ok = run(
+      ['generate', '--provider', 'opencode', '--prompt', 'rev check', '--workspace', ws, '--full', '--store-revisions', '{"automation":"sha256:aaa"}', '--json'],
+      { env: { FAKE_PROVIDER: 'opencode' } },
+    );
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(JSON.parse(ok.stdout).ok, true);
+
+    const fromJson = run(['generate', '--input-json', '-', '--json'], {
+      input: JSON.stringify({
+        provider: 'opencode', prompt: 'rev json', workspace: ws, accessProfile: 'full', storeRevisions: { automation: 'sha256:aaa' },
+      }),
+      env: { FAKE_PROVIDER: 'opencode' },
+    });
+    assert.equal(fromJson.status, 0, fromJson.stderr);
+    assert.equal(JSON.parse(fromJson.stdout).ok, true);
+
+    const bad = run(
+      ['generate', '--provider', 'opencode', '--prompt', 'rev bad', '--workspace', ws, '--full', '--store-revisions', 'not-json{', '--json'],
+      { env: { FAKE_PROVIDER: 'opencode' } },
+    );
+    assert.equal(bad.status, 2);
+    assert.equal(JSON.parse(bad.stdout).error.code, 'INVALID_INPUT');
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI tools describe without --json and custom command name cover print paths', () => {
+  const plain = run(['tools', 'describe']);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(JSON.parse(plain.stdout).ok, true);
+
+  const custom = run(['--help'], { env: { WEBMCP_AI_COMMAND_NAME: 'custom-ai' } });
+  assert.equal(custom.status, 0, custom.stderr);
+  assert.match(custom.stdout, /custom-ai doctor/);
+});
+
+test('CLI repeatable roots accept values and tolerate a bare flag', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'cli-repeatable-'));
+  try {
+    const withRoots = run(
+      ['generate', '--provider', 'opencode', '--prompt', 'roots check', '--workspace', ws, '--full', '--allowed-read-root', ws, '--allowed-write-root', ws, '--protected-path', join(ws, 'secret.txt'), '--json'],
+      { env: { FAKE_PROVIDER: 'opencode' } },
+    );
+    assert.equal(withRoots.status, 0, withRoots.stderr);
+    assert.equal(JSON.parse(withRoots.stdout).ok, true);
+
+    const bare = run(
+      ['generate', '--provider', 'opencode', '--prompt', 'bare flag', '--workspace', ws, '--full', '--allowed-read-root', '--json'],
+      { env: { FAKE_PROVIDER: 'opencode' } },
+    );
+    assert.equal(bare.status, 0, bare.stderr);
+    assert.equal(JSON.parse(bare.stdout).ok, true);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI clogged stderr does not fail --stream and --events', async () => {
+  const ws = mkdtempSync(join(tmpdir(), 'cli-clogged-'));
+  const env = {
+    ...process.env,
+    AGY_BIN: fakeBin,
+    CLAUDE_BIN: fakeBin,
+    CODEX_BIN: fakeBin,
+    OPENCODE_BIN: fakeBin,
+    FAKE_PROVIDER: 'opencode',
+  };
+  const originalStderrWrite = process.stderr.write.bind(process.stderr);
+  let throwsRemaining = 2;
+  process.stderr.write = () => {
+    if (throwsRemaining > 0) {
+      throwsRemaining -= 1;
+      throw new Error('clogged diagnostics channel');
+    }
+    return true;
+  };
+  try {
+    const code = await runCli(
+      ['generate', '--provider', 'opencode', '--prompt', 'clogged check', '--workspace', ws, '--full', '--stream', '--events', '--json'],
+      env,
+    );
+    assert.equal(code, 0);
+    assert.equal(throwsRemaining, 0);
+  } finally {
+    process.stderr.write = originalStderrWrite;
+    rmSync(ws, { recursive: true, force: true });
+  }
 });

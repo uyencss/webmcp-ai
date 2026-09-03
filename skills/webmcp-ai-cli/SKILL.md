@@ -59,9 +59,13 @@ before dispatch. It defines full handoff vs. supervision, exact executable and
 model discovery, the task packet, bounded monitoring and intervention, worker
 cleanup, and independent verification.
 
-`webmcp-ai` remains the safe discovery and one-shot invocation surface. It
-buffers provider output until process exit and does not expose a live
-supervision/control stream. When supervision needs provider-native events or
+`webmcp-ai` remains the safe discovery and one-shot invocation surface. Without
+`--stream`/`--events`, it buffers provider output until process exit and does
+not expose a live supervision/control stream. With `--stream` (raw provider
+bytes) and `--events` (one advisory JSON object per line), progress appears
+live on stderr while stdout keeps one JSON envelope; both lanes are advisory
+telemetry only, never control/approval/cancellation/acceptance signals.
+When supervision needs provider-native events or
 controls, either own the selected installed CLI/server process directly and
 use only its documented interface, or create a Coordination in the runtime.
 Do not silently switch executable, provider, model, or session after failure.
@@ -100,8 +104,7 @@ does not install it or change machine-level permissions.
 
 ## Full access (opt-in passthrough)
 
-When the task needs the provider to run with full folder + tool access like its
-native CLI — edits, shell, MCP, and web access as the operator configured —
+When the task needs the provider to run with full folder + tool access,
 pass `--full` (or `accessProfile: "full"` in JSON / `tool-call` input):
 
 ```bash
@@ -114,10 +117,13 @@ webmcp-ai generate \
 ```
 
 `--full` is the only extra input required besides provider/prompt/workspace. No
-`--allowed-write-root` or `--protected-path` is needed. What it does per
-provider: opencode keeps the ambient operator config, tools, and MCP surface
-(only the session database stays isolated); Codex uses the `workspace-write`
-sandbox instead of `read-only`; Claude drops the `--tools '' --safe-mode`
+`--allowed-write-root` or `--protected-path` is needed. What it does is
+provider-specific: OpenCode v1 is the only provider that keeps the ambient
+operator config, tools, and MCP surface (only the session database stays
+isolated to `opencode-cli.db` via `OPENCODE_DB`); Codex uses the
+`workspace-write` sandbox instead of `read-only` but keeps `--ephemeral
+--ignore-user-config --ignore-rules`, so it does not inherit ambient user
+config/MCP; Claude drops the `--tools '' --safe-mode`
 text-only deny; AGY drops the forced `--sandbox`. The receipt reports
 `capability.accessProfile: "full"` with `fullPassthrough: true`.
 
@@ -142,8 +148,9 @@ Structured progress: add `--events` for one advisory JSON object per line on
 stderr (`{"event":"webmcp-ai-event","seq":N,"state":"researching|editing|\
 testing|verifying|working|question|...","summary":"...","provider":"..."}`),
 starting with `queued` and ending with `completed|failed|blocked|cancelled`.
-States are telemetry only — observe them, never gate, approve, or kill on
-them; completion is decided by the final envelope plus independent
+States are advisory telemetry only — observe them, never use them for control,
+approval, cancellation, or acceptance (never gate, approve, or kill on
+them); completion is decided by the final envelope plus independent
 verification. `--stream` and `--events` combine freely.
 
 ## Choose the response interface
