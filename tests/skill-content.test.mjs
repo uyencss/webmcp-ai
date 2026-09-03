@@ -32,6 +32,13 @@ test('skill documents the full-access opt-in flag', () => {
   assert.match(content, /never combine `--full` with `--tool-policy compose-only`/i);
 });
 
+test('skill documents the advisory events feed', () => {
+  const content = readFileSync(skill, 'utf8');
+  assert.match(content, /--events/);
+  assert.match(content, /webmcp-ai-event/);
+  assert.match(content, /telemetry only/i);
+});
+
 test('skill routes CLI-agent orchestration through a packaged reference', () => {
   const content = readFileSync(skill, 'utf8');
 

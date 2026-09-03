@@ -10,6 +10,11 @@ import {
   computeCapabilityDigests,
   validateCapabilityRequest,
 } from './capabilities.mjs';
+import {
+  classifyProviderLine,
+  createLineSplitter,
+  terminalStateForError,
+} from './events.mjs';
 import { AiCliError } from './errors.mjs';
 import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
@@ -161,10 +166,35 @@ export async function generate(input) {
   // forwards provider bytes as they arrive. Not part of the JSON protocol
   // (functions cannot cross it); CLI exposes the same via --stream.
   const onStream = typeof input.onStream === 'function' ? input.onStream : null;
-  const streamForward = (stream) => onStream
-    ? (chunk) => onStream({ stream, chunk })
-    : null;
+  // Library-only advisory events: input.onEvent({ seq, stream, state, summary,
+  // provider }). Telemetry only — never control. CLI exposes via --events.
+  const onEvent = typeof input.onEvent === 'function' ? input.onEvent : null;
+  let eventSeq = 0;
+  const emitEvent = (stream, state, summary) => {
+    if (!onEvent) return;
+    eventSeq += 1;
+    try {
+      onEvent({ seq: eventSeq, stream, state, summary: summary ?? '', provider: provider.id });
+    } catch {
+      // Observer errors are swallowed by design, like onStream above.
+    }
+  };
+  const splitters = onEvent ? {
+    stdout: createLineSplitter((line) => {
+      const classified = classifyProviderLine(provider.id, line);
+      if (classified) emitEvent('stdout', classified.state, classified.summary);
+    }),
+    stderr: createLineSplitter((line) => {
+      const classified = classifyProviderLine(provider.id, line);
+      if (classified) emitEvent('stderr', classified.state, classified.summary);
+    }),
+  } : null;
+  const streamForward = (stream) => (chunk) => {
+    splitters?.[stream]?.push(chunk);
+    if (onStream) onStream({ stream, chunk });
+  };
 
+  emitEvent('stdout', 'queued', `${provider.id}${request.model ? ` model ${request.model}` : ''} workspace ${workspace}`);
   try {
     const processResult = await runProcess(command, invocation.args, {
       stdin: invocation.stdin,
@@ -176,6 +206,8 @@ export async function generate(input) {
       onStdout: streamForward('stdout'),
       onStderr: streamForward('stderr'),
     });
+    splitters?.stdout.flush();
+    splitters?.stderr.flush();
     const parsed = provider.parseOutput({ ...processResult, invocation, request });
     if (!parsed.text) {
       throw new AiCliError('EMPTY_RESPONSE', `${provider.name} returned an empty response`, {
@@ -191,6 +223,7 @@ export async function generate(input) {
       storeRevisions: capability.storeRevisions,
       accessProfile: capability.accessProfile,
     });
+    emitEvent('stdout', 'completed', `exit 0 in ${Date.now() - startedAt}ms`);
     return {
       ok: true,
       provider: { id: provider.id, name: provider.name },
@@ -200,6 +233,11 @@ export async function generate(input) {
       timing: { elapsedMs: Date.now() - startedAt },
       capability: digests,
     };
+  } catch (error) {
+    splitters?.stdout.flush();
+    splitters?.stderr.flush();
+    emitEvent('stdout', terminalStateForError(error), error?.code || error?.message || 'failed');
+    throw error;
   } finally {
     invocation.cleanup?.();
     if (policyWorkspace) rmSync(policyWorkspace, { recursive: true, force: true });

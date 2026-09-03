@@ -109,9 +109,14 @@ webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /ab
 `--full` needs no `--allowed-write-root`/`--protected-path`. Never combine it
 with `--tool-policy compose-only`. Without `--full`, all profiles stay
 fail-closed. Ambient environment passes through under `--full` except the
-WebMCP authority denylist; raise long-output caps with
-`--max-output-bytes <n>` (128MB default with `--full`). Add `--stream` to
-watch provider output live on stderr while stdout keeps one JSON envelope.
+authority boundary (the whole `WEBMCP_*` namespace plus
+`OPENCODE_SERVER_PASSWORD`, `VAULT_TOKEN`, `VAULT_ADDR`); raise long-output
+caps with `--max-output-bytes <n>` (128MB default with `--full`). Add
+`--stream` to watch provider output live on stderr while stdout keeps one
+JSON envelope.
+Add `--events` for one advisory progress JSON per line on stderr
+(`queued → researching|editing|testing|verifying|working → completed`;
+telemetry only, never a control signal).
 
 ## Tool protocol
 

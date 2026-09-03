@@ -127,14 +127,24 @@ the "no unsafe permissions" rule below is satisfied by the flag itself, not
 bypassed. Without `--full`, every profile stays fail-closed as before.
 
 Environment and output: `--full` passes the ambient environment through like
-the native CLI (provider API keys included) except the WebMCP authority
-denylist (Runner signing/private keys, gateway token, vault keys), which never
-reaches the child. Long generations can raise the output cap with
-`--max-output-bytes <n>` (default 32MB, 128MB with `--full`).
+the native CLI (provider API keys included) except the authority boundary,
+which never reaches the child: the entire `WEBMCP_*` namespace (signing,
+permit, gateway, runner, vault, worker/callback/orchestration selectors)
+plus `OPENCODE_SERVER_PASSWORD`, `VAULT_TOKEN`, and `VAULT_ADDR`.
+Long generations can raise the output cap with `--max-output-bytes <n>`
+(default 32MB, 128MB with `--full`).
 
 Live progress: add `--stream` to forward provider stdout/stderr bytes to
 `webmcp-ai`'s stderr as they arrive (stdout keeps exactly one JSON envelope).
 Without `--stream`, output arrives only once at process exit.
+
+Structured progress: add `--events` for one advisory JSON object per line on
+stderr (`{"event":"webmcp-ai-event","seq":N,"state":"researching|editing|\
+testing|verifying|working|question|...","summary":"...","provider":"..."}`),
+starting with `queued` and ending with `completed|failed|blocked|cancelled`.
+States are telemetry only — observe them, never gate, approve, or kill on
+them; completion is decided by the final envelope plus independent
+verification. `--stream` and `--events` combine freely.
 
 ## Choose the response interface
 

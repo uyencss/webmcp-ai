@@ -54,6 +54,7 @@ Generate options:
   --timeout-ms <ms>       Process timeout (default: 600000)
   --max-output-bytes <n>  Provider output cap in bytes (default: 32MB, 128MB with --full)
   --stream                Forward provider stdout/stderr live to our stderr; stdout keeps one JSON envelope
+  --events                Emit one advisory progress JSON per line to our stderr (see skill for states)
   --json                  Emit stable JSON on stdout
 
 Environment:
@@ -173,6 +174,7 @@ function generateInput(options) {
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
     maxOutputBytes: options['max-output-bytes'] ? Number(options['max-output-bytes']) : fromJson.maxOutputBytes,
     stream: options.stream ?? fromJson.stream,
+    events: options.events ?? fromJson.events,
     workspace: options.workspace ?? fromJson.workspace,
     allowedReadRoots,
     allowedWriteRoots,
@@ -256,7 +258,19 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         // A clogged diagnostics channel must not fail the generation.
       }
     } : undefined;
-    const result = await generate({ ...genInput, env, ...(onStream ? { onStream } : {}) });
+    // --events: one advisory JSON object per line on stderr; stdout keeps one envelope.
+    const onEvent = isTrueFlag(genInput.events) ? (event) => {
+      try {
+        process.stderr.write(`${JSON.stringify({ event: 'webmcp-ai-event', ...event })}\n`);
+      } catch {
+        // Same clogged-channel rule as onStream above.
+      }
+    } : undefined;
+    const result = await generate({
+      ...genInput, env,
+      ...(onStream ? { onStream } : {}),
+      ...(onEvent ? { onEvent } : {}),
+    });
     printValue(result, json, (value) => value.response.text);
     return 0;
   }
