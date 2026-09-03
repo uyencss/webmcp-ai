@@ -75,6 +75,7 @@ import {
   normalizeSettlementReceipt,
 } from './settlement.mjs';
 import { releaseRecoveredRuntimeDatabase } from './adapters/opencode-server.mjs';
+import { assertManagedDispatchEntry } from './managed-host/two-pass.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
 
@@ -466,6 +467,7 @@ export async function createSupervisor(options = {}) {
     verifyDispatch = null,
     trustedCoordinatorConfig: trustedConfig = null,
     identityDepsFactory = null,
+    trustedEntryEvidence: trustedEntryEvidenceOpt = null,
   } = options;
   // Injectable platform identity probes (test seam): production always uses
   // the real per-platform probes. Every signalling decision flows through
@@ -2592,6 +2594,7 @@ export async function createSupervisor(options = {}) {
       if (lineageCorrupted) {
         throw new AiCliError('POLICY_DENIED', 'lineage state is corrupted or unverified; admission refused');
       }
+      assertManagedDispatchEntry({ input, packet, rolePolicy: supervisorRolePolicy, trustedEntryEvidence: trustedEntryEvidenceOpt ?? trustedConfig?.trustedEntryEvidence ?? null });
 
       const requestedSelection = input.selection ?? {};
       const normalizedSelection = {
