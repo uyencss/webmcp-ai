@@ -96,23 +96,34 @@ Một số orchestrator (đặc biệt lane `scheduled`) chỉ capture stdout. T
 webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /abs/ws --full --stream --stream-to stdout --json
 ```
 
+- Raw provider bytes: đóng vai trò advisory live output, stream trực tiếp khi chunk tới.
 - Target stdout + `--json`: envelope cuối in **compact 1 dòng**, ép xuống dòng
-  riêng (kể cả khi provider bytes không kết thúc bằng newline) — orchestrator
-  parse dòng cuối có field `ok` là ra kết quả, các dòng trước là live feed.
-- Text mode + stdout target: bytes live + text cuối có thể trùng lặp (ghi rõ,
-  không đổi behaviour cũ).
-- `tool-call` không có `streamTo` (fail-closed như `--stream`: function/CLI-only).
+  riêng (`\n${JSON.stringify(result)}\n`, kể cả khi provider bytes không kết thúc
+  bằng newline) — orchestrator parse dòng cuối có field `ok` là ra kết quả, các
+  dòng trước là advisory live feed.
+- Target stdout + text mode: raw provider bytes hiển thị live trên stdout; final
+  response text được phân tách bằng leading newline (`\n${result.response.text}\n`)
+  để đảm bảo không bao giờ bị ghép dính chuỗi (concatenate) với provider bytes.
+  Không có claim trùng lặp; default stderr target (`--stream-to stderr`) giữ
+  nguyên hành vi tách biệt (live feed trên stderr, final text trên stdout).
+- `tool-call` boundary: giao thức `tool-call` là JSON-over-stdio versioned protocol
+  và fail-closed, không hỗ trợ `--stream`, `--stream-to` hay `streamTo`
+  (chỉ hỗ trợ CLI và library callback qua `onStream`).
 
-## 7. As-built (implement 2026-09-03, đúng plan)
+## 9. As-built mở rộng (implement 2026-09-03, đúng plan)
 
 - `src/process-runner.mjs`: options `onStdout`/`onStderr`, forward trong
   `collect()` trước byte accounting; callback bọc `try/catch`; không callback
   = behaviour cũ byte-for-byte.
 - `src/client.mjs`: `generate()` đọc `input.onStream({ stream, chunk })`
   (library-only, không qua JSON protocol — `tool-call` vẫn reject field lạ).
-- `src/cli.mjs`: flag `--stream` + help; `generate` branch ghi raw bytes ra
-  `process.stderr`, stdout giữ đúng 1 JSON envelope.
-- `tests/stream.test.mjs` (mới, 5 tests): forward đủ/đúng từng stream (xuyên
+- `src/cli.mjs`: flag `--stream` và `--stream-to <stderr|stdout>`; default stderr
+  giữ raw bytes ra `process.stderr` và stdout giữ đúng 1 JSON envelope; khi chọn
+  `stdout`, JSON envelope được tách trên dòng riêng cuối cùng, text mode tách bằng
+  leading newline.
+- `tests/stream.test.mjs` (12 tests): forward đủ/đúng từng stream (xuyên
   stream không assert thứ tự — 2 pipe riêng), callback throw không giết run,
-  `generate onStream` thấy bytes, CLI `--stream` tách đúng stdout/stderr.
-- `SKILL.md` + `README.md`: đoạn `--stream` trong mục Full access / generate.
+  `generate onStream` thấy bytes, CLI `--stream` tách đúng stdout/stderr,
+  `--stream-to stdout` cho cả JSON và text mode với newline separation,
+  `--events --stream-to stdout`, và kiểm tra reject invalid target.
+- `SKILL.md` + `README.md`: tài liệu chính xác về `--stream` và `--stream-to stdout`.

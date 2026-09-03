@@ -117,15 +117,20 @@ webmcp-ai generate \
 ```
 
 `--full` is the only extra input required besides provider/prompt/workspace. No
-`--allowed-write-root` or `--protected-path` is needed. What it does is
-provider-specific: OpenCode v1 is the only provider that keeps the ambient
-operator config, tools, and MCP surface (only the session database stays
-isolated to `opencode-cli.db` via `OPENCODE_DB`); Codex uses the
-`workspace-write` sandbox instead of `read-only` but keeps `--ephemeral
---ignore-user-config --ignore-rules`, so it does not inherit ambient user
-config/MCP; Claude drops the `--tools '' --safe-mode`
-text-only deny; AGY drops the forced `--sandbox`. The receipt reports
-`capability.accessProfile: "full"` with `fullPassthrough: true`.
+`--allowed-write-root` or `--protected-path` is needed. `--full` is an explicit
+provider workspace/tool access profile and does not place private keys,
+credentials, bearer tokens, or machine identity into model context, child
+authority env, or portable receipts. What it does is provider-specific (do not
+promise unrestricted ambient access for non-OpenCode providers): OpenCode v1
+is the only provider that keeps the ambient operator config, tools, and MCP
+surface (only the session database stays isolated to `opencode-cli.db` via
+`OPENCODE_DB`); Codex uses the `workspace-write` sandbox instead of
+`read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`, so it
+does not inherit ambient user config/MCP (and explicit resume binds
+`-c sandbox_mode="workspace-write"`, never claiming `danger-full-access`);
+Claude drops the `--tools '' --safe-mode` text-only deny; AGY drops the forced
+`--sandbox`. The receipt reports `capability.accessProfile: "full"` with
+`fullPassthrough: true`.
 
 Rules: never combine `--full` with `--tool-policy compose-only` (rejected as
 `INVALID_INPUT`); `--full` counts as the user's explicit permission grant, so
@@ -140,12 +145,16 @@ plus `OPENCODE_SERVER_PASSWORD`, `VAULT_TOKEN`, and `VAULT_ADDR`.
 Long generations can raise the output cap with `--max-output-bytes <n>`
 (default 32MB, 128MB with `--full`).
 
-Live progress: add `--stream` to forward provider stdout/stderr bytes to
-`webmcp-ai`'s stderr as they arrive (stdout keeps exactly one JSON envelope).
-Without `--stream`, output arrives only once at process exit. Orchestrators
-that only capture stdout add `--stream-to stdout` (also applies to `--events`;
-in `--json` mode the final envelope prints compact on its own last line —
-parse it as the last JSON line carrying an `ok` field).
+Live progress: add `--stream` to forward raw provider stdout/stderr bytes live
+to stderr as advisory output (stdout keeps exactly one JSON envelope or final
+response text). Without `--stream`, output arrives only once at process exit.
+Orchestrators that only capture stdout add `--stream-to stdout` (also applies
+to `--events`): in `--json` mode the final envelope prints compact on its own
+last line (parse the last line carrying an `ok` field); in text mode, the final
+response text is separated by a leading newline so it cannot concatenate with
+raw provider bytes. Default stderr target (`--stream-to stderr`) keeps live
+bytes on stderr and final output on stdout. The protocol `tool-call` command
+is JSON-over-stdio only and does not support `--stream` or `--stream-to`.
 
 Structured progress: add `--events` for one advisory JSON object per line on
 stderr (`{"event":"webmcp-ai-event","seq":N,"state":"researching|editing|\
@@ -208,7 +217,10 @@ serializes all writes.
 ## Safety
 
 - Do not use implicit `--continue` or "last session" behavior.
-- Resume only an explicit session ID owned by the current task.
+- Resume only an explicit session ID owned by the current task. Codex
+  explicit resume binds the sandbox mode via `-c sandbox_mode="read-only|workspace-write"`
+  and omits unsupported resume flags (`--sandbox`, `--color`), never claiming
+  `danger-full-access`.
 - Treat provider streams as telemetry, not as control channels; steer, gate, or
   interrupt only through a documented provider seam.
 - A worker completion claim is not acceptance. Verify the exact write-set,

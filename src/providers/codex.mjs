@@ -33,20 +33,25 @@ export const codexProvider = {
     if (schemaFile) writeFileSync(schemaFile, `${JSON.stringify(request.schema, null, 2)}\n`, { mode: 0o600 });
 
     // Full passthrough (opt-in via --full): explicit workspace-write sandbox.
-    // Omitting --sandbox would fall back to the config default (usually
+    // Omitting the sandbox would fall back to the config default (usually
     // read-only), so full must state workspace-write to get real folder +
     // tool access. danger-full-access is never used.
     // Truthful scope: full still passes --ephemeral --ignore-user-config
     // --ignore-rules, so ambient user config/MCP is NOT inherited — only the
     // workspace-write sandbox (folder + tools) is granted. Only the opencode
     // provider keeps ambient operator config/MCP in full mode.
+    // Resume limitation (codex 0.152.1): `exec resume` rejects --sandbox/-s
+    // and --color, so the resume path expresses the same sandbox via
+    // `-c sandbox_mode="..."` (accepted on both exec and resume) and omits
+    // --color. Bounded resume stays read-only; full resume stays
+    // workspace-write.
     const isFull = request.accessProfile === 'full';
-    const common = [
+    const sandboxMode = isFull ? 'workspace-write' : 'read-only';
+    const shared = [
       '--skip-git-repo-check',
       '--ephemeral',
       '--ignore-user-config',
       '--ignore-rules',
-      '--color', 'never',
       '--output-last-message', outputFile,
       ...(schemaFile ? ['--output-schema', schemaFile] : []),
       ...(request.model ? ['--model', request.model] : []),
@@ -54,10 +59,8 @@ export const codexProvider = {
     ];
 
     const args = request.sessionId
-      ? ['exec', 'resume', ...common, request.sessionId, '-']
-      : isFull
-        ? ['exec', '--sandbox', 'workspace-write', ...common, '-']
-        : ['exec', '--sandbox', 'read-only', ...common, '-'];
+      ? ['exec', 'resume', '-c', `sandbox_mode="${sandboxMode}"`, ...shared, request.sessionId, '-']
+      : ['exec', '--sandbox', sandboxMode, ...shared, '--color', 'never', '-'];
 
     return {
       args,

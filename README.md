@@ -107,22 +107,31 @@ webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /ab
 
 `--full` needs no `--allowed-write-root`/`--protected-path`. Never combine it
 with `--tool-policy compose-only`. Without `--full`, all profiles stay
-fail-closed. What `--full` grants is provider-specific: OpenCode v1 is the
-only provider that keeps ambient operator config/tools/MCP (with the session
-database isolated to `opencode-cli.db` via `OPENCODE_DB`); Codex uses the
-`workspace-write` sandbox instead of `read-only` but keeps `--ephemeral
---ignore-user-config --ignore-rules`, so it does not inherit ambient user
-config/MCP; Claude drops the `--tools '' --safe-mode` text-only deny; AGY
-drops the forced `--sandbox`. The receipt reports
-`capability.accessProfile: "full"` with `fullPassthrough: true`. Ambient
-environment passes through under `--full` except the
-authority boundary (the whole `WEBMCP_*` namespace plus
+fail-closed. `--full` is an explicit provider workspace/tool access profile
+and does not place private keys, credentials, bearer tokens, or machine
+identity into model context, child authority env, or portable receipts.
+What `--full` grants is provider-specific (do not assume unrestricted ambient
+access for non-OpenCode providers): OpenCode v1 is the only provider that keeps
+ambient operator config/tools/MCP (with the session database isolated to
+`opencode-cli.db` via `OPENCODE_DB`); Codex uses the `workspace-write` sandbox
+instead of `read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`,
+so it does not inherit ambient user config/MCP; Claude drops the
+`--tools '' --safe-mode` text-only deny; AGY drops the forced `--sandbox`.
+The receipt reports `capability.accessProfile: "full"` with
+`fullPassthrough: true`. Ambient environment passes through under `--full`
+except the authority boundary (the whole `WEBMCP_*` namespace plus
 `OPENCODE_SERVER_PASSWORD`, `VAULT_TOKEN`, `VAULT_ADDR`); raise long-output
-caps with `--max-output-bytes <n>` (128MB default with `--full`). Add
-`--stream` to watch provider output live on stderr while stdout keeps one
-JSON envelope (`--stream-to stdout` redirects the live feed to stdout for
-capturers that ignore stderr; with `--json` the final envelope is then
-compact on the last line).
+caps with `--max-output-bytes <n>` (128MB default with `--full`).
+
+Add `--stream` to watch raw provider bytes live as advisory output on stderr by
+default while stdout keeps exactly one final JSON envelope (or final response
+text). Orchestrators that only capture stdout can pass `--stream-to stdout`:
+with `--json`, the final envelope is separated onto its own last line so it can
+be parsed by looking for the trailing line with `ok`; in text mode, the final
+response text is separated by a leading newline so it cannot concatenate with
+raw provider bytes. The default stderr target (`--stream-to stderr`) keeps live
+bytes on stderr and final output on stdout. The protocol `tool-call` command
+is JSON-over-stdio only and does not support `--stream` or `--stream-to`.
 Add `--events` for one advisory progress JSON per line on stderr
 (`queued → researching|editing|testing|verifying|working → completed`;
 telemetry only, never a control signal).
@@ -163,6 +172,9 @@ generic exits remain distinct failure classes.
 
 - Claude: tools disabled, safe mode, Chrome disabled, non-persistent sessions.
 - Codex: read-only sandbox, ephemeral session, user config and rules ignored.
+  Explicit resume uses `-c sandbox_mode="read-only"` (or `"workspace-write"`
+  with `--full`) and omits unsupported resume flags (`--sandbox`, `--color`);
+  `danger-full-access` is never used.
 - AGY: sandboxed plan mode; unsafe permission bypass is never enabled.
 - AGY `accept-edits` is opt-in for a supervised agent host; plan remains the
   default.

@@ -94,6 +94,44 @@ test('CLI --stream --stream-to stdout puts live bytes and compact envelope on st
   }
 });
 
+test('CLI text mode --stream --stream-to stdout separates live bytes and final text with a newline', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'stream-text-stdout-'));
+  try {
+    // Fake provider reply has no trailing newline by design
+    // (tests/fixtures/fake-ai-cli.mjs writes `reply:...` verbatim), so
+    // without a deterministic separator the live bytes and the final text
+    // would concatenate on one line.
+    const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'no-newline-text', '--workspace', ws, '--full', '--stream', '--stream-to', 'stdout'], {
+      encoding: 'utf8',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /reply:opencode:no-newline-text/);
+    assert.equal(result.stderr.includes('reply:opencode:no-newline-text'), false);
+    const lines = result.stdout.split('\n').filter(Boolean);
+    assert.ok(lines.length >= 2, `live bytes and final text must not share one line, got: ${JSON.stringify(result.stdout)}`);
+    assert.equal(lines.at(-1), 'reply:opencode:no-newline-text');
+    assert.equal(result.stdout.includes('reply:opencode:no-newline-textreply:opencode:no-newline-text'), false);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI text mode --stream keeps default stderr target with stdout final-only', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'stream-text-stderr-'));
+  try {
+    const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'text stderr target', '--workspace', ws, '--full', '--stream'], {
+      encoding: 'utf8',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), 'reply:opencode:text stderr target');
+    assert.match(result.stderr, /reply:opencode:text stderr target/);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test('CLI --events --stream-to stdout keeps marker JSONL plus final envelope on stdout', () => {
   const ws = mkdtempSync(join(tmpdir(), 'events-stdout-'));
   try {

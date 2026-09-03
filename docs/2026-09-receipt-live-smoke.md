@@ -37,8 +37,12 @@ codex `0.152.1`, claude `2.1.258`, agy `1.1.25`.
   `queued`, last `completed`; states
   `{queued:1, working:48, researching:3, completed:1}`
 - Final stdout line parses as the envelope: `ok:true`, response `STREAM_OK`
-- Raw NDJSON bytes and event lines interleave on stdout as designed; the
-  envelope is forced onto its own last line.
+- Raw NDJSON provider bytes and event lines interleave on stdout as designed
+  as advisory live output; the final JSON envelope is forced onto its own last
+  line. (In text mode with `--stream-to stdout`, the final response text is
+  separated by a leading newline so it cannot concatenate with provider bytes;
+  default stderr target `--stream-to stderr` keeps live bytes on stderr while
+  stdout receives only the final response. `tool-call` protocol rejects streaming flags).
 
 ## 3. claude --full (PASS)
 
@@ -85,3 +89,15 @@ codex `0.152.1`, claude `2.1.258`, agy `1.1.25`.
 Five live calls total (1 write + 1 stream + 3 probes), all minimal prompts.
 No spaced repetition, no retries. Owner stated quota is plentiful; usage was
 still kept to the plan minimum.
+
+## Boundaries and claims
+
+`--full` is an explicit provider workspace/tool access profile and does not place
+private keys, credentials, bearer tokens, or machine identity into model context,
+child authority env, or portable receipts. Provider scope remains distinct: OpenCode
+v1 is the only provider that keeps ambient operator config/tools/MCP (with
+`OPENCODE_DB` isolated to `opencode-cli.db`); Codex `workspace-write` keeps
+`--ephemeral --ignore-user-config --ignore-rules` (and explicit resume binds
+`-c sandbox_mode="workspace-write"`, never claiming `danger-full-access`).
+This receipt is bounded to candidate verification on disposable `/tmp` workspaces
+and makes no E4/E5/E9, Runner, Browser, A2, Z3, or production claims.

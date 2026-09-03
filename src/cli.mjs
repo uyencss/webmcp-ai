@@ -281,11 +281,20 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       ...(onStream ? { onStream } : {}),
       ...(onEvent ? { onEvent } : {}),
     });
+    const liveActive = isTrueFlag(genInput.stream) || isTrueFlag(genInput.events);
     if (streamTarget === 'stdout' && json) {
       // Provider bytes may not end with a newline; force the envelope onto
       // its own last line so orchestrators can parse it as the final line
       // carrying an `ok` field.
       process.stdout.write(`\n${JSON.stringify(result)}\n`);
+      return 0;
+    }
+    if (streamTarget === 'stdout' && !json && liveActive) {
+      // Text mode shares stdout between live provider bytes and the final
+      // text. Provider bytes may not end with a newline, so force the final
+      // text onto its own line with a deterministic leading newline.
+      // Default stderr target is unaffected (live on stderr, final on stdout).
+      process.stdout.write(`\n${result.response.text}\n`);
       return 0;
     }
     printValue(result, json, (value) => value.response.text);

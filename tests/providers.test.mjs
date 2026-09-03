@@ -270,6 +270,41 @@ test('opencode buildInvocation honors an explicit OPENCODE_DB operator override'
   assert.match(defaulted.env.OPENCODE_DB, /^\/state\/data\//);
 });
 
+test('Codex resume requests workspace-write for --full via sandbox_mode and stays read-only otherwise', () => {
+  const fullFresh = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, accessProfile: 'full',
+  });
+  assert.equal(fullFresh.args[fullFresh.args.indexOf('--sandbox') + 1], 'workspace-write');
+  assert.ok(fullFresh.args.includes('--ephemeral'));
+  assert.ok(fullFresh.args.includes('--ignore-user-config'));
+  assert.ok(fullFresh.args.includes('--ignore-rules'));
+  fullFresh.cleanup();
+
+  const fullResume = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, accessProfile: 'full', sessionId: 'session-full-1',
+  });
+  assert.deepEqual(fullResume.args.slice(0, 2), ['exec', 'resume']);
+  // `exec resume` rejects --sandbox/--color, so the same sandbox travels via -c.
+  assert.equal(fullResume.args.includes('--sandbox'), false);
+  assert.equal(fullResume.args.includes('--color'), false);
+  assert.equal(fullResume.args[fullResume.args.indexOf('-c')], '-c');
+  assert.ok(fullResume.args.includes('sandbox_mode="workspace-write"'));
+  assert.ok(fullResume.args.includes('--ephemeral'));
+  assert.ok(fullResume.args.includes('--ignore-user-config'));
+  assert.ok(fullResume.args.includes('--ignore-rules'));
+  assert.equal(fullResume.args.includes('danger-full-access'), false);
+  fullResume.cleanup();
+
+  const boundedResume = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, sessionId: 'session-bounded-1',
+  });
+  assert.deepEqual(boundedResume.args.slice(0, 2), ['exec', 'resume']);
+  assert.equal(boundedResume.args.includes('--sandbox'), false);
+  assert.ok(boundedResume.args.includes('sandbox_mode="read-only"'));
+  assert.ok(boundedResume.args.includes('--ephemeral'));
+  boundedResume.cleanup();
+});
+
 test('Claude and Codex include optional structured-output and resume flags', () => {
   const claude = getProvider('claude').buildInvocation({
     prompt: 'x', timeoutMs: 1000, sessionId: 'session-1', effort: 'high', schema: { type: 'object' },

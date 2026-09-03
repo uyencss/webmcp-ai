@@ -20,7 +20,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -34,11 +34,37 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const THRESHOLDS = Object.freeze({ lines: 80, functions: 80, branches: 80 });
 
-function listTestFiles() {
-  return readdirSync(join(ROOT, 'tests'))
-    .filter((name) => name.endsWith('.test.mjs'))
-    .map((name) => join(ROOT, 'tests', name))
-    .sort();
+export function listTestFiles(rootDir = ROOT) {
+  // Authoritative default-suite discovery (Node fs walk, no shell glob):
+  // recurse tests/ for *.test.mjs, including tests/managed-host/, but
+  // exclude tests/live/** — live canaries need explicit dual opt-in
+  // (WEBMCP_AI_LIVE_CANARY=1 plus a per-adapter flag) and never run by
+  // default. Sorted for determinism; Node 18-compatible (readdir/stat only).
+  const testsRoot = join(rootDir, 'tests');
+  const liveRoot = join(testsRoot, 'live');
+  const out = [];
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries.sort()) {
+      const path = join(dir, name);
+      if (path === liveRoot || path.startsWith(liveRoot + sep)) continue;
+      let stats = null;
+      try {
+        stats = statSync(path);
+      } catch {
+        continue;
+      }
+      if (stats.isDirectory()) walk(path);
+      else if (name.endsWith('.test.mjs')) out.push(path);
+    }
+  };
+  walk(testsRoot);
+  return out.sort();
 }
 
 function collectCoverageFiles(dir, sink = []) {
@@ -61,6 +87,27 @@ function main() {
   if (testFiles.length === 0) {
     console.error('coverage verifier: no test files found');
     process.exit(1);
+  }
+
+  const isTestOnly = process.argv.includes('--test-only');
+  if (isTestOnly) {
+    const rawArgs = process.argv.slice(2).filter((arg) => arg !== '--test-only');
+    const flags = rawArgs.filter((arg) => arg.startsWith('-'));
+    const explicitFiles = rawArgs.filter((arg) => !arg.startsWith('-'));
+    const targets = explicitFiles.length > 0 ? explicitFiles : testFiles;
+    const run = spawnSync(process.execPath, ['--test', ...flags, ...targets], {
+      cwd: ROOT,
+      stdio: 'inherit',
+      env: process.env,
+    });
+    if (run.error) {
+      console.error(`test runner: failed to spawn the test runner: ${run.error.message}`);
+      process.exit(1);
+    }
+    if (run.status !== 0) {
+      process.exit(run.status ?? 1);
+    }
+    return;
   }
 
   const coverageDir = join(tmpdir(), `webmcp-ai-cov-${process.pid}-${Date.now().toString(36)}`);
@@ -142,4 +189,6 @@ function main() {
   console.log('coverage verifier: all thresholds satisfied over the full source universe');
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

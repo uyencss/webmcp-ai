@@ -4,6 +4,17 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Add `--stream-to stdout` routing for advisory live provider output and events,
+  separating the JSON envelope onto its own last line and separating text-mode
+  final output with a leading newline to prevent concatenation with provider
+  bytes, while preserving default stderr streaming and tool-call boundaries.
+- Bind Codex explicit resume to `-c sandbox_mode="read-only|workspace-write"`
+  while omitting unsupported resume flags (`--sandbox`, `--color`), maintaining
+  bounded read-only or full workspace-write sandboxing without claiming
+  `danger-full-access`.
+- Update default test suite and publish lifecycle scripts to discover test files
+  recursively via `scripts/orchestration-coverage.mjs --test-only`, ensuring
+  managed-host tests are included while live canaries remain strictly excluded.
 - Make teardown receipts proof-driven across all four process adapters and
   crash recovery: on POSIX, `group-stopped` now requires `kill(-pgid, 0)` to
   report `ESRCH`, including when the group leader exits before escalation.
