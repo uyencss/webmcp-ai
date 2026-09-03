@@ -58,6 +58,8 @@ export function runProcess(command, args, {
   timeoutMs = 600_000,
   maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
   signal,
+  onStdout = null,
+  onStderr = null,
 } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -98,7 +100,23 @@ export function runProcess(command, args, {
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) onAbort();
 
-    const collect = (target) => (chunk) => {
+    // Live forward: an observer (orchestrator) sees provider bytes as they
+    // arrive instead of waiting for exit. A throwing callback must never
+    // break the run, and buffering/accounting below is unchanged.
+    const forward = (callback) => (chunk) => {
+      if (typeof callback !== 'function') return;
+      try {
+        callback(chunk);
+      } catch {
+        // Observer errors are swallowed by design; completion is decided by
+        // the process result and independent verification, not the observer.
+      }
+    };
+    const forwardStdout = forward(onStdout);
+    const forwardStderr = forward(onStderr);
+
+    const collect = (target, forwardChunk) => (chunk) => {
+      forwardChunk(chunk);
       outputBytes += chunk.length;
       if (outputBytes > maxOutputBytes) {
         exceededOutput = true;
@@ -108,8 +126,8 @@ export function runProcess(command, args, {
       target.push(chunk);
     };
 
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
+    child.stdout.on('data', collect(stdout, forwardStdout));
+    child.stderr.on('data', collect(stderr, forwardStderr));
 
     child.on('error', (error) => {
       const missing = error.code === 'ENOENT';

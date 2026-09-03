@@ -39,6 +39,12 @@ export function describeTools() {
   };
 }
 
+// Intentional protocol boundary: the canonical full selector is
+// `accessProfile: "full"`. A top-level boolean `full` field is NOT part of
+// webmcp-tool-v1 and is rejected as an unknown input field (fail-closed).
+// The CLI offers `--full` / `--input-json { "full": true }` as a CLI-only
+// ergonomic alias that maps to `accessProfile: "full"` (see src/cli.mjs
+// generateInput); the tool-call protocol keeps the explicit canonical form.
 const ALLOWED_INPUT_FIELDS = new Set([
   'provider', 'prompt', 'model', 'effort', 'timeoutMs', 'maxOutputBytes', 'schema', 'sessionId', 'agentMode', 'agent', 'toolPolicy',
   'accessProfile', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions', 'gatewayCapabilityHandle', 'gatewayHandle', 'mcpConfig',

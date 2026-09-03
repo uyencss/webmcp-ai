@@ -38,7 +38,13 @@ Chưa commit — write-set nằm ở working tree của package.
   env `WEBMCP_AI_FULL_PROBE` tới child, `WEBMCP_GATEWAY_TOKEN` bị strip;
   `--full + --tool-policy compose-only` → `INVALID_INPUT` fail-closed
 
+## Follow-up đã xong sau receipt này
+
+Stdout stream passthrough (`--stream`, `onStream`): xem
+`2026-09-plan-stdout-stream.md` (status `implemented`). Suite hiện tại
+**532/532** (527 + 5 stream tests).
+
 ## Không thuộc receipt này
 
 Live provider smoke (tốn quota, chờ owner duyệt), Runner permit/Gateway broker,
-streaming output, doctor canary, version/route print — xem plan §10.
+doctor canary, version/route print — xem plan §10.

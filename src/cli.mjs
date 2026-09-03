@@ -53,6 +53,7 @@ Generate options:
   --store-revisions <json> JSON object of store revisions
   --timeout-ms <ms>       Process timeout (default: 600000)
   --max-output-bytes <n>  Provider output cap in bytes (default: 32MB, 128MB with --full)
+  --stream                Forward provider stdout/stderr live to our stderr; stdout keeps one JSON envelope
   --json                  Emit stable JSON on stdout
 
 Environment:
@@ -115,7 +116,19 @@ function collectArrayOption(options, name, fromJsonKey) {
   return undefined;
 }
 
+// Intentional boolean `full` behavior (CLI-only alias):
+// `--full` / `--input-json { "full": true }` maps to `accessProfile: "full"`.
+// Accepted truthy forms are boolean true and case-insensitive "true"/"1"/"yes"
+// (via isTrueFlag); false, "false", "0", "", null/undefined do NOT select full
+// and fall through to --access-profile/accessProfile (default
+// provider-default). This alias exists only in the CLI lane; the
+// webmcp-tool-v1 protocol keeps the canonical `accessProfile: "full"` and
+// rejects a top-level `full` field (see src/protocol.mjs).
 function isFullFlag(value) {
+  return isTrueFlag(value);
+}
+
+function isTrueFlag(value) {
   if (value === true) return true;
   if (typeof value === 'string') {
     const v = value.trim().toLowerCase();
@@ -159,6 +172,7 @@ function generateInput(options) {
     accessProfile: isFullFlag(options.full ?? fromJson.full) ? 'full' : (options['access-profile'] ?? fromJson.accessProfile),
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
     maxOutputBytes: options['max-output-bytes'] ? Number(options['max-output-bytes']) : fromJson.maxOutputBytes,
+    stream: options.stream ?? fromJson.stream,
     workspace: options.workspace ?? fromJson.workspace,
     allowedReadRoots,
     allowedWriteRoots,
@@ -232,7 +246,17 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     return 0;
   }
   if (command === 'generate') {
-    const result = await generate({ ...generateInput(options), env });
+    const genInput = generateInput(options);
+    // --stream: provider stdout/stderr bytes go live to our stderr (diagnostics
+    // channel), so stdout keeps exactly one machine-readable JSON envelope.
+    const onStream = isTrueFlag(genInput.stream) ? ({ chunk }) => {
+      try {
+        process.stderr.write(chunk);
+      } catch {
+        // A clogged diagnostics channel must not fail the generation.
+      }
+    } : undefined;
+    const result = await generate({ ...genInput, env, ...(onStream ? { onStream } : {}) });
     printValue(result, json, (value) => value.response.text);
     return 0;
   }

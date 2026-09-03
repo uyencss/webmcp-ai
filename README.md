@@ -110,7 +110,8 @@ webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /ab
 with `--tool-policy compose-only`. Without `--full`, all profiles stay
 fail-closed. Ambient environment passes through under `--full` except the
 WebMCP authority denylist; raise long-output caps with
-`--max-output-bytes <n>` (128MB default with `--full`).
+`--max-output-bytes <n>` (128MB default with `--full`). Add `--stream` to
+watch provider output live on stderr while stdout keeps one JSON envelope.
 
 ## Tool protocol
 

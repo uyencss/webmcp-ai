@@ -132,6 +132,10 @@ denylist (Runner signing/private keys, gateway token, vault keys), which never
 reaches the child. Long generations can raise the output cap with
 `--max-output-bytes <n>` (default 32MB, 128MB with `--full`).
 
+Live progress: add `--stream` to forward provider stdout/stderr bytes to
+`webmcp-ai`'s stderr as they arrive (stdout keeps exactly one JSON envelope).
+Without `--stream`, output arrives only once at process exit.
+
 ## Choose the response interface
 
 Use `generate` for one-shot generation. Use `tool-call` only when the caller

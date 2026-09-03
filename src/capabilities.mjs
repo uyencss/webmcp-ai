@@ -422,13 +422,28 @@ export function buildSafeChildEnv(inputEnv = {}, invocationEnv = {}) {
   return safe;
 }
 
-// Full-mode child environment: native-CLI parity. Everything passes through
-// EXCEPT WebMCP authority material, mirroring what the Runner itself strips
-// when spawning children (signing/private keys) plus gateway/runner/vault
-// secrets. Provider auth (API keys, keychain-backed config, *_BIN overrides,
-// FAKE_ fixtures) flows, so `--full` behaves like running the CLI by hand.
-// Secrets must still never enter prompt text, model context, or receipts.
-const FULL_DENY_EXACT = new Set([
+// Full-mode child environment boundary — explicit and auditable.
+// `--full` is native-CLI parity for provider operation: everything passes
+// through EXCEPT WebMCP authority/capability material. The denied boundary is:
+//   (a) the entire `WEBMCP_` namespace — signing/permit/gateway/runner/vault
+//       authority (WEBMCP_SIGNING_KEY, WEBMCP_PRIVATE_KEY,
+//       WEBMCP_PERMIT_PRIVATE_KEY, WEBMCP_GATEWAY_TOKEN, WEBMCP_RUNNER_SECRET,
+//       WEBMCP_VAULT_KEY[_FILE], WEBMCP_VAULT_NEW_KEY[_FILE]) plus arbitrary
+//       worker, hook, callback, orchestration, closure and state selectors
+//       (e.g. WEBMCP_AI_WORKER_CAPABILITY_FILE, WEBMCP_AI_CALLBACK_CAPABILITY,
+//       WEBMCP_AI_ORCHESTRATION_STATE_DIR, WEBMCP_AI_HOOK_*, WEBMCP_CLOSURE_*,
+//       WEBMCP_FAKE_*, and any future WEBMCP_* key); and
+//   (b) the named server/Vault authority variables OPENCODE_SERVER_PASSWORD,
+//       VAULT_TOKEN, VAULT_ADDR.
+// Provider credentials needed for native CLI operation (e.g. ANTHROPIC_API_KEY,
+// OPENAI_API_KEY, other provider API keys, keychain-backed config, *_BIN
+// overrides, FAKE_ fixtures) remain ambient. We deliberately do NOT deny every
+// *TOKEN/*KEY — a broad token/key rule would break provider-neutral native CLI
+// authentication. Known authority keys stay listed explicitly in
+// FULL_DENY_EXACT for auditability; the WEBMCP_ prefix covers arbitrary and
+// future selectors in that namespace. Secrets must still never enter prompt
+// text, model context, or receipts.
+export const FULL_DENY_EXACT = new Set([
   'WEBMCP_SIGNING_KEY',
   'WEBMCP_PRIVATE_KEY',
   'WEBMCP_PERMIT_PRIVATE_KEY',
@@ -438,18 +453,29 @@ const FULL_DENY_EXACT = new Set([
   'WEBMCP_VAULT_KEY_FILE',
   'WEBMCP_VAULT_NEW_KEY',
   'WEBMCP_VAULT_NEW_KEY_FILE',
+  'OPENCODE_SERVER_PASSWORD',
+  'VAULT_TOKEN',
+  'VAULT_ADDR',
 ]);
+
+export const FULL_DENY_PREFIXES = Object.freeze(['WEBMCP_']);
+
+export function isFullChildEnvDenied(key) {
+  if (typeof key !== 'string' || !key) return false;
+  if (FULL_DENY_EXACT.has(key)) return true;
+  return FULL_DENY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
 
 export function buildFullChildEnv(inputEnv = {}, invocationEnv = {}) {
   const full = {};
   for (const [k, v] of Object.entries(inputEnv || {})) {
     if (v === undefined) continue;
-    if (FULL_DENY_EXACT.has(k)) continue;
+    if (isFullChildEnvDenied(k)) continue;
     full[k] = v;
   }
   for (const [k, v] of Object.entries(invocationEnv || {})) {
     if (v === undefined) continue;
-    if (FULL_DENY_EXACT.has(k)) continue;
+    if (isFullChildEnvDenied(k)) continue;
     full[k] = v;
   }
   return full;

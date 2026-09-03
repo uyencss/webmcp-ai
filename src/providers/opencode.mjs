@@ -84,10 +84,13 @@ export const opencodeProvider = {
       });
     }
 
-    // Full passthrough (opt-in via --full): behave like the native CLI.
-    // No generated OPENCODE_CONFIG_CONTENT, no XDG isolation, no mcp/plugin
-    // wipe — ambient operator config, tools, MCP, and web access are kept.
-    // Only the session DB is isolated to avoid SQLITE_BUSY with IDE instances.
+    // Full passthrough (opt-in via --full, opencode only): behave like the
+    // native CLI. No generated OPENCODE_CONFIG_CONTENT, no XDG isolation, no
+    // mcp/plugin wipe — ambient operator config, tools, MCP, and web access
+    // are kept for this provider. Only the session DB is isolated to avoid
+    // SQLITE_BUSY with IDE instances. Other providers differ: Codex full
+    // still uses --ephemeral --ignore-user-config --ignore-rules with
+    // --sandbox workspace-write and does NOT inherit ambient config/MCP.
     if (accessProfile === 'full') {
       const fullAuto = agentMode === 'accept-edits';
       const fullAgent = request.agent || (fullAuto ? 'build' : 'plan');

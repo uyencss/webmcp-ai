@@ -36,6 +36,10 @@ export const codexProvider = {
     // Omitting --sandbox would fall back to the config default (usually
     // read-only), so full must state workspace-write to get real folder +
     // tool access. danger-full-access is never used.
+    // Truthful scope: full still passes --ephemeral --ignore-user-config
+    // --ignore-rules, so ambient user config/MCP is NOT inherited — only the
+    // workspace-write sandbox (folder + tools) is granted. Only the opencode
+    // provider keeps ambient operator config/MCP in full mode.
     const isFull = request.accessProfile === 'full';
     const common = [
       '--skip-git-repo-check',

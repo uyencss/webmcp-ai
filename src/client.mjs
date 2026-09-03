@@ -139,8 +139,13 @@ export async function generate(input) {
 
   // Child environment: bounded profiles use the explicit safe allowlist and
   // never receive arbitrary env or secrets. Full passthrough uses native-CLI
-  // parity (ambient env minus WebMCP authority denylist); private invocation
-  // values (e.g. OPENCODE_DB) still take precedence over ambient values.
+  // env parity (ambient env minus the explicit WebMCP/server/Vault authority
+  // denylist in buildFullChildEnv); private invocation values (e.g.
+  // OPENCODE_DB) still take precedence over ambient values. Env parity does
+  // not imply config parity for every provider: Codex full still passes
+  // --ephemeral --ignore-user-config --ignore-rules with --sandbox
+  // workspace-write and does not inherit ambient user config/MCP — only the
+  // opencode provider keeps ambient operator config/MCP in full mode.
   const isFull = request.accessProfile === 'full';
   const buildEnv = isFull ? buildFullChildEnv : buildSafeChildEnv;
   const safeBase = buildEnv(env, {});
@@ -152,6 +157,14 @@ export async function generate(input) {
   const maxOutputBytes = request.maxOutputBytes
     ?? (isFull ? FULL_DEFAULT_MAX_OUTPUT_BYTES : DEFAULT_MAX_OUTPUT_BYTES);
 
+  // Library-only live stream: input.onStream({ stream: 'stdout'|'stderr', chunk })
+  // forwards provider bytes as they arrive. Not part of the JSON protocol
+  // (functions cannot cross it); CLI exposes the same via --stream.
+  const onStream = typeof input.onStream === 'function' ? input.onStream : null;
+  const streamForward = (stream) => onStream
+    ? (chunk) => onStream({ stream, chunk })
+    : null;
+
   try {
     const processResult = await runProcess(command, invocation.args, {
       stdin: invocation.stdin,
@@ -160,6 +173,8 @@ export async function generate(input) {
       timeoutMs: request.timeoutMs,
       maxOutputBytes,
       signal: input.signal,
+      onStdout: streamForward('stdout'),
+      onStderr: streamForward('stderr'),
     });
     const parsed = provider.parseOutput({ ...processResult, invocation, request });
     if (!parsed.text) {
