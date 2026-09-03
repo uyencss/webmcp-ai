@@ -32,6 +32,11 @@ export const codexProvider = {
     const schemaFile = request.schema ? join(dir, 'output-schema.json') : null;
     if (schemaFile) writeFileSync(schemaFile, `${JSON.stringify(request.schema, null, 2)}\n`, { mode: 0o600 });
 
+    // Full passthrough (opt-in via --full): explicit workspace-write sandbox.
+    // Omitting --sandbox would fall back to the config default (usually
+    // read-only), so full must state workspace-write to get real folder +
+    // tool access. danger-full-access is never used.
+    const isFull = request.accessProfile === 'full';
     const common = [
       '--skip-git-repo-check',
       '--ephemeral',
@@ -46,7 +51,9 @@ export const codexProvider = {
 
     const args = request.sessionId
       ? ['exec', 'resume', ...common, request.sessionId, '-']
-      : ['exec', '--sandbox', 'read-only', ...common, '-'];
+      : isFull
+        ? ['exec', '--sandbox', 'workspace-write', ...common, '-']
+        : ['exec', '--sandbox', 'read-only', ...common, '-'];
 
     return {
       args,

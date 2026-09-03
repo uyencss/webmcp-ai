@@ -74,10 +74,13 @@ export const agyProvider = {
     const cleanupGuard = request.toolPolicy === 'compose-only'
       ? installComposeOnlyGuard(request.workspace)
       : null;
+    // Full passthrough (opt-in via --full): drop the forced sandbox so the
+    // child runs like the native CLI with full folder + tool access.
+    const isFull = request.accessProfile === 'full';
     return {
       args: [
         '-p', request.prompt,
-        '--sandbox',
+        ...(!isFull ? ['--sandbox'] : []),
         '--mode', agentMode,
         '--print-timeout', `${seconds}s`,
         ...(request.agent ? ['--agent', request.agent] : []),

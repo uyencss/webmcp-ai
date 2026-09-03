@@ -98,6 +98,40 @@ When the caller depends on a constrained AGY custom agent, pass its discovered
 name as `agent` in JSON input or via `--agent`. The AI CLI selects the agent but
 does not install it or change machine-level permissions.
 
+## Full access (opt-in passthrough)
+
+When the task needs the provider to run with full folder + tool access like its
+native CLI — edits, shell, MCP, and web access as the operator configured —
+pass `--full` (or `accessProfile: "full"` in JSON / `tool-call` input):
+
+```bash
+webmcp-ai generate \
+  --provider opencode \
+  --prompt-file ./prompt.md \
+  --workspace /abs/ws \
+  --full \
+  --json
+```
+
+`--full` is the only extra input required besides provider/prompt/workspace. No
+`--allowed-write-root` or `--protected-path` is needed. What it does per
+provider: opencode keeps the ambient operator config, tools, and MCP surface
+(only the session database stays isolated); Codex uses the `workspace-write`
+sandbox instead of `read-only`; Claude drops the `--tools '' --safe-mode`
+text-only deny; AGY drops the forced `--sandbox`. The receipt reports
+`capability.accessProfile: "full"` with `fullPassthrough: true`.
+
+Rules: never combine `--full` with `--tool-policy compose-only` (rejected as
+`INVALID_INPUT`); `--full` counts as the user's explicit permission grant, so
+the "no unsafe permissions" rule below is satisfied by the flag itself, not
+bypassed. Without `--full`, every profile stays fail-closed as before.
+
+Environment and output: `--full` passes the ambient environment through like
+the native CLI (provider API keys included) except the WebMCP authority
+denylist (Runner signing/private keys, gateway token, vault keys), which never
+reaches the child. Long generations can raise the output cap with
+`--max-output-bytes <n>` (default 32MB, 128MB with `--full`).
+
 ## Choose the response interface
 
 Use `generate` for one-shot generation. Use `tool-call` only when the caller

@@ -99,6 +99,19 @@ inside its existing read-only ephemeral sandbox there; AGY receives a
 workspace-local deny-all `PreToolUse` hook. The default
 `provider-default` policy preserves existing behavior.
 
+For full folder + tool access like the native CLI (edits, shell, MCP, web as
+the operator configured), pass `--full` (or `accessProfile: "full"`):
+
+```bash
+webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /abs/ws --full --json
+```
+
+`--full` needs no `--allowed-write-root`/`--protected-path`. Never combine it
+with `--tool-policy compose-only`. Without `--full`, all profiles stay
+fail-closed. Ambient environment passes through under `--full` except the
+WebMCP authority denylist; raise long-output caps with
+`--max-output-bytes <n>` (128MB default with `--full`).
+
 ## Tool protocol
 
 ```bash

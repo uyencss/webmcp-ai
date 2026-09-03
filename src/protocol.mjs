@@ -19,12 +19,13 @@ export function describeTools() {
           model: { type: ['string', 'null'] },
           effort: { type: ['string', 'null'] },
           timeoutMs: { type: 'number', exclusiveMinimum: 0 },
+          maxOutputBytes: { type: ['number', 'null'] },
           schema: { type: ['object', 'null'] },
           sessionId: { type: ['string', 'null'] },
           agentMode: { enum: ['plan', 'accept-edits', null] },
           agent: { type: ['string', 'null'] },
           toolPolicy: { enum: ['provider-default', 'compose-only', null] },
-          accessProfile: { enum: ['provider-default', 'compose-only', 'review-readonly', 'bounded-edit', 'gateway-tool', null] },
+          accessProfile: { enum: ['provider-default', 'compose-only', 'review-readonly', 'bounded-edit', 'gateway-tool', 'full', null] },
           workspace: { type: ['string', 'null'] },
           allowedReadRoots: { type: ['array', 'null'], items: { type: 'string' } },
           allowedWriteRoots: { type: ['array', 'null'], items: { type: 'string' } },
@@ -39,7 +40,7 @@ export function describeTools() {
 }
 
 const ALLOWED_INPUT_FIELDS = new Set([
-  'provider', 'prompt', 'model', 'effort', 'timeoutMs', 'schema', 'sessionId', 'agentMode', 'agent', 'toolPolicy',
+  'provider', 'prompt', 'model', 'effort', 'timeoutMs', 'maxOutputBytes', 'schema', 'sessionId', 'agentMode', 'agent', 'toolPolicy',
   'accessProfile', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions', 'gatewayCapabilityHandle', 'gatewayHandle', 'mcpConfig',
 ]);
 
@@ -105,6 +106,7 @@ export async function handleToolCall(request, options = {}) {
       elapsedMs: result.timing.elapsedMs,
       capability: {
         accessProfile: cap.accessProfile ?? null,
+        fullPassthrough: (cap.accessProfile ?? null) === 'full',
         workspaceDigest: cap.workspaceDigest ?? null,
         readRootsDigest: cap.readRootsDigest ?? null,
         writeRootsDigest: cap.writeRootsDigest ?? null,

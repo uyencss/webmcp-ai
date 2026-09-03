@@ -84,6 +84,31 @@ export const opencodeProvider = {
       });
     }
 
+    // Full passthrough (opt-in via --full): behave like the native CLI.
+    // No generated OPENCODE_CONFIG_CONTENT, no XDG isolation, no mcp/plugin
+    // wipe — ambient operator config, tools, MCP, and web access are kept.
+    // Only the session DB is isolated to avoid SQLITE_BUSY with IDE instances.
+    if (accessProfile === 'full') {
+      const fullAuto = agentMode === 'accept-edits';
+      const fullAgent = request.agent || (fullAuto ? 'build' : 'plan');
+      const fullArgs = [
+        'run', '--format', 'json', '--agent', fullAgent,
+        ...(fullAuto ? ['--auto'] : []),
+        ...(request.model ? ['--model', request.model] : []),
+        ...(request.effort ? ['--variant', request.effort] : []),
+        ...(request.sessionId ? ['--session', request.sessionId] : []),
+        '--dir', request.workspace,
+      ];
+      return {
+        args: fullArgs,
+        stdin: request.prompt,
+        env: {
+          OPENCODE_DB: resolveOpencodeCliDb(request.env),
+        },
+        cleanup: () => {},
+      };
+    }
+
     // Build deterministic per-invocation isolated config boundary from selected profile.
     // This is the private configuration boundary: it contains explicit permission +
     // external_directory scoped to declared roots, with mcp:{}, plugin:[], share disabled,

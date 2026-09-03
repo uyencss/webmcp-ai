@@ -108,13 +108,15 @@ test('bounded edit versus review-only and protected path rejection', () => {
     allowedWriteRoots: [writeRoot],
     protectedPaths: [protectedFile],
   });
-  // bounded-edit now emits per-path scoped edit/write: allow only inside writeRoot, deny protected
-  // Internally honest: OpenCode permission grammar supports per-path objects, so we enforce exactly.
+  // bounded-edit emits WORKSPACE-RELATIVE scoped edit/write rules: the child runs
+  // with `--dir <workspace>` so OpenCode matches relative tool paths (absolute
+  // keys never match and silently fall back to `* deny`).
   const editPerm = editCfg.permission.edit;
   const writePerm = editCfg.permission.write;
-  assert.ok(typeof editPerm === 'object' && editPerm[writeRoot] === 'allow' && editPerm[writeRoot + '/**'] === 'allow');
-  assert.ok(editPerm[protectedFile] === 'deny' && editPerm[protectedFile + '/**'] === 'deny');
-  assert.ok(typeof writePerm === 'object' && writePerm[writeRoot] === 'allow');
+  assert.ok(typeof editPerm === 'object' && editPerm.src === 'allow' && editPerm['src/**'] === 'allow');
+  assert.ok(editPerm[join('src', 'package.json')] === 'deny' && editPerm[join('src', 'package.json', '**')] === 'deny');
+  assert.ok(typeof writePerm === 'object' && writePerm.src === 'allow');
+  assert.equal(writeRoot in editPerm, false, 'absolute keys must not appear in relative rules');
   assert.equal(editPerm['*'], 'deny');
   assert.equal(writePerm['*'], 'deny');
   // protected path must override write root
@@ -284,7 +286,7 @@ test('CLI help/JSON carries the new fields', () => {
   assert.ok('protectedPaths' in props);
   assert.ok('projectId' in props);
   assert.ok('storeRevisions' in props);
-  assert.deepEqual(props.accessProfile.enum, ['provider-default', 'compose-only', 'review-readonly', 'bounded-edit', 'gateway-tool', null]);
+  assert.deepEqual(props.accessProfile.enum, ['provider-default', 'compose-only', 'review-readonly', 'bounded-edit', 'gateway-tool', 'full', null]);
 
   // generate with JSON input carrying new fields
   const ws = mkdtempSync(join(tmpdir(), 'cap-cli-'));

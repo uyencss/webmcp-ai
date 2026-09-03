@@ -43,7 +43,8 @@ Generate options:
   --agent-mode <mode>     AGY/opencode only: plan (default) or accept-edits
   --agent <name>          AGY/opencode only: select a discovered custom agent
   --tool-policy <policy>  provider-default (default) or compose-only (legacy)
-  --access-profile <profile>  provider-default, compose-only, review-readonly, bounded-edit, gateway-tool
+  --access-profile <profile>  provider-default, compose-only, review-readonly, bounded-edit, gateway-tool, full
+  --full                  Short for --access-profile full: native-CLI passthrough with full folder + tools
   --workspace <path>      Trusted working directory for the provider
   --allowed-read-root <path>   Repeatable: additional readable root (absolute)
   --allowed-write-root <path>  Repeatable: writable root inside workspace (absolute)
@@ -51,6 +52,7 @@ Generate options:
   --project-id <id>       Opaque project binding identifier
   --store-revisions <json> JSON object of store revisions
   --timeout-ms <ms>       Process timeout (default: 600000)
+  --max-output-bytes <n>  Provider output cap in bytes (default: 32MB, 128MB with --full)
   --json                  Emit stable JSON on stdout
 
 Environment:
@@ -113,6 +115,15 @@ function collectArrayOption(options, name, fromJsonKey) {
   return undefined;
 }
 
+function isFullFlag(value) {
+  if (value === true) return true;
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase();
+    return v === 'true' || v === '1' || v === 'yes';
+  }
+  return false;
+}
+
 function generateInput(options) {
   const fromJson = options['input-json'] ? readJsonInput(options['input-json']) : {};
   const schema = options.schema ? readJsonInput(options.schema) : fromJson.schema;
@@ -145,8 +156,9 @@ function generateInput(options) {
     agentMode: options['agent-mode'] ?? fromJson.agentMode,
     agent: options.agent ?? fromJson.agent,
     toolPolicy: options['tool-policy'] ?? fromJson.toolPolicy,
-    accessProfile: options['access-profile'] ?? fromJson.accessProfile,
+    accessProfile: isFullFlag(options.full ?? fromJson.full) ? 'full' : (options['access-profile'] ?? fromJson.accessProfile),
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
+    maxOutputBytes: options['max-output-bytes'] ? Number(options['max-output-bytes']) : fromJson.maxOutputBytes,
     workspace: options.workspace ?? fromJson.workspace,
     allowedReadRoots,
     allowedWriteRoots,

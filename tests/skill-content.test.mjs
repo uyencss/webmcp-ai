@@ -23,6 +23,15 @@ test('skill distinguishes the generate and tool-call JSON response envelopes', (
   assert.match(content, /On failure, read `error\.code`/);
 });
 
+test('skill documents the full-access opt-in flag', () => {
+  const content = readFileSync(skill, 'utf8');
+  assert.match(content, /## Full access \(opt-in passthrough\)/);
+  assert.match(content, /--full/);
+  assert.match(content, /accessProfile: "full"/);
+  assert.match(content, /fullPassthrough: true/);
+  assert.match(content, /never combine `--full` with `--tool-policy compose-only`/i);
+});
+
 test('skill routes CLI-agent orchestration through a packaged reference', () => {
   const content = readFileSync(skill, 'utf8');
 

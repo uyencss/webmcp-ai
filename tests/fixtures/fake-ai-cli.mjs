@@ -42,9 +42,16 @@ if (process.env.FAKE_EXPECT_HOOKS === '1') {
 const stdin = readFileSync(0, 'utf8');
 const promptIndex = args.indexOf('-p');
 const prompt = stdin || (promptIndex >= 0 ? args[promptIndex + 1] : '');
-const reply = process.env.FAKE_REPLY_CWD === '1'
+let reply = process.env.FAKE_REPLY_CWD === '1'
   ? `reply:${provider}:${prompt}:cwd=${process.cwd()}`
   : `reply:${provider}:${prompt}`;
+// Test-only env observability: FAKE_ECHO_ENV="A,B" appends |env:A=<val>;B=<val>
+if (process.env.FAKE_ECHO_ENV) {
+  const shown = String(process.env.FAKE_ECHO_ENV).split(',')
+    .map((s) => s.trim()).filter(Boolean)
+    .map((k) => `${k}=${process.env[k] ?? ''}`).join(';');
+  reply += `|env:${shown}`;
+}
 const outputIndex = args.indexOf('--output-last-message');
 
 if (outputIndex >= 0) {

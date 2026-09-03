@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  buildFullChildEnv,
   buildSafeChildEnv,
   computeCapabilityDigests,
   validateCapabilityRequest,
@@ -14,6 +15,8 @@ import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 
 const DEFAULT_TIMEOUT_MS = 600_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const FULL_DEFAULT_MAX_OUTPUT_BYTES = 128 * 1024 * 1024;
 
 // Backward-compat legacy mapping for toolPolicy values
 const TOOL_POLICIES = new Set(['provider-default', 'compose-only']);
@@ -36,6 +39,13 @@ function normalizeRequest(input) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AiCliError('INVALID_INPUT', 'timeoutMs must be a positive number', { exitCode: 2 });
   }
+  let maxOutputBytes;
+  if (input.maxOutputBytes != null) {
+    maxOutputBytes = Number(input.maxOutputBytes);
+    if (!Number.isFinite(maxOutputBytes) || maxOutputBytes <= 0) {
+      throw new AiCliError('INVALID_INPUT', 'maxOutputBytes must be a positive number', { exitCode: 2 });
+    }
+  }
   // Validate capability fields with strict canonicalization and profile handling.
   // validateCapabilityRequest handles accessProfile/toolPolicy merging, workspace, roots, protectedPaths, projectId/storeRevisions, and gateway-tool fail-closed.
   const capability = validateCapabilityRequest({
@@ -56,8 +66,10 @@ function normalizeRequest(input) {
   const toolPolicy = capability.accessProfile === 'compose-only' ? 'compose-only' : (input.toolPolicy ?? (capability.accessProfile === 'provider-default' ? 'provider-default' : capability.accessProfile));
   // For legacy providers that only declare toolPolicies, map new profiles to unsupported
   // Only opencode is expected to support review-readonly/bounded-edit; others fail closed.
+  // 'full' is explicit opt-in passthrough and is supported by every provider.
   const providerSupported = (() => {
     if (capability.accessProfile === 'gateway-tool') return false;
+    if (capability.accessProfile === 'full') return true;
     if (['review-readonly', 'bounded-edit'].includes(capability.accessProfile)) {
       return provider.id === 'opencode';
     }
@@ -70,8 +82,10 @@ function normalizeRequest(input) {
     });
   }
   // Retain legacy toolPolicy validation for backward compat
-  const legacyPolicy = normalizeToolPolicy(toolPolicy === 'review-readonly' || toolPolicy === 'bounded-edit' ? 'provider-default' : toolPolicy);
-  if (!provider.capabilities?.toolPolicies?.includes(legacyPolicy) && !['review-readonly', 'bounded-edit'].includes(capability.accessProfile)) {
+  // 'full' maps onto provider-default for the legacy capability check; the
+  // provider adapter branches on accessProfile === 'full' for passthrough.
+  const legacyPolicy = normalizeToolPolicy(toolPolicy === 'review-readonly' || toolPolicy === 'bounded-edit' || toolPolicy === 'full' ? 'provider-default' : toolPolicy);
+  if (!provider.capabilities?.toolPolicies?.includes(legacyPolicy) && !['review-readonly', 'bounded-edit', 'full'].includes(capability.accessProfile)) {
     throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not support toolPolicy ${legacyPolicy}`, {
       exitCode: 2,
       details: { capability: 'toolPolicy', toolPolicy: legacyPolicy },
@@ -100,6 +114,7 @@ function normalizeRequest(input) {
       projectId: capability.projectId,
       storeRevisions: capability.storeRevisions,
       timeoutMs,
+      maxOutputBytes,
     },
   };
 }
@@ -122,13 +137,20 @@ export async function generate(input) {
     ...request, workspace, env, allowedReadRoots: capability.allowedReadRoots, allowedWriteRoots: capability.allowedWriteRoots, protectedPaths: capability.protectedPaths, projectId: capability.projectId, storeRevisions: capability.storeRevisions,
   });
 
-  // Build child environment from explicit safe allowlist – never pass arbitrary process.env or secrets.
-  // Private OpenCode isolation values (OPENCODE_DB, OPENCODE_CONFIG_CONTENT, OPENCODE_CONFIG, etc.)
-  // are filtered through the same allowlist and take precedence over ambient values so they
-  // cannot be overridden by the caller environment.
-  const safeBase = buildSafeChildEnv(env, {});
-  const privateEnv = buildSafeChildEnv(invocation.env || {}, {});
+  // Child environment: bounded profiles use the explicit safe allowlist and
+  // never receive arbitrary env or secrets. Full passthrough uses native-CLI
+  // parity (ambient env minus WebMCP authority denylist); private invocation
+  // values (e.g. OPENCODE_DB) still take precedence over ambient values.
+  const isFull = request.accessProfile === 'full';
+  const buildEnv = isFull ? buildFullChildEnv : buildSafeChildEnv;
+  const safeBase = buildEnv(env, {});
+  const privateEnv = buildEnv(invocation.env || {}, {});
   const childEnv = { ...safeBase, ...privateEnv };
+
+  // Output cap: explicit caller value wins; full defaults higher than the
+  // runner default so long generations are not cut mid-stream.
+  const maxOutputBytes = request.maxOutputBytes
+    ?? (isFull ? FULL_DEFAULT_MAX_OUTPUT_BYTES : DEFAULT_MAX_OUTPUT_BYTES);
 
   try {
     const processResult = await runProcess(command, invocation.args, {
@@ -136,7 +158,7 @@ export async function generate(input) {
       cwd: workspace,
       env: childEnv,
       timeoutMs: request.timeoutMs,
-      maxOutputBytes: input.maxOutputBytes,
+      maxOutputBytes,
       signal: input.signal,
     });
     const parsed = provider.parseOutput({ ...processResult, invocation, request });

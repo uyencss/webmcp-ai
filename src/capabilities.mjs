@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
-import { isAbsolute, normalize } from 'node:path';
+import { isAbsolute, normalize, relative } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
@@ -11,6 +11,7 @@ export const VALID_ACCESS_PROFILES = new Set([
   'review-readonly',
   'bounded-edit',
   'gateway-tool',
+  'full',
 ]);
 
 const LEGACY_TOOL_POLICY_MAP = {
@@ -218,6 +219,9 @@ export function validateCapabilityRequest(input, opts = {}) {
       details: { capability: 'accessProfile', accessProfile },
     });
   }
+  if (accessProfile === 'full' && input.toolPolicy === 'compose-only') {
+    throw new AiCliError('INVALID_INPUT', 'full and compose-only conflict; full uses the given workspace', { exitCode: 2 });
+  }
 
   let workspace = null;
   const rawWorkspace = input.workspace;
@@ -258,6 +262,28 @@ export function validateCapabilityRequest(input, opts = {}) {
   const readRootsDeduped = dedupeSorted(allowedReadRoots);
   const writeRootsDeduped = dedupeSorted(allowedWriteRoots);
   const protectedDeduped = dedupeSorted(protectedPaths);
+
+  // Full passthrough (opt-in via --full / accessProfile: 'full'): only the
+  // workspace existence check above applies. Declared roots are canonicalized
+  // but no ancestor/inside/overlap boundary is enforced, so a single flag is
+  // enough to run like the native CLI in any environment (incl. sandbox).
+  if (accessProfile === 'full') {
+    const projectIdFull = validateProjectId(input.projectId);
+    const storeRevisionsFull = validateStoreRevisions(input.storeRevisions);
+    let finalReadRootsFull = readRootsDeduped;
+    if (workspace && !finalReadRootsFull.includes(workspace)) {
+      finalReadRootsFull = dedupeSorted([...finalReadRootsFull, workspace]);
+    }
+    return {
+      accessProfile,
+      workspace,
+      allowedReadRoots: finalReadRootsFull,
+      allowedWriteRoots: writeRootsDeduped,
+      protectedPaths: protectedDeduped,
+      projectId: projectIdFull,
+      storeRevisions: storeRevisionsFull,
+    };
+  }
 
   // Reject overlapping/ambiguous roots that would widen access (user-provided sets)
   if (readRootsDeduped.length > 1) checkNoOverlappingRoots(readRootsDeduped, 'allowedReadRoots');
@@ -311,7 +337,7 @@ export function validateCapabilityRequest(input, opts = {}) {
   const storeRevisions = validateStoreRevisions(input.storeRevisions);
 
   if (input.gatewayCapabilityHandle != null || input.gatewayHandle != null || input.mcpConfig != null) {
-    if (accessProfile !== 'gateway-tool') {
+    if (accessProfile !== 'gateway-tool' && accessProfile !== 'full') {
       throw new AiCliError('INVALID_INPUT', 'gateway capability handle is not allowed for this profile', { exitCode: 2 });
     }
   }
@@ -396,6 +422,39 @@ export function buildSafeChildEnv(inputEnv = {}, invocationEnv = {}) {
   return safe;
 }
 
+// Full-mode child environment: native-CLI parity. Everything passes through
+// EXCEPT WebMCP authority material, mirroring what the Runner itself strips
+// when spawning children (signing/private keys) plus gateway/runner/vault
+// secrets. Provider auth (API keys, keychain-backed config, *_BIN overrides,
+// FAKE_ fixtures) flows, so `--full` behaves like running the CLI by hand.
+// Secrets must still never enter prompt text, model context, or receipts.
+const FULL_DENY_EXACT = new Set([
+  'WEBMCP_SIGNING_KEY',
+  'WEBMCP_PRIVATE_KEY',
+  'WEBMCP_PERMIT_PRIVATE_KEY',
+  'WEBMCP_GATEWAY_TOKEN',
+  'WEBMCP_RUNNER_SECRET',
+  'WEBMCP_VAULT_KEY',
+  'WEBMCP_VAULT_KEY_FILE',
+  'WEBMCP_VAULT_NEW_KEY',
+  'WEBMCP_VAULT_NEW_KEY_FILE',
+]);
+
+export function buildFullChildEnv(inputEnv = {}, invocationEnv = {}) {
+  const full = {};
+  for (const [k, v] of Object.entries(inputEnv || {})) {
+    if (v === undefined) continue;
+    if (FULL_DENY_EXACT.has(k)) continue;
+    full[k] = v;
+  }
+  for (const [k, v] of Object.entries(invocationEnv || {})) {
+    if (v === undefined) continue;
+    if (FULL_DENY_EXACT.has(k)) continue;
+    full[k] = v;
+  }
+  return full;
+}
+
 export function computeCapabilityDigests({ workspace, allowedReadRoots, allowedWriteRoots, protectedPaths, projectId, storeRevisions, accessProfile }) {
   const workspaceDigest = workspace ? digestString(workspace) : digestString('');
   const readRootsDigest = digestArray(allowedReadRoots);
@@ -414,6 +473,17 @@ export function computeCapabilityDigests({ workspace, allowedReadRoots, allowedW
     storeRevisionsDigest: storeRevisionsDigest.slice(0, 16),
     profileDigest: profileDigest.slice(0, 16),
   };
+}
+
+// Translate a canonical absolute root inside `workspace` into the
+// workspace-relative OpenCode permission patterns for a child launched with
+// `--dir <workspace>`. Returns exact + descendant rules (e.g. `src` and
+// `src/**`); a root equal to the workspace itself maps to `**` (the whole
+// relative tree). Callers guarantee inside-workspace placement upstream.
+export function toOpenCodeRelativePatterns(absoluteRoot, workspace) {
+  if (!workspace || absoluteRoot === workspace) return ['**'];
+  const rel = relative(workspace, absoluteRoot);
+  return [rel, `${rel}/**`];
 }
 
 export function buildOpenCodeConfig({ accessProfile, workspace, allowedReadRoots, allowedWriteRoots, protectedPaths }) {
@@ -443,24 +513,35 @@ export function buildOpenCodeConfig({ accessProfile, workspace, allowedReadRoots
         websearch: 'deny',
       };
       break;
+    case 'full': {
+      // Full passthrough fallback (v1): allow everything. The opencode
+      // provider bypasses generated config entirely when full, so this branch
+      // only exists so direct buildOpenCodeConfig('full') callers don't crash.
+      permission = { '*': 'allow' };
+      break;
+    }
     case 'bounded-edit': {
       // Bounded edit: edit/write allowed only inside declared write roots, with protected denies overriding.
-      // OpenCode's permission grammar supports per-path objects: { "*":"deny", "/path":"allow", "/path/**":"allow", "/protected":"deny" }
-      // If no write roots, this case is already rejected upstream.
+      // OpenCode is launched with `--dir <workspace>` and its permission matcher
+      // receives workspace-RELATIVE tool paths (e.g. `src/capabilities.mjs`, as seen
+      // in the `permission=edit pattern=src/...` deny log). Absolute keys never
+      // match, so every declared root inside the workspace is translated to its
+      // relative form before becoming a rule. Roots outside the workspace are
+      // rejected upstream, so `relative()` here cannot escape (no `..` output).
       const editObj = { '*': 'deny' };
       const writeObj = { '*': 'deny' };
       for (const wr of (allowedWriteRoots || [])) {
-        editObj[wr] = 'allow';
-        editObj[wr + '/**'] = 'allow';
-        writeObj[wr] = 'allow';
-        writeObj[wr + '/**'] = 'allow';
+        for (const pattern of toOpenCodeRelativePatterns(wr, workspace)) {
+          editObj[pattern] = 'allow';
+          writeObj[pattern] = 'allow';
+        }
       }
       // Protected paths override even inside write roots
       for (const pp of (protectedPaths || [])) {
-        editObj[pp] = 'deny';
-        editObj[pp + '/**'] = 'deny';
-        writeObj[pp] = 'deny';
-        writeObj[pp + '/**'] = 'deny';
+        for (const pattern of toOpenCodeRelativePatterns(pp, workspace)) {
+          editObj[pattern] = 'deny';
+          writeObj[pattern] = 'deny';
+        }
       }
       permission = {
         '*': 'deny',

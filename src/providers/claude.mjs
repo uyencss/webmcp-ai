@@ -23,10 +23,12 @@ export const claudeProvider = {
         exitCode: 2,
       });
     }
+    // Full passthrough (opt-in via --full): drop the text-only hard deny so
+    // the child runs like the native CLI with full folder + tool access.
+    const isFull = request.accessProfile === 'full';
     const args = [
       '-p',
-      '--tools', '',
-      '--safe-mode',
+      ...(!isFull ? ['--tools', '', '--safe-mode'] : []),
       '--no-chrome',
       '--output-format', 'json',
       ...(request.sessionId ? ['--resume', request.sessionId] : ['--no-session-persistence']),
