@@ -120,7 +120,9 @@ authority boundary (the whole `WEBMCP_*` namespace plus
 `OPENCODE_SERVER_PASSWORD`, `VAULT_TOKEN`, `VAULT_ADDR`); raise long-output
 caps with `--max-output-bytes <n>` (128MB default with `--full`). Add
 `--stream` to watch provider output live on stderr while stdout keeps one
-JSON envelope.
+JSON envelope (`--stream-to stdout` redirects the live feed to stdout for
+capturers that ignore stderr; with `--json` the final envelope is then
+compact on the last line).
 Add `--events` for one advisory progress JSON per line on stderr
 (`queued → researching|editing|testing|verifying|working → completed`;
 telemetry only, never a control signal).

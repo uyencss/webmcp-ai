@@ -54,6 +54,7 @@ Generate options:
   --timeout-ms <ms>       Process timeout (default: 600000)
   --max-output-bytes <n>  Provider output cap in bytes (default: 32MB, 128MB with --full)
   --stream                Forward provider stdout/stderr live to our stderr; stdout keeps one JSON envelope
+  --stream-to <ch>        Live channel for --stream/--events: stderr (default) or stdout
   --events                Emit one advisory progress JSON per line to our stderr (see skill for states)
   --json                  Emit stable JSON on stdout
 
@@ -175,6 +176,7 @@ function generateInput(options) {
     maxOutputBytes: options['max-output-bytes'] ? Number(options['max-output-bytes']) : fromJson.maxOutputBytes,
     stream: options.stream ?? fromJson.stream,
     events: options.events ?? fromJson.events,
+    streamTo: options['stream-to'] ?? fromJson.streamTo,
     workspace: options.workspace ?? fromJson.workspace,
     allowedReadRoots,
     allowedWriteRoots,
@@ -249,28 +251,43 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   }
   if (command === 'generate') {
     const genInput = generateInput(options);
-    // --stream: provider stdout/stderr bytes go live to our stderr (diagnostics
-    // channel), so stdout keeps exactly one machine-readable JSON envelope.
-    const onStream = isTrueFlag(genInput.stream) ? ({ chunk }) => {
+    // --stream-to stderr (default) keeps stdout to exactly one machine-readable
+    // JSON envelope. --stream-to stdout is for orchestrators that only capture
+    // stdout: live bytes/lines and the final envelope share stdout, so in
+    // --json mode the envelope is printed compact on one line (parse it as the
+    // last JSON line carrying an `ok` field).
+    const streamTarget = genInput.streamTo == null || genInput.streamTo === ''
+      ? 'stderr'
+      : String(genInput.streamTo).trim().toLowerCase();
+    if (streamTarget !== 'stderr' && streamTarget !== 'stdout') {
+      throw new AiCliError('USAGE_ERROR', `--stream-to must be stderr or stdout, got: ${String(genInput.streamTo)}`, { exitCode: 2 });
+    }
+    const liveOut = streamTarget === 'stdout' ? process.stdout : process.stderr;
+    const writeLive = (text) => {
       try {
-        process.stderr.write(chunk);
+        liveOut.write(text);
       } catch {
-        // A clogged diagnostics channel must not fail the generation.
+        // A clogged live channel must not fail the generation.
       }
-    } : undefined;
-    // --events: one advisory JSON object per line on stderr; stdout keeps one envelope.
+    };
+    // --stream: provider stdout/stderr bytes go live as they arrive.
+    const onStream = isTrueFlag(genInput.stream) ? ({ chunk }) => writeLive(chunk) : undefined;
+    // --events: one advisory JSON object per line.
     const onEvent = isTrueFlag(genInput.events) ? (event) => {
-      try {
-        process.stderr.write(`${JSON.stringify({ event: 'webmcp-ai-event', ...event })}\n`);
-      } catch {
-        // Same clogged-channel rule as onStream above.
-      }
+      writeLive(`${JSON.stringify({ event: 'webmcp-ai-event', ...event })}\n`);
     } : undefined;
     const result = await generate({
       ...genInput, env,
       ...(onStream ? { onStream } : {}),
       ...(onEvent ? { onEvent } : {}),
     });
+    if (streamTarget === 'stdout' && json) {
+      // Provider bytes may not end with a newline; force the envelope onto
+      // its own last line so orchestrators can parse it as the final line
+      // carrying an `ok` field.
+      process.stdout.write(`\n${JSON.stringify(result)}\n`);
+      return 0;
+    }
     printValue(result, json, (value) => value.response.text);
     return 0;
   }

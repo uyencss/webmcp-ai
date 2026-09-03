@@ -70,13 +70,38 @@ timeout/kill logic.
 
 ## 6. Non-goals / Risks
 
-- Không parse NDJSON thành semantic state (`researching→editing→...`) — đó là
-  lane event-stream riêng, làm sau nếu cần.
+- Không parse NDJSON thành semantic state (`researching→editing→...`) — lane
+  event riêng (`2026-09-plan-event-lane.md`) làm tiếp.
 - Không guarantee framing: CLI gộp cả 2 stream provider ra cùng stderr, raw
   bytes, orchestrator tự phân biệt (opencode NDJSON vẫn parse được từng dòng).
 - Callback `onStream` throw → runner nuốt lỗi và chạy tiếp (ghi rõ trong code).
 - Không chống orchestrator đọc nhầm chunk giữa chừng thành "xong việc" —
   completion vẫn chỉ tính ở envelope cuối + verify độc lập như cũ.
+
+## 7. As-built (implement 2026-09-03)
+
+- `src/process-runner.mjs`: options `onStdout`/`onStderr`, forward trong
+  `collect()`; callback bọc `try/catch`; không callback = behaviour cũ.
+- `src/client.mjs`: `generate({ onStream })` (library-only).
+- `src/cli.mjs`: flag `--stream`; bytes ra stderr, stdout 1 envelope.
+- `tests/stream.test.mjs`: 5 tests (nay được lane song song mở rộng thêm).
+
+## 8. Follow-up — `--stream-to stdout` (implement 2026-09-03)
+
+Một số orchestrator (đặc biệt lane `scheduled`) chỉ capture stdout. Thêm
+`--stream-to <stderr|stdout>` (default `stderr`, áp dụng cho cả `--stream` và
+`--events`; giá trị khác → `USAGE_ERROR`):
+
+```bash
+webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /abs/ws --full --stream --stream-to stdout --json
+```
+
+- Target stdout + `--json`: envelope cuối in **compact 1 dòng**, ép xuống dòng
+  riêng (kể cả khi provider bytes không kết thúc bằng newline) — orchestrator
+  parse dòng cuối có field `ok` là ra kết quả, các dòng trước là live feed.
+- Text mode + stdout target: bytes live + text cuối có thể trùng lặp (ghi rõ,
+  không đổi behaviour cũ).
+- `tool-call` không có `streamTo` (fail-closed như `--stream`: function/CLI-only).
 
 ## 7. As-built (implement 2026-09-03, đúng plan)
 

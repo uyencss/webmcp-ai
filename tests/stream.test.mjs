@@ -77,6 +77,54 @@ test('CLI --stream sends provider output to stderr and keeps stdout JSON', () =>
   }
 });
 
+test('CLI --stream --stream-to stdout puts live bytes and compact envelope on stdout', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'stream-stdout-'));
+  try {
+    const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'stdout bytes', '--workspace', ws, '--full', '--stream', '--stream-to', 'stdout', '--json'], {
+      encoding: 'utf8',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /reply:opencode:stdout bytes/);
+    assert.equal(result.stderr.includes('reply:opencode:stdout bytes'), false);
+    const lastLine = result.stdout.trim().split('\n').filter(Boolean).at(-1);
+    assert.equal(JSON.parse(lastLine).ok, true);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI --events --stream-to stdout keeps marker JSONL plus final envelope on stdout', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'events-stdout-'));
+  try {
+    const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'stdout events', '--workspace', ws, '--full', '--events', '--stream-to', 'stdout', '--json'], {
+      encoding: 'utf8',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    });
+    assert.equal(result.status, 0);
+    const eventLines = result.stdout.split('\n').filter((line) => line.includes('webmcp-ai-event'));
+    assert.ok(eventLines.length >= 2);
+    const lastLine = result.stdout.trim().split('\n').filter(Boolean).at(-1);
+    assert.equal(JSON.parse(lastLine).ok, true);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('CLI rejects an unknown --stream-to channel', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'stream-bad-'));
+  try {
+    const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'x', '--workspace', ws, '--stream', '--stream-to', 'socket', '--json'], {
+      encoding: 'utf8',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /USAGE_ERROR/);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test('CLI without --stream keeps provider output out of stderr', () => {
   const ws = mkdtempSync(join(tmpdir(), 'stream-cli-off-'));
   try {

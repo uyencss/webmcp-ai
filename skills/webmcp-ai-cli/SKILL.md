@@ -142,7 +142,10 @@ Long generations can raise the output cap with `--max-output-bytes <n>`
 
 Live progress: add `--stream` to forward provider stdout/stderr bytes to
 `webmcp-ai`'s stderr as they arrive (stdout keeps exactly one JSON envelope).
-Without `--stream`, output arrives only once at process exit.
+Without `--stream`, output arrives only once at process exit. Orchestrators
+that only capture stdout add `--stream-to stdout` (also applies to `--events`;
+in `--json` mode the final envelope prints compact on its own last line —
+parse it as the last JSON line carrying an `ok` field).
 
 Structured progress: add `--events` for one advisory JSON object per line on
 stderr (`{"event":"webmcp-ai-event","seq":N,"state":"researching|editing|\
