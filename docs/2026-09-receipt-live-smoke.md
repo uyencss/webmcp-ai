@@ -53,17 +53,32 @@ codex `0.152.1`, claude `2.1.258`, agy `1.1.25`.
   exact-reply prompt
 - Result: `ok:true`, response `AGY_OK`.
 
-## 5. codex --full write (WRITER_BLOCKED_ENV, wrapper OK)
+## 5. codex --full write (WAS WRITER_BLOCKED_ENV — NOW CLOSED)
 
-- Command: `generate --provider codex --full --timeout-ms 180000 --json`,
-  workspace `/tmp/live-codex-GKJlsj`, single-file prompt
-- Result: `ok:true` with model text: "Unable to create `cx-live.txt`: the
-  workspace tool host is unavailable (`codex-code-mode-host` missing)."
-- Read-back: no file created. The wrapper delivered `workspace-write`
-  correctly and returned the model text; the write capability is absent in
-  this machine's codex setup. This is exactly the outcome class the docs
-  require read-back for: `ok:true` without a diff is not acceptance.
-- No blind retry; needs a codex host with the code-mode tool surface.
+- First attempt: `generate --provider codex --full`, workspace
+  `/tmp/live-codex-GKJlsj` → `ok:true` but model text: "the workspace tool
+  host is unavailable (`codex-code-mode-host` missing)". Read-back: no file.
+- Root cause (upstream codex #31831 class, proven on this machine):
+  `~/.local/bin/codex` is a symlink into `ChatGPT.app`; the spawner resolves
+  the helper next to the *invocation* path, so it never finds the real
+  `codex-code-mode-host` beside the app binary. `codex doctor` still reports
+  `install: consistent` — it canonicalizes, the spawner does not.
+- Fix, two layers (2026-09-03):
+  1. Machine: symlink the shipped helper into PATH —
+     `~/.local/bin/codex-code-mode-host ->
+     /Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host`
+     (upstream workaround #1; fixes direct CLI too, verified with direct
+     `codex exec` writing `direct-ok.txt` = `DIRECT_OK`).
+  2. Wrapper: `resolveProviderBin()` now canonicalizes absolute binary paths
+     via `realpathSync` (fallback verbatim so `CLI_NOT_INSTALLED` is
+     unchanged), making wrapper spawns immune on any machine. Covered by
+     `tests/bin-resolution.test.mjs` (3 tests).
+- Retry: `generate --provider codex --full`, workspace `/tmp/live-codex2-zn0T9Q`
+  → `ok:true`, "Created `cx-live.txt` containing exactly `CX_OK`".
+  Read-back: `CX_OK` (no trailing newline),
+  `sha256:443d3ef8e0f39fdff95f74de1cc23cfb2c71a13fc2651fba703c26206189ece9`.
+- Lane closed: all four providers now have a live full-access write/text
+  receipt on this machine.
 
 ## Quota note
 

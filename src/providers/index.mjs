@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+
 import { AiCliError } from '../errors.mjs';
 import { agyProvider } from './agy.mjs';
 import { claudeProvider } from './claude.mjs';
@@ -30,5 +32,19 @@ export function getProvider(id) {
 }
 
 export function resolveProviderBin(provider, env = process.env) {
-  return env[provider.envBin] || provider.defaultBin;
+  const command = env[provider.envBin] || provider.defaultBin;
+  // Canonicalize absolute binary paths (upstream codex #31831 class): some
+  // providers resolve sibling helpers next to the *invocation* path, so
+  // spawning through a symlink (e.g. ~/.local/bin/codex -> ChatGPT.app)
+  // hides helpers like codex-code-mode-host from the child. Fall back to the
+  // unresolved command when it does not exist yet so missing-binary handling
+  // (CLI_NOT_INSTALLED) is unchanged. Bare names stay untouched for PATH lookup.
+  if (command.includes('/')) {
+    try {
+      return realpathSync(command);
+    } catch {
+      return command;
+    }
+  }
+  return command;
 }
