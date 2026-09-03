@@ -185,7 +185,10 @@ printf '%s' '{"protocol":"webmcp-tool-v1","requestId":"r1","tool":"ai.generate",
    args của 4 providers ở chế độ `full` (assert không còn hard-deny).
 5. Live smoke khi owner duyệt: 1 lệnh `full` tạo file trong `workspace`
    disposable, read-back + hash — `ok:true` là đủ (không yêu cầu canary matrix
-   như `bounded-edit`).
+   như `bounded-edit`). **DONE 2026-09-03** — xem
+   `2026-09-receipt-live-smoke.md`: opencode ghi file thật + hash, stream/
+   events stdout 53 events envelope `ok:true`, claude/agy `ok:true`, codex
+   `WRITER_BLOCKED_ENV` (wrapper đúng, tool host thiếu).
 
 ## 8. Risks
 
