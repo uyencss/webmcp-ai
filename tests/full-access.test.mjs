@@ -279,11 +279,11 @@ test('full generate strips WebMCP/server/Vault authority end to end', async () =
     assert.equal(result.ok, true);
     // Non-WebMCP provider fixture passes; authority material is stripped (empty echo).
     assert.match(result.response.text, /FULL_PASSTHROUGH_PROBE=visible-to-child-fixture/);
-    assert.match(result.response.text, /WEBMCP_GATEWAY_TOKEN=$/m);
-    assert.match(result.response.text, /WEBMCP_AI_WORKER_CAPABILITY_FILE=$/m);
-    assert.match(result.response.text, /OPENCODE_SERVER_PASSWORD=$/m);
-    assert.match(result.response.text, /VAULT_TOKEN=$/m);
-    assert.match(result.response.text, /VAULT_ADDR=$/m);
+    assert.match(result.response.text, /WEBMCP_GATEWAY_TOKEN=(;|$)/m);
+    assert.match(result.response.text, /WEBMCP_AI_WORKER_CAPABILITY_FILE=(;|$)/m);
+    assert.match(result.response.text, /OPENCODE_SERVER_PASSWORD=(;|$)/m);
+    assert.match(result.response.text, /VAULT_TOKEN=(;|$)/m);
+    assert.match(result.response.text, /VAULT_ADDR=(;|$)/m);
   } finally {
     rmSync(ws, { recursive: true, force: true });
   }
