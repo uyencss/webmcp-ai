@@ -10,6 +10,47 @@ import { createAtomicExclusiveFile } from '../atomic-file.mjs';
 import { reserveRefsBytes } from '../refs-quota.mjs';
 import { sanitizeValue } from '../redaction.mjs';
 import { validateAdapter } from './index.mjs';
+import {
+  assertBoundWorkspaceIdentity,
+  assertBoundWorkspaceSafe,
+  HOST_ISOLATION_LAUNCH_BOUNDARY,
+  HOST_ISOLATION_LIFECYCLE_UNTRUSTED,
+} from '../managed-host/host-isolation.mjs';
+
+// Only this factory can mint the adapter trust marker. Keeping the marker
+// beside the implementation prevents callers from promoting an arbitrary
+// spawn-shaped object after the supervisor has validated its lifecycle.
+const TRUSTED_OWNED_PROCESS_ADAPTER = Symbol('webmcp.trusted-owned-process-adapter');
+
+function markTrustedOwnedProcessAdapter(adapter) {
+  if (typeof adapter !== 'object' || adapter === null || Array.isArray(adapter)) {
+    throw new AiCliError(HOST_ISOLATION_LIFECYCLE_UNTRUSTED, 'trusted owned-process adapter must be an object', { exitCode: 2 });
+  }
+  for (const method of ['spawn', 'interrupt', 'close']) {
+    if (typeof adapter[method] !== 'function') {
+      throw new AiCliError(HOST_ISOLATION_LIFECYCLE_UNTRUSTED, `trusted owned-process adapter is missing ${method}()`, { exitCode: 2 });
+    }
+  }
+  if (adapter.capabilities && typeof adapter.capabilities === 'object') {
+    Object.freeze(adapter.capabilities);
+  }
+  const marker = Object.freeze({
+    spawn: adapter.spawn,
+    interrupt: adapter.interrupt,
+    close: adapter.close,
+  });
+  Object.defineProperty(adapter, TRUSTED_OWNED_PROCESS_ADAPTER, { value: marker });
+  return Object.freeze(adapter);
+}
+
+export function isTrustedOwnedProcessAdapter(adapter) {
+  const marker = adapter?.[TRUSTED_OWNED_PROCESS_ADAPTER];
+  return Object.isFrozen(adapter)
+    && Object.isFrozen(marker)
+    && marker?.spawn === adapter.spawn
+    && marker?.interrupt === adapter.interrupt
+    && marker?.close === adapter.close;
+}
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -29,6 +70,10 @@ export function createOwnedProcessAdapter(options = {}) {
   const refsDir = join(stateDir, 'refs');
   const thisRefsDir = () => refsDir;
   const signalGraceMs = options.signalGraceMs ?? 400;
+  // Deterministic race seam for the launch-boundary test. Production adapter
+  // assembly never supplies this callback; it is deliberately outside task,
+  // packet and IPC input.
+  const beforeSpawnHook = typeof options.beforeSpawnHook === 'function' ? options.beforeSpawnHook : null;
   // Test seam only: production always uses the shared ORCHESTRATION_LIMITS
   // bound. Kept as an option so the quota contract is testable at realistic
   // byte sizes.
@@ -283,9 +328,12 @@ export function createOwnedProcessAdapter(options = {}) {
      * ref resolves exactly where receipts look. Creation is exclusive; total
      * spilled bytes stay under ORCHESTRATION_LIMITS.maxRefsTotalBytes.
      */
-    async spawn({ task, dispatch, emit, command, args, env, preamble, refsDir, refNamespace }) {
+    async spawn({ task, dispatch, emit, command, args, env, preamble, refsDir, refNamespace, brokerSocket = null, cwdBinding = null }) {
       if (typeof command !== 'string' || (args !== undefined && (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string')))) {
         throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'spawn requires a command string and an argv array, never a shell string', { exitCode: 2 });
+      }
+      if (brokerSocket !== null && (typeof brokerSocket !== 'object' || typeof brokerSocket.on !== 'function')) {
+        throw new AiCliError('ORCHESTRATION_INVALID_INPUT', 'managed broker must be an inherited stream', { exitCode: 2 });
       }
       const resolvedCommand = command ?? process.execPath;
       const argv = args ?? [task?.workerScript].filter(Boolean);
@@ -305,13 +353,55 @@ export function createOwnedProcessAdapter(options = {}) {
       try {
         mkdirSync(task.workspace, { recursive: true });
       } catch { /* spawn below surfaces an unusable workspace honestly */ }
-      const child = spawn(resolvedCommand, argv, {
-        cwd: task.workspace,
-        env,
-        detached: process.platform !== 'win32',
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      let child;
+      let previousCwd = null;
+      let cwdBound = false;
+      try {
+        if (cwdBinding !== null) {
+          if (typeof cwdBinding !== 'object'
+            || cwdBinding.workspace !== task.workspace
+            || cwdBinding.cwd !== task.workspace
+            || cwdBinding.launchBoundary !== HOST_ISOLATION_LAUNCH_BOUNDARY
+            || typeof cwdBinding.workspaceReadSetDigest !== 'string') {
+            throw new AiCliError('HOST_ISOLATION_UNSAFE_WORKSPACE', 'managed launch cwd binding does not match the validated workspace', { exitCode: 2 });
+          }
+          previousCwd = process.cwd();
+          // process.chdir binds the current working directory to the kernel's
+          // directory inode. spawn() then inherits that binding, so a rename
+          // or symlink replacement of the pathname cannot redirect the child.
+          process.chdir(cwdBinding.cwd);
+          cwdBound = true;
+          assertBoundWorkspaceSafe(cwdBinding.workspace);
+          if (beforeSpawnHook) {
+            const hookResult = beforeSpawnHook({ workspace: cwdBinding.workspace });
+            if (hookResult && typeof hookResult.then === 'function') {
+              throw new AiCliError('HOST_ISOLATION_UNSAFE_WORKSPACE', 'managed launch boundary hook must be synchronous', { exitCode: 2 });
+            }
+          }
+          // The full safety scan is intentionally before the deterministic
+          // race seam. After the seam, re-prove the cwd inode and every
+          // snapshotted read-set entry before spawn; new names remain outside
+          // the immutable Seatbelt literal read-set.
+          assertBoundWorkspaceIdentity(cwdBinding.workspace, cwdBinding.workspaceReadSetDigest);
+        }
+        child = spawn(resolvedCommand, argv, {
+          ...(cwdBound ? {} : { cwd: task.workspace }),
+          // Node may augment the supplied environment while propagating its
+          // own instrumentation (for example NODE_V8_COVERAGE). Launch specs
+          // are intentionally frozen, so hand the runtime a private mutable
+          // copy without changing the caller-owned authority boundary.
+          env: env === undefined ? undefined : { ...env },
+          detached: process.platform !== 'win32',
+          shell: false,
+          stdio: brokerSocket === null
+            ? ['pipe', 'pipe', 'pipe']
+            : ['pipe', 'pipe', 'pipe', brokerSocket],
+        });
+      } finally {
+        if (cwdBound && previousCwd !== null) {
+          process.chdir(previousCwd);
+        }
+      }
 
       // The worker's initial input contract: the bounded NON-SECRET Worker
       // ABI preamble line (when provided) precedes the objective; workers that
@@ -500,5 +590,5 @@ export function createOwnedProcessAdapter(options = {}) {
   };
 
   validateAdapter(adapter);
-  return adapter;
+  return markTrustedOwnedProcessAdapter(adapter);
 }

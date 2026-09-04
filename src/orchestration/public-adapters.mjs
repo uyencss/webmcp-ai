@@ -1,15 +1,24 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 import { validateAdapter } from './adapters/index.mjs';
-import { createOwnedProcessAdapter } from './adapters/owned-process.mjs';
+import { createOwnedProcessAdapter, isTrustedOwnedProcessAdapter } from './adapters/owned-process.mjs';
 import { createOpenCodeServerAdapter } from './adapters/opencode-server.mjs';
 import { createClaudeStreamAdapter } from './adapters/claude-stream.mjs';
 import { createCodexExecAdapter } from './adapters/codex-exec.mjs';
 import { renderWorkerPreamble } from './worker-callback.mjs';
 import { canonicalizeExistingPrefix } from './verifier.mjs';
+import {
+  buildSeatbeltLaunchSpec,
+  HOST_ISOLATION_AUTHORITY_BYPASS,
+  HOST_ISOLATION_LAUNCH_BOUNDARY,
+  HOST_ISOLATION_LIFECYCLE_UNTRUSTED,
+  HOST_ISOLATION_MODE,
+  isTrustedMediatedToolBroker,
+  normalizeHostIsolationConfig,
+} from './managed-host/host-isolation.mjs';
 
 export const PUBLIC_ADAPTER_KINDS = Object.freeze([
   'owned-process',
@@ -17,6 +26,37 @@ export const PUBLIC_ADAPTER_KINDS = Object.freeze([
   'claude-stream',
   'codex-exec',
 ]);
+
+// A supervisor must not infer host isolation from a lifecycle's public
+// `kind` alone: a fixture or provider wrapper could otherwise claim the same
+// name while bypassing the Seatbelt + broker binding below.
+const TRUSTED_MANAGED_LIFECYCLE = Symbol('webmcp.trusted-managed-lifecycle');
+
+function markTrustedManagedLifecycle(lifecycle, trusted) {
+  if (trusted !== true) {
+    Object.defineProperty(lifecycle, TRUSTED_MANAGED_LIFECYCLE, { value: false });
+    return lifecycle;
+  }
+  const marker = Object.freeze({
+    kind: lifecycle.kind,
+    launch: lifecycle.launch,
+    control: lifecycle.control,
+    finalize: lifecycle.finalize,
+  });
+  Object.defineProperty(lifecycle, TRUSTED_MANAGED_LIFECYCLE, { value: marker });
+  return Object.freeze(lifecycle);
+}
+
+export function isTrustedManagedLifecycle(lifecycle) {
+  const marker = lifecycle?.[TRUSTED_MANAGED_LIFECYCLE];
+  return Object.isFrozen(lifecycle)
+    && Object.isFrozen(marker)
+    && marker?.kind === lifecycle.kind
+    && marker?.launch === lifecycle.launch
+    && marker?.control === lifecycle.control
+    && marker?.finalize === lifecycle.finalize
+    && lifecycle.kind === 'owned-process';
+}
 
 /**
  * Trusted-coordinator adapter assembly. Everything behavioral (binaries,
@@ -42,14 +82,15 @@ export function createTrustedCoordinatorConfig(options = {}) {
     // Only machine-local trusted configuration may grant this.
     providerNativeGate: Object.freeze({ ...(options.providerNativeGate ?? {}) }),
     managedBindingId: options.managedBindingId ?? null,
-    ownedProcessCommand: options.ownedProcessCommand ?? null,
+    ownedProcessCommand: freezeOwnedProcessCommand(options.ownedProcessCommand),
     openCodeBin: options.openCodeBin ?? env.OPENCODE_BIN ?? 'opencode',
-    openCodeArgs: options.openCodeArgs ?? [],
+    openCodeArgs: Object.freeze([...(options.openCodeArgs ?? [])]),
     claudeBin: options.claudeBin ?? env.CLAUDE_BIN ?? 'claude',
-    claudeArgs: options.claudeArgs ?? [],
+    claudeArgs: Object.freeze([...(options.claudeArgs ?? [])]),
     codexBin: options.codexBin ?? env.CODEX_BIN ?? 'codex',
-    codexArgs: options.codexArgs ?? [],
-    fakeModeEnv: options.fakeModeEnv ?? {},
+    codexArgs: Object.freeze([...(options.codexArgs ?? [])]),
+    fakeModeEnv: Object.freeze({ ...(options.fakeModeEnv ?? {}) }),
+    hostIsolation: normalizeHostIsolationConfig(options.hostIsolation),
   };
   return Object.freeze(config);
 }
@@ -65,6 +106,7 @@ const TRUSTED_CONFIG_ALLOWED_FIELDS = new Set([
   'managedBindingId',
   'ownedProcess',
   'publicAdapters',
+  'hostIsolation',
 ]);
 // Fields a config FILE may never set: the fixture/bypass opt-ins are dual
 // opt-ins reserved for authorized harnesses, never file-granted privileges.
@@ -152,6 +194,7 @@ export function loadTrustedCoordinatorConfigFile(path) {
     disposableRoot: parsed.disposableRoot ?? null,
     providerNativeGate: parsed.providerNativeGate ?? {},
     managedBindingId: parsed.managedBindingId ?? null,
+    hostIsolation: parsed.hostIsolation ?? null,
     ownedProcessCommand: parsed.ownedProcess
       ? { command: parsed.ownedProcess.command, args: parsed.ownedProcess.args ?? [], env: { ...parsed.ownedProcess.env } }
       : null,
@@ -212,6 +255,15 @@ function requireTrusted(config, field, message) {
   if (!config[field]) throw new AiCliError('POLICY_DENIED', message, { exitCode: 2 });
 }
 
+function freezeOwnedProcessCommand(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return Object.freeze({
+    command: value.command,
+    args: Object.freeze([...(value.args ?? [])]),
+    env: Object.freeze({ ...(value.env ?? {}) }),
+  });
+}
+
 /**
  * One public lifecycle wrapper per adapter kind. `launch` starts the real
  * adapter surface using only trusted configuration; `control` maps the
@@ -220,17 +272,114 @@ function requireTrusted(config, field, message) {
  */
 export function createPublicLifecycle(kind, adapter, config) {
   switch (kind) {
-    case 'owned-process':
-      return {
+    case 'owned-process': {
+      const trustedOwnedProcessAdapter = isTrustedOwnedProcessAdapter(adapter);
+      const trustedCommand = freezeOwnedProcessCommand(config?.ownedProcessCommand);
+      const trustedHostIsolation = normalizeHostIsolationConfig(config?.hostIsolation);
+      const hostIsolationRequested = trustedHostIsolation !== null;
+      const lifecycle = {
         kind,
         spawnStyle: 'process',
         async launch(context) {
-          requireTrusted(config, 'ownedProcessCommand',
+          requireTrusted({ ownedProcessCommand: trustedCommand }, 'ownedProcessCommand',
             'owned-process dispatch requires a coordinator-owned launch command');
-          const { command, args = [], env = {} } = config.ownedProcessCommand;
-          // The worker learns its callback route through EXACTLY one trusted
-          // environment variable naming the capability file; the token itself
-          // never enters argv, env values, prompts or logs.
+          const { command, args = [], env = {} } = trustedCommand;
+          if (hostIsolationRequested) {
+            if (trustedHostIsolation?.mode !== HOST_ISOLATION_MODE) {
+              throw new AiCliError(
+                'ORCHESTRATION_INVALID_INPUT',
+                `hostIsolation.mode must be ${HOST_ISOLATION_MODE}`,
+                { exitCode: 2 },
+              );
+            }
+            if (!trustedOwnedProcessAdapter) {
+              throw new AiCliError(
+                HOST_ISOLATION_LIFECYCLE_UNTRUSTED,
+                'managed host isolation only binds the packaged owned-process adapter',
+                { exitCode: 2 },
+              );
+            }
+            // A G2-requested lifecycle cannot carry the legacy capability-file
+            // permit. Refusing a non-null value makes a supervisor wiring bug
+            // fail closed instead of silently downgrading the transport.
+            if (context.dispatch?.capabilityFile) {
+              throw new AiCliError(
+                HOST_ISOLATION_AUTHORITY_BYPASS,
+                'isolated managed lifecycle refuses a dispatch capability file',
+                { exitCode: 2 },
+              );
+            }
+            const broker = context.dispatch?.mediatedBroker;
+            if (!isTrustedMediatedToolBroker(broker)) {
+              throw new AiCliError(
+                'HOST_ISOLATION_BROKER_REQUIRED',
+                'isolated managed lifecycle requires a supervisor-created mediated broker',
+                { exitCode: 2 },
+              );
+            }
+            // The owned adapter creates the cwd before spawning. Do the same
+            // before building the canonical Seatbelt profile so missing tails
+            // are never handed to an ambient launch.
+            try {
+              mkdirSync(context.task.workspace, { recursive: true });
+            } catch {
+              throw new AiCliError(
+                'HOST_ISOLATION_UNSAFE_WORKSPACE',
+                'isolated managed workspace could not be created safely',
+                { exitCode: 2 },
+              );
+            }
+            const isolated = buildSeatbeltLaunchSpec({
+              command,
+              args,
+              cwd: context.task.workspace,
+              workspace: context.task.workspace,
+              allowedReadRoots: context.task.allowedReadRoots ?? [],
+              allowedWriteRoots: context.task.allowedWriteRoots ?? [],
+              protectedPaths: context.task.protectedPaths ?? [],
+              baseEnv: env,
+            });
+            const isolatedTask = { ...context.task, workspace: isolated.cwd };
+            let started;
+            try {
+              started = await adapter.spawn({
+                task: isolatedTask,
+                dispatch: context.dispatch,
+                emit: context.emit,
+                command: isolated.command,
+                args: isolated.args,
+                env: isolated.env,
+                brokerSocket: broker.socket,
+                cwdBinding: Object.freeze({
+                  workspace: isolated.proof.workspace,
+                  cwd: isolated.cwd,
+                  launchBoundary: HOST_ISOLATION_LAUNCH_BOUNDARY,
+                  workspaceReadSetDigest: isolated.proof.workspaceReadSetDigest,
+                }),
+                preamble: context.dispatch?.workerPacket ? renderWorkerPreamble(context.dispatch.workerPacket) : null,
+                refsDir: context.dispatch?.refsDir ?? null,
+                refNamespace: context.dispatch?.refNamespace ?? null,
+              });
+            } finally {
+              // child_process.spawn duplicates the descriptor into the child;
+              // the supervisor-side duplicate is never retained as authority.
+              try { broker.socket.destroy(); } catch { /* already closed */ }
+            }
+            if (!started?.binding) return started;
+            return {
+              ...started,
+              binding: {
+                ...started.binding,
+                hostIsolation: isolated.proof,
+                __managedBroker: broker,
+              },
+            };
+          }
+          // Legacy managed-G1 route: the worker learns its callback route
+          // through EXACTLY one trusted environment variable naming the
+          // capability file; the token itself never enters argv, env values,
+          // prompts or logs. Preserve this path byte-for-byte when no trusted
+          // isolation opt-in exists.
           const childEnv = { ...env };
           if (context.dispatch?.capabilityFile) {
             childEnv.WEBMCP_AI_WORKER_CAPABILITY_FILE = String(context.dispatch.capabilityFile);
@@ -262,9 +411,15 @@ export function createPublicLifecycle(kind, adapter, config) {
           };
         },
         async finalize(context) {
-          return adapter.close(context.bindingOnly ? {} : { binding: context.binding });
+          try {
+            return await adapter.close(context.bindingOnly ? {} : { binding: context.binding });
+          } finally {
+            await context.binding?.__managedBroker?.close?.();
+          }
         },
       };
+      return markTrustedManagedLifecycle(lifecycle, trustedOwnedProcessAdapter && hostIsolationRequested);
+    }
     case 'claude-stream':
       return {
         kind,
@@ -424,7 +579,8 @@ export function createPublicLifecycle(kind, adapter, config) {
 /** Build one validated public adapter from an inner adapter + lifecycle. */
 export function asPublicAdapter(inner, lifecycle) {
   const wrapped = { ...inner, lifecycle };
-  return validateAdapter(wrapped);
+  const validated = validateAdapter(wrapped);
+  return isTrustedManagedLifecycle(lifecycle) ? Object.freeze(validated) : validated;
 }
 
 /**

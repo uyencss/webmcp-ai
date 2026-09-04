@@ -76,6 +76,15 @@ import {
 } from './settlement.mjs';
 import { releaseRecoveredRuntimeDatabase } from './adapters/opencode-server.mjs';
 import { assertManagedDispatchEntry } from './managed-host/two-pass.mjs';
+import { isTrustedManagedLifecycle } from './public-adapters.mjs';
+import {
+  HOST_ISOLATION_MODE,
+  HOST_ISOLATION_LIFECYCLE_UNTRUSTED,
+  assertHostIsolationPrimitive,
+  assertTrustedMediatedBroker,
+  createMediatedToolBroker,
+  isHostIsolationRequested,
+} from './managed-host/host-isolation.mjs';
 
 const READ_ONLY_OPERATIONS = new Set(['coordination.inspect', 'delivery.wait']);
 
@@ -1933,6 +1942,29 @@ export async function createSupervisor(options = {}) {
   }
 
   /**
+   * Host isolation is a trusted lifecycle contract, not an adapter name or a
+   * model-visible claim. A requested isolated launch must bind to the exact
+   * public owned-process wrapper, have a real trusted broker definition and
+   * have the host primitive available before any child can exist.
+   */
+  function assertHostIsolationFor(adapter) {
+    if (!isHostIsolationRequested(trustedConfig)) return false;
+    if (trustedConfig?.hostIsolation?.mode !== HOST_ISOLATION_MODE) {
+      throw new AiCliError('ORCHESTRATION_INVALID_INPUT', `hostIsolation.mode must be ${HOST_ISOLATION_MODE}`, { exitCode: 2 });
+    }
+    if (adapter?.lifecycle?.kind !== 'owned-process' || !isTrustedManagedLifecycle(adapter.lifecycle)) {
+      throw new AiCliError(
+        HOST_ISOLATION_LIFECYCLE_UNTRUSTED,
+        'managed host isolation only binds the trusted owned-process public lifecycle',
+        { exitCode: 2 },
+      );
+    }
+    assertTrustedMediatedBroker(trustedConfig.hostIsolation);
+    assertHostIsolationPrimitive();
+    return true;
+  }
+
+  /**
    * The authoritative public dispatch pipeline: validate → resolve trusted
    * adapter → enforce maturity → capture supervisor-owned baseline → durable
    * state → launch through the adapter → ingest sanitized progress → retain a
@@ -1955,13 +1987,17 @@ export async function createSupervisor(options = {}) {
     // after the selection receipt and before this preflight; legacy observe
     // dispatches retain their historical create-after-preflight ordering.
     assertPublicDispatchMaturity(adapter);
+    const hostIsolationRequested = assertHostIsolationFor(adapter);
     assertConfinementFor(packet, adapter);
     // Re-check protected/write geometry after the receipt barrier so a TOCTOU
     // substitution still fails closed before any worker can exist.
     assertNoProtectedWriteOverlap(packet);
 
     const bindingId = `worker_${randomUUID().slice(0, 12)}`;
-    const capabilityToken = generateDispatchCapabilityToken();
+    // The legacy callback capability is a G1 transport. An isolated launch
+    // gets no token/file at all: its only child authority is the supervisor's
+    // inherited mediated broker descriptor.
+    const capabilityToken = hostIsolationRequested ? null : generateDispatchCapabilityToken();
     const fenceEpoch = store.state.fenceEpoch;
 
     // Supervisor-owned pre-dispatch workspace baseline. Non-git fixture
@@ -2011,24 +2047,27 @@ export async function createSupervisor(options = {}) {
       mode: dispatchMode,
       guaranteeTier: 'owned-process',
       fenceEpoch,
+      transport: hostIsolationRequested ? 'mediated-webmcp-broker' : 'dispatch-callback',
     });
     const workerPreamble = renderWorkerPreamble(workerPacket);
     let capabilityFile = null;
-    try {
-      capabilityFile = writeDispatchCapability({
-        coordinationDir: layout.coordinationDir,
-        endpoint,
-        coordinationId,
-        taskId,
-        dispatchId,
-        bindingId,
-        fenceEpoch,
-        capabilityToken,
-      });
-    } catch {
-      // A capability file that cannot be persisted means callbacks can never
-      // authenticate; the dispatch still launches but stays callback-less.
-      capabilityFile = null;
+    if (!hostIsolationRequested) {
+      try {
+        capabilityFile = writeDispatchCapability({
+          coordinationDir: layout.coordinationDir,
+          endpoint,
+          coordinationId,
+          taskId,
+          dispatchId,
+          bindingId,
+          fenceEpoch,
+          capabilityToken,
+        });
+      } catch {
+        // A capability file that cannot be persisted means callbacks can
+        // never authenticate; preserve the legacy callback-less behavior.
+        capabilityFile = null;
+      }
     }
 
     const emit = (type, payload) => {
@@ -2060,7 +2099,19 @@ export async function createSupervisor(options = {}) {
     });
 
     let started;
+    let mediatedBroker = null;
     try {
+      if (hostIsolationRequested) {
+        mediatedBroker = await createMediatedToolBroker({
+          socketRoot: roots.ipcRoot,
+          dispatchId,
+          bindingId,
+          taskId,
+          fenceEpoch,
+          task: taskContext,
+          broker: trustedConfig.hostIsolation.broker,
+        });
+      }
       // Durable LAUNCH INTENT before any child can exist: if this owner dies
       // between spawn and runtime-binding persistence, recovery still finds a
       // machine-local, secret-free lease naming exactly what was launched.
@@ -2111,6 +2162,7 @@ export async function createSupervisor(options = {}) {
           mode: dispatchMode,
           guaranteeTier: 'owned-process',
           capabilityFile,
+          ...(mediatedBroker ? { mediatedBroker } : {}),
           workerPacket,
           onSpawned: async ({ pid, processGroupId, startIdentity, identityProven, cleanupLease }) => {
             // Launch-intent HANDSHAKE: the adapter calls this the instant the
@@ -2147,6 +2199,7 @@ export async function createSupervisor(options = {}) {
         doneForServer: serverDone,
       });
     } catch (error) {
+      try { await mediatedBroker?.close?.(); } catch { /* recovery remains fail-closed */ }
       // Launch failure must leave truthful durable state, never a phantom
       // active dispatch.
       commit({
@@ -2203,7 +2256,7 @@ export async function createSupervisor(options = {}) {
       capability: adapter.lifecycle.kind,
       taskId,
       fenceEpoch,
-      callbackCapabilityDigest: capabilityDigestOf(capabilityToken),
+      ...(capabilityToken ? { callbackCapabilityDigest: capabilityDigestOf(capabilityToken) } : {}),
       ...(capabilityFile ? { callbackCapabilityPath: capabilityFile } : {}),
       ...(identity
         ? {

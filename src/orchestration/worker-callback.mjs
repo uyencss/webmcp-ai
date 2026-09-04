@@ -22,6 +22,7 @@ export function capabilityDigestOf(token) {
  * callback endpoint/capability; objective and policy travel as digests only.
  */
 export function buildWorkerPacket(task, dispatch) {
+  const mediated = dispatch.transport === 'mediated-webmcp-broker';
   return {
     schema: 'webmcp.ai-worker-packet/v0',
     coordinationId: dispatch.coordinationId,
@@ -44,8 +45,11 @@ export function buildWorkerPacket(task, dispatch) {
     allowedReadRoots: task.allowedReadRoots ?? [],
     allowedWriteRoots: task.allowedWriteRoots ?? [],
     protectedPaths: task.protectedPaths ?? [],
-    questionRoute: 'dispatch-callback',
-    terminalReportRoute: 'dispatch-callback',
+    // G2 workers have no callback-capability file. The only external tool
+    // surface is the inherited broker descriptor; terminal state is proven by
+    // the owned process exit and supervisor finalizer.
+    questionRoute: mediated ? 'mediated-webmcp-broker-fd-3' : 'dispatch-callback',
+    terminalReportRoute: mediated ? 'owned-process-exit' : 'dispatch-callback',
     cleanupOwner: 'coordination',
     acceptanceCommands: (task.acceptanceCommands ?? []).slice(0, 16),
   };
