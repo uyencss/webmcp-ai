@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -135,4 +136,51 @@ test('R8D: range gate applies only when the owner base exists locally', () => {
   assert.equal(rangeCheckApplies(repoRoot, '29eed4d18f7797dfd24bf9e6aa2ce1f314d57f0e'), true);
   // An arbitrary absent SHA must not break the permanent lifecycle.
   assert.equal(rangeCheckApplies(repoRoot, '0'.repeat(40)), false);
+});
+
+test('R8: packed AI CLI carries its runtime SDK for offline consumers', (t) => {
+  const packageRoot = new URL('..', import.meta.url).pathname;
+  const packageJson = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
+  const lockJson = JSON.parse(readFileSync(join(packageRoot, 'package-lock.json'), 'utf8'));
+
+  assert.ok(
+    packageJson.bundledDependencies?.includes('@opencode-ai/sdk'),
+    'the runtime SDK must be declared as a bundled dependency',
+  );
+  assert.equal(
+    lockJson.packages[''].dependencies?.['@opencode-ai/sdk'],
+    packageJson.dependencies['@opencode-ai/sdk'],
+    'package-lock.json must pin the same SDK version as package.json',
+  );
+
+  const packDir = tempRoot(t, 'sdk-bundle');
+  const output = execFileSync('npm', [
+    'pack', '--ignore-scripts', '--json', '--pack-destination', packDir,
+  ], { cwd: packageRoot, encoding: 'utf8' });
+  const [packed] = JSON.parse(output);
+  assert.ok(
+    packed.bundled?.includes('@opencode-ai/sdk'),
+    `npm pack must report the bundled SDK: ${JSON.stringify(packed)}`,
+  );
+  assert.ok(
+    packed.files.some(({ path }) => path === 'node_modules/@opencode-ai/sdk/package.json'),
+    'the packed artifact must contain the SDK manifest',
+  );
+
+  const shippedPaths = new Set(packed.files.map(({ path }) => path));
+  const bundledAudit = auditShippedPaths(
+    shippedPaths,
+    join(packageRoot, 'src/orchestration/schemas'),
+    packed.bundled,
+  );
+  assert.equal(bundledAudit.ok, true, JSON.stringify(bundledAudit.violations));
+
+  const withUndeclaredPrivatePath = new Set([...shippedPaths, 'node_modules/rogue/package.json']);
+  const privateAudit = auditShippedPaths(
+    withUndeclaredPrivatePath,
+    join(packageRoot, 'src/orchestration/schemas'),
+    packed.bundled,
+  );
+  assert.equal(privateAudit.ok, false);
+  assert.ok(privateAudit.violations.some((violation) => violation.includes('node_modules/rogue')));
 });

@@ -53,5 +53,8 @@
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.18.21"
-  }
+  },
+  "bundledDependencies": [
+    "@opencode-ai/sdk"
+  ]
 }

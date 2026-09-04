@@ -42,8 +42,9 @@ function isolatedTemp(name) {
  * the packed file list. Removing ANY required orchestration module, schema,
  * skill or reference asset fails closure.
  */
-export function auditShippedPaths(shippedPaths, schemasDir) {
+export function auditShippedPaths(shippedPaths, schemasDir, bundledPackages = []) {
   const shipped = shippedPaths instanceof Set ? shippedPaths : new Set(shippedPaths);
+  const bundled = new Set(bundledPackages);
   const violations = [];
   const requiredPaths = [
     'bin/webmcp-ai.mjs',
@@ -70,9 +71,17 @@ export function auditShippedPaths(shippedPaths, schemasDir) {
   for (const required of requiredPaths) {
     if (!shipped.has(required)) violations.push(`tarball is missing required path: ${required}`);
   }
-  const forbiddenPrefixes = ['tests/', 'node_modules/', '.github/', '.git'];
+  const forbiddenPrefixes = ['tests/', '.github/', '.git'];
+  const packageNameForBundledPath = (shippedPath) => {
+    if (!shippedPath.startsWith('node_modules/')) return null;
+    const segments = shippedPath.split('/');
+    if (segments[1]?.startsWith('@')) return segments.slice(1, 3).join('/');
+    return segments[1] ?? null;
+  };
   for (const shippedPath of shipped) {
-    if (forbiddenPrefixes.some((prefix) => shippedPath === prefix || shippedPath.startsWith(prefix))) {
+    const isUndeclaredNodeModule = shippedPath.startsWith('node_modules/')
+      && !bundled.has(packageNameForBundledPath(shippedPath));
+    if (isUndeclaredNodeModule || forbiddenPrefixes.some((prefix) => shippedPath === prefix || shippedPath.startsWith(prefix))) {
       violations.push(`tarball must not ship private path: ${shippedPath}`);
     }
   }
@@ -167,10 +176,14 @@ export async function runPackageClosure({
   requireCondition(tarballPath !== null && existsSync(tarballPath), 'packed tarball exists on disk in the isolated destination');
 
   const shippedPaths = new Set((tarball?.files ?? []).map((entry) => entry.path));
-  const manifestAudit = auditShippedPaths(shippedPaths, join(repoRoot, 'src/orchestration/schemas'));
+  const manifestAudit = auditShippedPaths(
+    shippedPaths,
+    join(repoRoot, 'src/orchestration/schemas'),
+    tarball?.bundled ?? [],
+  );
   for (const violation of manifestAudit.violations) violations.push(violation);
   checks.push({ check: 'tarball manifest covers every required contract surface', ok: manifestAudit.ok });
-  checks.push({ check: 'tarball excludes tests/, node_modules/ and dot-directories', ok: !manifestAudit.violations.some((v) => v.includes('must not ship private path')) });
+  checks.push({ check: 'tarball excludes tests/, undeclared node_modules/ and dot-directories', ok: !manifestAudit.violations.some((v) => v.includes('must not ship private path')) });
 
   // ---- 3: version + guide seam consistency ----------------------------------
 
