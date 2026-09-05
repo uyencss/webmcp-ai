@@ -24,7 +24,7 @@
     "./bin": "./bin/webmcp-ai.mjs",
     "./providers": "./src/providers/index.mjs",
     "./protocol": "./src/protocol.mjs",
-    "./orchestration": "./src/orchestration/client.mjs",
+    "./orchestration": "./src/orchestration/public-entry.mjs",
     "./package.json": "./package.json"
   },
   "files": [
