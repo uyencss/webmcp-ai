@@ -81,6 +81,7 @@ import {
   HOST_ISOLATION_MODE,
   HOST_ISOLATION_LIFECYCLE_UNTRUSTED,
   assertHostIsolationPrimitive,
+  assertCoordinatorDispatcher,
   assertTrustedMediatedBroker,
   createMediatedToolBroker,
   isHostIsolationRequested,
@@ -477,7 +478,12 @@ export async function createSupervisor(options = {}) {
     trustedCoordinatorConfig: trustedConfig = null,
     identityDepsFactory = null,
     trustedEntryEvidence: trustedEntryEvidenceOpt = null,
+    coordinatorDispatcher: coordinatorDispatcherOpt = null,
   } = options;
+  // Browser authority is executable coordinator state, never a task/config
+  // field. A malformed option is rejected before any supervisor state can
+  // accidentally expose a downgraded worker route.
+  const coordinatorDispatcher = assertCoordinatorDispatcher(coordinatorDispatcherOpt);
   // Injectable platform identity probes (test seam): production always uses
   // the real per-platform probes. Every signalling decision flows through
   // this factory so identity drift is deterministically testable.
@@ -2110,6 +2116,7 @@ export async function createSupervisor(options = {}) {
           fenceEpoch,
           task: taskContext,
           broker: trustedConfig.hostIsolation.broker,
+          dispatcher: coordinatorDispatcher,
         });
       }
       // Durable LAUNCH INTENT before any child can exist: if this owner dies

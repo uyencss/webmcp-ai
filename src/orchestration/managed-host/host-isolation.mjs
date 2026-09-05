@@ -33,7 +33,19 @@ export const HOST_ISOLATION_LIFECYCLE_UNTRUSTED = 'HOST_ISOLATION_LIFECYCLE_UNTR
 export const HOST_ISOLATION_UNSAFE_WORKSPACE = 'HOST_ISOLATION_UNSAFE_WORKSPACE';
 export const HOST_ISOLATION_BOUNDARY_MISMATCH = 'HOST_ISOLATION_BOUNDARY_MISMATCH';
 export const HOST_ISOLATION_AUTHORITY_BYPASS = 'HOST_ISOLATION_AUTHORITY_BYPASS';
+export const HOST_ISOLATION_DISPATCHER_REQUIRED = 'HOST_ISOLATION_DISPATCHER_REQUIRED';
+export const HOST_ISOLATION_DISPATCHER_UNTRUSTED = 'HOST_ISOLATION_DISPATCHER_UNTRUSTED';
 export const HOST_ISOLATION_BROKER_PROTOCOL = 'webmcp-managed-broker/1';
+export const COORDINATOR_DISPATCHER_SCHEMA = 'webmcp-coordinator-dispatcher/1';
+export const COORDINATOR_DISPATCHER_IMPLEMENTATION = 'coordinator-owned-webmcp-v1';
+// This symbol is a process-local trust marker. It is intentionally never
+// serialized into a task, trusted JSON descriptor, IPC frame or child env.
+export const COORDINATOR_DISPATCHER_MARKER = Symbol.for('webmcp.coordinator-dispatcher.marker/1');
+export const COORDINATOR_DISPATCH_REQUEST_SCHEMA = 'webmcp-coordinator-dispatch-request/1';
+export const COORDINATOR_DISPATCH_TOOLS = Object.freeze([
+  'webmcp.invokeTool',
+  'webmcp.listTools',
+]);
 export const BROKER_PROTOCOL_ERROR = 'BROKER_PROTOCOL_ERROR';
 export const UNLISTED_MCP_TOOL_DENIED = 'UNLISTED_MCP_TOOL_DENIED';
 export const BROKER_FD = 3;
@@ -94,7 +106,10 @@ const NETWORK_HOST = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d{1,5})?(?:[/?#].*)?
 const PATH_SEPARATOR = /[\\/]/;
 const SHELL_FRAGMENT = /(?:^|\s)(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|fish|dash|cmd|powershell|pwsh|node|python\d*|perl)(?:\s|$)|[;&|`$<>]/i;
 const COORDINATOR_BROKER_TOOLS = Object.freeze({
-  [HOST_ISOLATION_BROKER_IMPLEMENTATION]: Object.freeze(['webmcp.echo']),
+  [HOST_ISOLATION_BROKER_IMPLEMENTATION]: Object.freeze([
+    'webmcp.echo',
+    ...COORDINATOR_DISPATCH_TOOLS,
+  ]),
 });
 
 function fail(code, message, details = undefined) {
@@ -105,6 +120,46 @@ function isPlainObject(value) {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function deepFreezeJson(value, seen = new Set()) {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) deepFreezeJson(item, seen);
+  } else {
+    for (const item of Object.values(value)) deepFreezeJson(item, seen);
+  }
+  seen.delete(value);
+  return Object.freeze(value);
+}
+
+export function assertCoordinatorDispatcher(dispatcher) {
+  if (dispatcher === undefined || dispatcher === null) return null;
+  const marker = typeof dispatcher === 'function'
+    ? dispatcher[COORDINATOR_DISPATCHER_MARKER]
+    : null;
+  const markerDescriptor = typeof dispatcher === 'function'
+    ? Object.getOwnPropertyDescriptor(dispatcher, COORDINATOR_DISPATCHER_MARKER)
+    : null;
+  if (
+    typeof dispatcher !== 'function'
+    || !Object.isFrozen(dispatcher)
+    || !Object.isFrozen(marker)
+    || !markerDescriptor
+    || markerDescriptor.enumerable
+    || markerDescriptor.writable
+    || markerDescriptor.configurable
+    || markerDescriptor.value !== marker
+    || marker?.schema !== COORDINATOR_DISPATCHER_SCHEMA
+    || marker?.implementation !== COORDINATOR_DISPATCHER_IMPLEMENTATION
+    || marker?.dispatch !== dispatcher
+    || marker?.owner !== 'coordinator'
+  ) {
+    fail(HOST_ISOLATION_DISPATCHER_UNTRUSTED,
+      'managed browser dispatch requires a frozen coordinator-owned dispatcher callback');
+  }
+  return dispatcher;
 }
 
 export function isTrustedMediatedToolBroker(broker) {
@@ -841,16 +896,69 @@ function validateBrokerRequest(raw, scope) {
   return Object.freeze({ requestId: raw.requestId, tool: raw.tool, input });
 }
 
+const COORDINATOR_TOOL_FIELDS = Object.freeze({
+  'webmcp.listTools': Object.freeze(new Set(['tabId'])),
+  'webmcp.invokeTool': Object.freeze(new Set(['toolName', 'input', 'frame', 'tabId'])),
+});
+const WEBMCP_PAGE_TOOL_NAME = /^[A-Za-z][A-Za-z0-9._:-]{0,127}$/;
+
+function validateCoordinatorToolInput(tool, input, scope) {
+  const fields = COORDINATOR_TOOL_FIELDS[tool];
+  if (!fields) fail(UNLISTED_MCP_TOOL_DENIED, `coordinator dispatcher does not implement ${tool}`);
+  const unknown = Object.keys(input).filter((key) => !fields.has(key));
+  if (unknown.length > 0) {
+    fail(BROKER_PROTOCOL_ERROR, `coordinator dispatcher input has unknown field(s): ${unknown.sort().join(', ')}`);
+  }
+  if (input.tabId !== undefined && (!Number.isInteger(input.tabId) || input.tabId < 0 || input.tabId > 2 ** 31 - 1)) {
+    fail(BROKER_PROTOCOL_ERROR, 'coordinator dispatcher tabId must be a bounded integer');
+  }
+  if (tool === 'webmcp.invokeTool') {
+    if (typeof input.toolName !== 'string' || !WEBMCP_PAGE_TOOL_NAME.test(input.toolName)) {
+      fail(BROKER_PROTOCOL_ERROR, 'webmcp.invokeTool requires a bounded page toolName');
+    }
+    if (input.input !== undefined && !isPlainObject(input.input)) {
+      fail(BROKER_PROTOCOL_ERROR, 'webmcp.invokeTool input must be an object');
+    }
+    if (input.frame !== undefined && (typeof input.frame !== 'string' || input.frame.length > 256)) {
+      fail(BROKER_PROTOCOL_ERROR, 'webmcp.invokeTool frame must be a bounded string');
+    }
+  }
+  validateBrokerInput(input, scope, 'broker.input');
+}
+
 /**
  * Closed coordinator-owned broker implementation table. A trusted JSON file
  * selects only an identifier; it cannot select a module, source string,
  * callback, executable or other code-bearing authority.
  */
-function resolveBrokerImplementation(implementation) {
+function resolveBrokerImplementation(implementation, dispatcher = null) {
   if (implementation !== HOST_ISOLATION_BROKER_IMPLEMENTATION) {
     fail(HOST_ISOLATION_BROKER_REQUIRED, `unknown coordinator-owned broker implementation ${String(implementation)}`);
   }
-  return async ({ tool, input }) => {
+  return async ({ tool, input, scope }) => {
+    if (COORDINATOR_DISPATCH_TOOLS.includes(tool)) {
+      if (typeof dispatcher !== 'function') {
+        fail(HOST_ISOLATION_DISPATCHER_REQUIRED,
+          'mediated WebMCP browser dispatch requires a coordinator-owned runtime callback');
+      }
+      validateCoordinatorToolInput(tool, input, scope);
+      const request = deepFreezeJson({
+        schema: COORDINATOR_DISPATCH_REQUEST_SCHEMA,
+        tool,
+        input: deepFreezeJson(input),
+        dispatchId: scope.dispatchId,
+        taskId: scope.taskId,
+        fenceEpoch: scope.fenceEpoch,
+      });
+      try {
+        return await dispatcher(request);
+      } catch {
+        // The callback is coordinator-owned code, but its errors must not cross
+        // the worker boundary: permit, profile, gateway and implementation
+        // details remain outside the model-visible broker protocol.
+        fail(BROKER_PROTOCOL_ERROR, 'coordinator dispatcher rejected the mediated request');
+      }
+    }
     if (tool !== 'webmcp.echo') {
       fail(UNLISTED_MCP_TOOL_DENIED, `coordinator-owned broker does not implement ${tool}`);
     }
@@ -962,6 +1070,7 @@ export async function createMediatedToolBroker({
   fenceEpoch,
   task,
   broker,
+  dispatcher = null,
 } = {}) {
   const normalizedRoot = absolutePath(socketRoot, 'managed broker socket root');
   const normalizedDispatchId = boundedString(dispatchId, 'dispatchId', 256);
@@ -969,7 +1078,12 @@ export async function createMediatedToolBroker({
   const normalizedTaskId = boundedString(taskId, 'taskId', 256);
   if (!Number.isInteger(fenceEpoch) || fenceEpoch < 0) fail('ORCHESTRATION_INVALID_INPUT', 'managed broker fenceEpoch must be a non-negative integer');
   const trusted = assertTrustedMediatedBroker({ mode: HOST_ISOLATION_MODE, broker });
-  const invoke = resolveBrokerImplementation(trusted.implementation);
+  const trustedDispatcher = assertCoordinatorDispatcher(dispatcher);
+  if (trusted.allowedTools.some((tool) => COORDINATOR_DISPATCH_TOOLS.includes(tool)) && !trustedDispatcher) {
+    fail(HOST_ISOLATION_DISPATCHER_REQUIRED,
+      'the configured WebMCP browser tool allow-list requires a coordinator-owned runtime callback');
+  }
+  const invoke = resolveBrokerImplementation(trusted.implementation, trustedDispatcher);
   const scope = normalizeScope(task);
   try {
     mkdirSync(normalizedRoot, { recursive: true, mode: 0o700 });
