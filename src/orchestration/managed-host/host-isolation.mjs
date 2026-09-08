@@ -50,6 +50,13 @@ export const BROKER_PROTOCOL_ERROR = 'BROKER_PROTOCOL_ERROR';
 export const UNLISTED_MCP_TOOL_DENIED = 'UNLISTED_MCP_TOOL_DENIED';
 export const BROKER_FD = 3;
 export const DARWIN_SANDBOX_EXEC_PATH = '/usr/bin/sandbox-exec';
+export const LINUX_BWRAP_PATH = '/usr/bin/bwrap';
+export const LINUX_UNSHARE_PATH = '/usr/bin/unshare';
+export const LINUX_SYSTEMD_RUN_PATH = '/usr/bin/systemd-run';
+export const HOST_ISOLATION_LINUX_PRIMITIVE_BWRAP = 'linux-bubblewrap-bwrap';
+export const HOST_ISOLATION_LINUX_PRIMITIVE_UNSHARE = 'linux-namespaces-unshare';
+export const HOST_ISOLATION_LINUX_PRIMITIVE_SYSTEMD = 'linux-systemd-isolation';
+export const HOST_ISOLATION_LAUNCH_BOUNDARY_LINUX = 'linux-namespace-mount-boundary-v1';
 
 // Node's child_process.spawn accepts only a pathname for cwd, so Node cannot
 // make a whole directory tree atomic with the spawn syscall. On Darwin the
@@ -404,32 +411,74 @@ export function isHostIsolationRequested(config) {
   return config?.hostIsolation !== undefined && config?.hostIsolation !== null;
 }
 
-export function probeHostIsolation({ platform = process.platform, sandboxExecPath = DARWIN_SANDBOX_EXEC_PATH } = {}) {
-  const executable = typeof sandboxExecPath === 'string' && isAbsolute(sandboxExecPath) ? sandboxExecPath : null;
-  const available = platform === 'darwin' && executable !== null && (() => {
-    try {
-      accessSync(executable, fsConstants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  return Object.freeze({
-    available,
-    platform,
-    executable: available ? executable : null,
-    primitive: available ? HOST_ISOLATION_PRIMITIVE : null,
-  });
+function isExecutablePath(candidate) {
+  if (typeof candidate !== 'string' || !isAbsolute(candidate)) return false;
+  try {
+    accessSync(candidate, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-export function assertHostIsolationPrimitive({ platform = process.platform, sandboxExecPath = DARWIN_SANDBOX_EXEC_PATH } = {}) {
-  const observed = probeHostIsolation({ platform, sandboxExecPath });
+export function probeHostIsolation({
+  platform = process.platform,
+  sandboxExecPath = DARWIN_SANDBOX_EXEC_PATH,
+  bwrapPath = LINUX_BWRAP_PATH,
+  unsharePath = LINUX_UNSHARE_PATH,
+  systemdRunPath = LINUX_SYSTEMD_RUN_PATH,
+} = {}) {
+  if (platform === 'darwin') {
+    const executable = typeof sandboxExecPath === 'string' && isAbsolute(sandboxExecPath) ? sandboxExecPath : null;
+    const available = executable !== null && isExecutablePath(executable);
+    return Object.freeze({
+      available,
+      platform,
+      executable: available ? executable : null,
+      primitive: available ? HOST_ISOLATION_PRIMITIVE : null,
+    });
+  }
+  if (platform === 'linux') {
+    // Preference order on MiniPC (Ubuntu 24.04): bubblewrap first for mount
+    // isolation, then unshare namespaces/seccomp, then a systemd slice
+    // fallback. All three are coordinator-owned executables resolved here —
+    // never from JSON, task packets, or IPC.
+    if (isExecutablePath(bwrapPath)) {
+      return Object.freeze({
+        available: true, platform, executable: bwrapPath, primitive: HOST_ISOLATION_LINUX_PRIMITIVE_BWRAP,
+      });
+    }
+    if (isExecutablePath(unsharePath)) {
+      return Object.freeze({
+        available: true, platform, executable: unsharePath, primitive: HOST_ISOLATION_LINUX_PRIMITIVE_UNSHARE,
+      });
+    }
+    if (isExecutablePath(systemdRunPath)) {
+      return Object.freeze({
+        available: true, platform, executable: systemdRunPath, primitive: HOST_ISOLATION_LINUX_PRIMITIVE_SYSTEMD,
+      });
+    }
+    return Object.freeze({ available: false, platform, executable: null, primitive: null });
+  }
+  return Object.freeze({ available: false, platform, executable: null, primitive: null });
+}
+
+export function assertHostIsolationPrimitive({
+  platform = process.platform,
+  sandboxExecPath = DARWIN_SANDBOX_EXEC_PATH,
+  bwrapPath = LINUX_BWRAP_PATH,
+  unsharePath = LINUX_UNSHARE_PATH,
+  systemdRunPath = LINUX_SYSTEMD_RUN_PATH,
+} = {}) {
+  const observed = probeHostIsolation({ platform, sandboxExecPath, bwrapPath, unsharePath, systemdRunPath });
   if (!observed.available) {
     fail(HOST_ISOLATION_PRIMITIVE_UNAVAILABLE,
-      'managed host isolation requires the Darwin Seatbelt sandbox-exec primitive', {
+      'managed host isolation requires a coordinator-owned primitive (Darwin sandbox-exec, or Linux bwrap/unshare/systemd-run)', {
         schema: HOST_ISOLATION_SCHEMA,
         requiredMode: HOST_ISOLATION_MODE,
-        missingPrimitive: HOST_ISOLATION_PRIMITIVE,
+        missingPrimitive: platform === 'linux'
+          ? HOST_ISOLATION_LINUX_PRIMITIVE_BWRAP
+          : HOST_ISOLATION_PRIMITIVE,
       });
   }
   return observed;
@@ -661,6 +710,31 @@ function rememberWorkspaceReadSet(workspace, snapshot, digest) {
   WORKSPACE_READ_SET_SNAPSHOTS.set(digest, Object.freeze({ workspace, entries: snapshot }));
 }
 
+function buildLinuxSandboxArgs({ primitive, executable, args, roots }) {
+  if (primitive.primitive === HOST_ISOLATION_LINUX_PRIMITIVE_BWRAP) {
+    const sandboxArgs = [
+      '--die-with-parent',
+      '--unshare-all',
+      '--clearenv',
+      '--setenv', 'HOME', roots.workspace,
+      '--setenv', 'TMPDIR', roots.workspace,
+      '--ro-bind', '/usr', '/usr',
+      '--bind', roots.workspace, roots.workspace,
+      ...roots.allowedWriteRoots.flatMap((root) => (root === roots.workspace ? [] : ['--bind', root, root])),
+      ...roots.allowedReadRoots
+        .filter((root) => !isWithin(root, roots.workspace) && !isWithin(roots.workspace, root))
+        .flatMap((root) => ['--ro-bind', root, root]),
+      '--chdir', roots.cwd,
+      '--', executable, ...args,
+    ];
+    return Object.freeze(sandboxArgs);
+  }
+  if (primitive.primitive === HOST_ISOLATION_LINUX_PRIMITIVE_UNSHARE) {
+    return Object.freeze(['--mount', '--uts', '--ipc', '--net', '--pid', '--fork', '--mount-proc', '--', executable, ...args]);
+  }
+  return Object.freeze(['--scope', '--slice=webmcp-isolated.slice', '--', executable, ...args]);
+}
+
 export function buildSeatbeltLaunchSpec({
   command,
   args = [],
@@ -671,9 +745,12 @@ export function buildSeatbeltLaunchSpec({
   protectedPaths = [],
   baseEnv = {},
   sandboxExecPath = DARWIN_SANDBOX_EXEC_PATH,
+  bwrapPath = LINUX_BWRAP_PATH,
+  unsharePath = LINUX_UNSHARE_PATH,
+  systemdRunPath = LINUX_SYSTEMD_RUN_PATH,
   platform = process.platform,
 } = {}) {
-  const primitive = assertHostIsolationPrimitive({ platform, sandboxExecPath });
+  const primitive = assertHostIsolationPrimitive({ platform, sandboxExecPath, bwrapPath, unsharePath, systemdRunPath });
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) {
     fail('ORCHESTRATION_INVALID_INPUT', 'managed host argv must be an array of strings');
   }
@@ -681,9 +758,29 @@ export function buildSeatbeltLaunchSpec({
   assertNativeExecutable(executable);
   const roots = validateLaunchRoots({ workspace, cwd, allowedReadRoots, allowedWriteRoots, protectedPaths });
   const env = safeChildEnv(roots.workspace, baseEnv);
-  const profile = buildSeatbeltProfile({ executable, roots });
   const readSetDigest = workspaceReadSetDigest(roots.workspaceReadSnapshot);
   rememberWorkspaceReadSet(roots.workspace, roots.workspaceReadSnapshot, readSetDigest);
+  if (primitive.primitive !== HOST_ISOLATION_PRIMITIVE) {
+    const linuxArgs = buildLinuxSandboxArgs({ primitive, executable, args, roots });
+    return Object.freeze({
+      command: primitive.executable,
+      args: linuxArgs,
+      cwd: roots.cwd,
+      env,
+      proof: Object.freeze({
+        schema: HOST_ISOLATION_SCHEMA,
+        mode: HOST_ISOLATION_MODE,
+        primitive: primitive.primitive,
+        brokerFd: BROKER_FD,
+        cwdBinding: 'kernel-inherited-directory-cwd',
+        launchBoundary: HOST_ISOLATION_LAUNCH_BOUNDARY_LINUX,
+        workspace: roots.workspace,
+        allowedWriteRoots: roots.allowedWriteRoots,
+        workspaceReadSetDigest: readSetDigest,
+      }),
+    });
+  }
+  const profile = buildSeatbeltProfile({ executable, roots });
   return Object.freeze({
     command: primitive.executable,
     args: Object.freeze(['-p', profile, executable, ...args]),
