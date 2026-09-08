@@ -53,6 +53,17 @@ test('codex events map to bounded evidence and drop reasoning content', () => {
   assert.equal(mapped.some((entry) => entry.kind === 'turn_completed'), true);
 });
 
+test('codex agent messages preserve a bounded response text for public canary validation', () => {
+  const mapped = normalizeCodexEvent({
+    type: 'item.completed',
+    item: { id: 'msg-1', type: 'agent_message', text: 'ok' },
+  });
+
+  assert.equal(mapped.kind, 'agent_message');
+  assert.equal(mapped.deliveryType, 'progress');
+  assert.equal(mapped.payload.responseText, 'ok');
+});
+
 function makeAdapter(t, extra = {}) {
   return createCodexExecAdapter({
     stateDir: tempDir(t, 'state'),

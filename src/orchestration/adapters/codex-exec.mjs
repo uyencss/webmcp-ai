@@ -71,6 +71,16 @@ export function normalizeCodexEvent(event, binding = null) {
           payload: { changes: item.changes ?? [] },
         });
       }
+      if (item.type === 'agent_message') {
+        const responseText = typeof item.text === 'string' ? item.text.trim().slice(0, 2000) : '';
+        if (!responseText) return null;
+        return sanitize({
+          kind: 'agent_message',
+          deliveryType: 'progress',
+          summary: responseText,
+          payload: { responseText },
+        });
+      }
       return null;
     }
     case 'error':

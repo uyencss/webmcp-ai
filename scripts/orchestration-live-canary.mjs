@@ -318,6 +318,7 @@ async function runPublicSupervisorPhase(targetKind, { objective = 'Reply with ex
     let cursor = 0;
     let progressEvents = 0;
     let doneSummary = null;
+    let responseText = null;
     const deadline = Date.now() + Math.min(timeoutMs, 90_000);
     for (;;) {
       const wait = await call('delivery.wait', { afterSequence: cursor, timeoutMs: 2_000 });
@@ -325,6 +326,9 @@ async function runPublicSupervisorPhase(targetKind, { objective = 'Reply with ex
       for (const delivery of wait.result.deliveries ?? []) {
         seen.add(delivery.type);
         if (delivery.type === 'progress') progressEvents += 1;
+        if (typeof delivery.payload?.responseText === 'string') {
+          responseText = delivery.payload.responseText.trim().slice(0, 2000);
+        }
         if (delivery.type === 'worker_done') {
           doneSummary = String(delivery.payload?.summary ?? '').trim();
         }
@@ -348,6 +352,7 @@ async function runPublicSupervisorPhase(targetKind, { objective = 'Reply with ex
       startedOk: true,
       progressEvents,
       doneSummary,
+      responseText,
       cleanupDisposition: null,
       sessionId: startResponse.result.sessionId ?? null,
       settled,
@@ -513,7 +518,7 @@ async function scenarioCodexExec() {
   const capabilities = capabilityScaffold();
   capabilities.launch = phase.startedOk ? 'pass' : 'fail';
   capabilities.progressStream = (phase.progressEvents ?? 0) > 0 ? 'pass' : 'fail';
-  capabilities.promptRoundTrip = phase.doneSummary?.toLowerCase() === 'ok' ? 'pass' : 'fail';
+  capabilities.promptRoundTrip = phase.responseText?.toLowerCase() === 'ok' ? 'pass' : 'fail';
   capabilities.cleanup = phase.pass ? 'pass' : 'fail';
   capabilities.publicSupervisorLifecycle = phase.pass ? 'pass' : 'fail';
 
@@ -521,6 +526,7 @@ async function scenarioCodexExec() {
     ok: requiredCapabilitiesSatisfied(capabilities),
     evidence: {
       doneSummary: phase.doneSummary,
+      responseText: phase.responseText,
       progressEvents: phase.progressEvents,
       modelCallBudgetUsed: 1,
       ...phase.evidence,
