@@ -525,7 +525,7 @@ async function scenarioCodexExec() {
   return {
     ok: requiredCapabilitiesSatisfied(capabilities),
     evidence: {
-      doneSummary: phase.doneSummary,
+      doneSummary: phase.responseText ?? phase.doneSummary,
       responseText: phase.responseText,
       progressEvents: phase.progressEvents,
       modelCallBudgetUsed: 1,
