@@ -21,6 +21,7 @@ import { getProvider, listProviders, resolveProviderBin } from './providers/inde
 import { validateClaudeReviewSupport } from './providers/claude.mjs';
 import { validateCodexReviewSupport } from './providers/codex.mjs';
 import { validateOpencodeReviewSupport } from './providers/opencode.mjs';
+import { parseReviewOutput } from './review-result.mjs';
 import { resolveTaskIntent } from './task-intent.mjs';
 import { createHash } from 'node:crypto';
 
@@ -368,6 +369,21 @@ export async function generate(input) {
         retryable: true,
       });
     }
+    // A portable review intent is a result-contract lane, even when a caller
+    // reaches it through generate/ai.generate instead of the dedicated review
+    // helper. Never allow arbitrary non-empty prose (including a plan-only
+    // response) to become transport success.
+    let reviewResult = null;
+    if (request.taskIntent === 'review') {
+      const parsedReview = parseReviewOutput({ text: parsed.text, structured: parsed.structured });
+      reviewResult = {
+        schema: parsedReview.schema,
+        verdict: parsedReview.verdict,
+        summary: parsedReview.summary,
+        ...(parsedReview.blockedReason !== undefined ? { blockedReason: parsedReview.blockedReason } : {}),
+        ...(parsedReview.findings !== undefined && parsedReview.findings !== null ? { findings: parsedReview.findings } : {}),
+      };
+    }
     const digests = computeCapabilityDigests({
       workspace: workspace || capability.workspace,
       allowedReadRoots: capability.allowedReadRoots,
@@ -383,6 +399,7 @@ export async function generate(input) {
       provider: { id: provider.id, name: provider.name },
       model: request.model,
       response: { text: parsed.text, structured: parsed.structured },
+      ...(reviewResult ? { review: reviewResult } : {}),
       session: { id: parsed.sessionId, resumable: Boolean(parsed.sessionId) },
       timing: { elapsedMs: Date.now() - startedAt },
       capability: digests,

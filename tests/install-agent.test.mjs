@@ -25,34 +25,13 @@ test('installs the companion skill into Codex, Gemini, and Claude homes', (t) =>
     '.claude/skills/webmcp-ai-cli',
   ]) {
     const installedSkill = join(home, skillRoot, 'SKILL.md');
-    const installedReference = join(
-      home,
-      skillRoot,
-      'references/cli-subagent-orchestration.md',
-    );
     const installedMetadata = join(home, skillRoot, 'agents/openai.yaml');
 
     assert.equal(
       readFileSync(installedSkill, 'utf8'),
       readFileSync(join(root, 'skills/webmcp-ai-cli/SKILL.md'), 'utf8'),
     );
-    assert.equal(existsSync(installedReference), true, `${skillRoot} is missing the reference`);
-    assert.equal(
-      readFileSync(installedReference, 'utf8'),
-      readFileSync(
-        join(root, 'skills/webmcp-ai-cli/references/cli-subagent-orchestration.md'),
-        'utf8',
-      ),
-    );
-    const installedRuntimeGuide = join(home, skillRoot, 'references/orchestration-runtime.md');
-    assert.equal(existsSync(installedRuntimeGuide), true, `${skillRoot} is missing the runtime guide`);
-    assert.equal(
-      readFileSync(installedRuntimeGuide, 'utf8'),
-      readFileSync(
-        join(root, 'skills/webmcp-ai-cli/references/orchestration-runtime.md'),
-        'utf8',
-      ),
-    );
+    assert.equal(existsSync(join(home, skillRoot, 'references')), false, `${skillRoot} must not install orchestration-owned references`);
     assert.equal(
       existsSync(join(home, skillRoot, 'agents/openai.yaml')),
       true,

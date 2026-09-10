@@ -17,6 +17,85 @@ import { validateOpencodeReviewSupport } from './providers/opencode.mjs';
 
 const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
 
+const ORCHESTRATION_PACKAGE = '@gyga-browser/webmcp-ai-orchestration';
+
+function isMissingRequestedPackage(error) {
+  return error?.code === 'MODULE_NOT_FOUND' || (
+    error?.code === 'ERR_MODULE_NOT_FOUND'
+    && String(error?.message ?? '').includes(ORCHESTRATION_PACKAGE)
+  );
+}
+
+async function loadOrchestrationCompanion() {
+  let resolvedEntry;
+  const resolvers = [];
+  try {
+    const { createRequire } = await import('node:module');
+    resolvers.push(createRequire(import.meta.url));
+    // Source/workspace compatibility: tests and local paired consumers may
+    // place the companion under the caller's package tree instead of beside
+    // the core entrypoint. This fallback is still exact-package resolution,
+    // never a path guessed from prompt/task input.
+    resolvers.push(createRequire(join(process.cwd(), 'package.json')));
+  } catch (error) {
+    throw new AiCliError('ORCHESTRATION_PACKAGE_REQUIRED', 'Install @gyga-browser/webmcp-ai-orchestration before using orchestration commands', { exitCode: 2, cause: error });
+  }
+
+  let resolver = null;
+  let lastMissing = null;
+  for (const candidate of resolvers) {
+    try {
+      resolvedEntry = candidate.resolve(ORCHESTRATION_PACKAGE);
+      resolver = candidate;
+      break;
+    } catch (error) {
+      if (isMissingRequestedPackage(error)) {
+        lastMissing = error;
+        continue;
+      }
+      throw error;
+    }
+  }
+  if (!resolver) {
+    throw new AiCliError(
+      'ORCHESTRATION_PACKAGE_REQUIRED',
+      'The orchestration runtime has been extracted to @gyga-browser/webmcp-ai-orchestration. Install it before using orchestration commands or invoke its dedicated CLI.',
+      { exitCode: 2, cause: lastMissing },
+    );
+  }
+
+  // Resolve the companion manifest through the same dependency tree and
+  // reject a mismatched pair before loading supervisor code. This prevents a
+  // caller cwd from silently selecting an incompatible nested installation.
+  let companionManifest;
+  try {
+    const manifestPath = resolver.resolve(`${ORCHESTRATION_PACKAGE}/package.json`);
+    companionManifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    throw new AiCliError('ORCHESTRATION_PACKAGE_INCOMPATIBLE', 'The installed orchestration companion has no readable package manifest', { exitCode: 2, cause: error });
+  }
+  const requiredCore = companionManifest.dependencies?.['@gyga-browser/webmcp-ai'];
+  if (requiredCore !== packageJson.version) {
+    throw new AiCliError(
+      'ORCHESTRATION_PACKAGE_INCOMPATIBLE',
+      `The orchestration companion requires core ${String(requiredCore ?? '(missing)')}; current core is ${packageJson.version}`,
+      { exitCode: 2, details: { coreVersion: packageJson.version, requiredCore: requiredCore ?? null } },
+    );
+  }
+
+  try {
+    return await import(resolvedEntry);
+  } catch (error) {
+    // Only a missing requested package is a migration error. Dependency,
+    // export, syntax and initialization failures must remain visible as a
+    // typed incompatibility rather than being misreported as absence.
+    if (isMissingRequestedPackage(error)) {
+      throw new AiCliError('ORCHESTRATION_PACKAGE_INCOMPATIBLE', 'The installed orchestration companion could not load its declared dependencies', { exitCode: 2, cause: error });
+    }
+    throw error;
+  }
+}
+
 // Plan §8.1 limitation for the Claude reviewer: managed/enterprise settings
 // may override command-line grants. Bounded, no settings paths or secrets.
 const CLAUDE_REVIEW_LIMITATIONS = Object.freeze([
@@ -807,23 +886,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   }
 
   if (command === 'orchestration') {
-    let orchestrationMod;
-    try {
-      orchestrationMod = await import('@gyga-browser/webmcp-ai-orchestration');
-    } catch {
-      try {
-        const { createRequire } = await import('node:module');
-        const req = createRequire(join(process.cwd(), 'package.json'));
-        const resolved = req.resolve('@gyga-browser/webmcp-ai-orchestration');
-        orchestrationMod = await import(resolved);
-      } catch {
-        throw new AiCliError(
-          'ORCHESTRATION_PACKAGE_REQUIRED',
-          'The orchestration runtime has been extracted to @gyga-browser/webmcp-ai-orchestration. Install @gyga-browser/webmcp-ai-orchestration to use "webmcp-ai orchestration" commands or invoke the "webmcp-ai-orchestration" CLI directly.',
-          { exitCode: 2 }
-        );
-      }
-    }
+    const orchestrationMod = await loadOrchestrationCompanion();
     const orchestration = orchestrationMod.createOrchestrationClient({ env });
     if (subcommand === 'capabilities') {
       printValue(orchestration.capabilities(), json);

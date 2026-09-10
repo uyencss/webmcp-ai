@@ -70,6 +70,26 @@ test('review() with plain-text provider output is typed REVIEW_RESULT_INCOMPLETE
   }
 });
 
+test('generate and ai.generate cannot bypass the review result contract', async () => {
+  const { generate } = await import('../src/client.mjs');
+  const ws = mkdtempSync(join(tmpdir(), 'generate-review-contract-'));
+  try {
+    await assert.rejects(
+      generate({
+        provider: 'opencode',
+        prompt: 'review this diff',
+        taskIntent: 'review',
+        accessProfile: 'review-readonly',
+        workspace: ws,
+        env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      }),
+      (error) => error.code === 'REVIEW_RESULT_INCOMPLETE',
+    );
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test('review() with valid review-result JSON returns the verdict', async (t) => {
   const fake = makeReviewFake(t, 'approve');
   const ws = mkdtempSync(join(tmpdir(), 'review-ok-'));

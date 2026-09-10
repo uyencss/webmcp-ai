@@ -374,7 +374,7 @@ test('F8: resumed review sets resumed:true; fresh review sets resumed:false', as
     const env = { ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' };
     const fresh = await review({ provider: 'opencode', prompt: 'review me', workspace: ws, env });
     assert.equal(fresh.resumed, false);
-    assert.equal(fresh.session.id, 'ses_test');
+    assert.equal(fresh.session.id, null, 'review must not expose raw provider session IDs');
     const resumed = await review({ provider: 'opencode', prompt: 'review me', workspace: ws, sessionId: 'ses_test', env });
     assert.equal(resumed.resumed, true);
     const tool = await handleToolCall({
@@ -383,6 +383,7 @@ test('F8: resumed review sets resumed:true; fresh review sets resumed:false', as
     }, { env });
     assert.equal(tool.metadata.resumed, true);
     assert.equal(tool.metadata.review.resumed, true);
+    assert.equal(Object.hasOwn(tool.metadata, 'sessionId'), false, 'tool review metadata must not expose raw session IDs');
     // Explicit events contract: review rejects live telemetry.
     await assert.rejects(
       review({ provider: 'opencode', prompt: 'x', workspace: ws, onEvent: () => {}, env }),

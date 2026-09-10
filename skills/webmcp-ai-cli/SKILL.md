@@ -34,31 +34,16 @@ worker lifecycle, decisions, and acceptance; it is not tied to Codex or any
 other provider. Choose a native subagent or CLI worker by the capability and
 visibility the task needs.
 
-Two packaged coordination surfaces exist — use exactly one per task:
+Coordination runtime routing is owned by the companion package
+`@gyga-browser/webmcp-ai-orchestration`; install that package to obtain its
+brief/runtime guides and `webmcp-ai-orchestration` CLI. The legacy
+`webmcp-ai orchestration …` command is a lazy compatibility shim only and
+requires the companion package. This core skill intentionally contains no
+supervisor, journal, managed-host or orchestration reference copy.
 
-- **Brief fallback** — [references/cli-subagent-orchestration.md](references/cli-subagent-orchestration.md).
-  An instruction contract (full handoff vs supervision, task packet, bounded
-  monitoring, cleanup, independent verification). It needs no runtime state
-  and stays the correct choice for one-shot handoffs or whenever the runtime
-  is absent or disabled.
-- **Runtime routing** — the companion package
-  `@gyga-browser/webmcp-ai-orchestration` and its
-  [runtime guide](references/orchestration-runtime.md). The legacy
-  `webmcp-ai orchestration …` command is only a lazy compatibility shim and
-  requires that package to be installed; the core package itself does not load
-  supervisor, journal or managed-host code for one-shot/review calls.
-
-Read the brief before any dispatch; read the runtime guide before creating a
-Coordination. Adapter maturity is honest and evidence-derived: alpha adapters
-are `fixture-only`, which is **not** supported; `capabilities --json` under
-`webmcp-ai orchestration` reports the current truth. Fixture GREEN never
-promotes itself.
-
-For spawning, delegating to, or supervising an AI CLI worker, read
-[references/cli-subagent-orchestration.md](references/cli-subagent-orchestration.md)
-before dispatch. It defines full handoff vs. supervision, exact executable and
-model discovery, the task packet, bounded monitoring and intervention, worker
-cleanup, and independent verification.
+Read the companion package guide before creating a Coordination. Adapter
+maturity is honest and evidence-derived: alpha adapters are `fixture-only`,
+which is **not** supported; fixture GREEN never promotes itself.
 
 `webmcp-ai` remains the safe discovery and one-shot/review invocation surface. Without
 `--stream`/`--events`, it buffers provider output until process exit and does

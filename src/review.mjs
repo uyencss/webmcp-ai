@@ -383,7 +383,10 @@ export async function review(input = {}) {
       ...(parsed.blockedReason !== undefined ? { blockedReason: parsed.blockedReason } : {}),
     },
     response: result.response,
-    session: result.session,
+    // Review callers only need freshness, never a raw provider session
+    // identifier. Resumption is already represented by `resumed`; keeping the
+    // identifier out of library/CLI/tool envelopes prevents session leakage.
+    session: { id: null, resumable: false },
     timing: result.timing,
     capability: result.capability,
   };

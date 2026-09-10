@@ -178,7 +178,6 @@ export async function handleToolCall(request, options = {}) {
       metadata: {
         provider: result.provider.id,
         model: result.model,
-        sessionId: result.session.id,
         elapsedMs: result.timing.elapsedMs,
         review: { verdict: result.review.verdict, resumed: result.resumed === true },
         resumed: result.resumed === true,
@@ -203,7 +202,9 @@ export async function handleToolCall(request, options = {}) {
     protocol: TOOL_PROTOCOL,
     requestId: request.requestId,
     ok: true,
-    output: result.response,
+      output: result.review
+        ? { ...result.review, text: result.response.text }
+        : result.response,
     metadata: {
       provider: result.provider.id,
       model: result.model,
