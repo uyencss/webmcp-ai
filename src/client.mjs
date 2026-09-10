@@ -69,6 +69,34 @@ function normalizeRequest(input) {
     taskIntent = resolved.taskIntent;
     effectiveAccessProfile = resolved.accessProfile;
   }
+  // Review is a strictly read-only result-contract lane. Reject privileged
+  // or write-capable fields before capability canonicalization so an invalid
+  // request cannot even inspect/create a workspace-derived capability.
+  if (taskIntent === 'review') {
+    const forbiddenReviewFields = ['agentMode', 'agent', 'toolPolicy', 'schema', 'gatewayCapabilityHandle', 'gatewayHandle', 'mcpConfig'];
+    for (const field of forbiddenReviewFields) {
+      if (input[field] !== undefined && input[field] !== null) {
+        throw new AiCliError('TASK_INTENT_ACCESS_CONFLICT', `${field} is not allowed for taskIntent review`, {
+          exitCode: 2,
+          details: { field, taskIntent },
+        });
+      }
+    }
+    if (input.allowedWriteRoots !== undefined && input.allowedWriteRoots !== null) {
+      if (!Array.isArray(input.allowedWriteRoots)) {
+        throw new AiCliError('TASK_INTENT_ACCESS_CONFLICT', 'allowedWriteRoots must be an array for taskIntent review', {
+          exitCode: 2,
+          details: { field: 'allowedWriteRoots', taskIntent },
+        });
+      }
+      if (input.allowedWriteRoots.length > 0) {
+        throw new AiCliError('TASK_INTENT_ACCESS_CONFLICT', 'allowedWriteRoots is not allowed for taskIntent review', {
+          exitCode: 2,
+          details: { field: 'allowedWriteRoots', taskIntent },
+        });
+      }
+    }
+  }
   const timeoutMs = Number(input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AiCliError('INVALID_INPUT', 'timeoutMs must be a positive number', { exitCode: 2 });
@@ -400,7 +428,11 @@ export async function generate(input) {
       model: request.model,
       response: { text: parsed.text, structured: parsed.structured },
       ...(reviewResult ? { review: reviewResult } : {}),
-      session: { id: parsed.sessionId, resumable: Boolean(parsed.sessionId) },
+      // Review envelopes expose only freshness metadata. Legacy generate keeps
+      // its existing resumable session identity behavior.
+      session: request.taskIntent === 'review'
+        ? { id: null, resumable: false }
+        : { id: parsed.sessionId, resumable: Boolean(parsed.sessionId) },
       timing: { elapsedMs: Date.now() - startedAt },
       capability: digests,
     };

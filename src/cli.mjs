@@ -20,10 +20,8 @@ const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL('../package.js
 const ORCHESTRATION_PACKAGE = '@gyga-browser/webmcp-ai-orchestration';
 
 function isMissingRequestedPackage(error) {
-  return error?.code === 'MODULE_NOT_FOUND' || (
-    error?.code === 'ERR_MODULE_NOT_FOUND'
-    && String(error?.message ?? '').includes(ORCHESTRATION_PACKAGE)
-  );
+  return (error?.code === 'MODULE_NOT_FOUND' || error?.code === 'ERR_MODULE_NOT_FOUND')
+    && String(error?.message ?? '').includes(ORCHESTRATION_PACKAGE);
 }
 
 async function loadOrchestrationCompanion() {
@@ -84,15 +82,16 @@ async function loadOrchestrationCompanion() {
   }
 
   try {
-    return await import(resolvedEntry);
-  } catch (error) {
-    // Only a missing requested package is a migration error. Dependency,
-    // export, syntax and initialization failures must remain visible as a
-    // typed incompatibility rather than being misreported as absence.
-    if (isMissingRequestedPackage(error)) {
-      throw new AiCliError('ORCHESTRATION_PACKAGE_INCOMPATIBLE', 'The installed orchestration companion could not load its declared dependencies', { exitCode: 2, cause: error });
+    const loaded = await import(resolvedEntry);
+    if (typeof loaded.createOrchestrationClient !== 'function') {
+      throw new Error('companion does not expose createOrchestrationClient');
     }
-    throw error;
+    return loaded;
+  } catch (error) {
+    // Once a package was resolved, every load/export/syntax/dependency failure
+    // is an incompatibility, never package absence and never an untyped stack
+    // trace. The only missing-package branch is the resolver above.
+    throw new AiCliError('ORCHESTRATION_PACKAGE_INCOMPATIBLE', 'The installed orchestration companion could not load its declared public API or dependencies', { exitCode: 2, cause: error });
   }
 }
 

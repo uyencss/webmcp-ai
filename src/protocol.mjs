@@ -208,7 +208,7 @@ export async function handleToolCall(request, options = {}) {
     metadata: {
       provider: result.provider.id,
       model: result.model,
-      sessionId: result.session.id,
+      ...(result.review ? {} : { sessionId: result.session.id }),
       elapsedMs: result.timing.elapsedMs,
       capability: {
         accessProfile: cap.accessProfile ?? null,

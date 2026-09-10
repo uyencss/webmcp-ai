@@ -2,7 +2,8 @@ import { AiCliError } from './errors.mjs';
 
 // Event-level progress lane (advisory-only telemetry, never control).
 //
-// Vocabulary follows skills/webmcp-ai-cli/references/cli-subagent-orchestration.md:
+// Vocabulary follows the portable coordination contract owned by the companion
+// orchestration package; the core wrapper keeps this event taxonomy advisory.
 // queued → researching → editing → testing → verifying → completed, plus
 // question | blocked | failed | cancelled. `working` is the fallback for
 // provider activity with no machine-readable signal. `escalation` is reserved
