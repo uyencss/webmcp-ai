@@ -91,6 +91,12 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
   and mark resumed reviews with `resumed:true` (not fresh final-auditor
   evidence) while keeping legacy `generate` resume compatibility.
 
+## 0.3.0-alpha.1 - 2026-09-10
+
+- Publish the extracted one-shot/review core as a distinct artifact identity;
+  the companion orchestration package pins this release instead of reusing the
+  pre-extraction `0.3.0-alpha.0` monolith.
+
 ## 0.3.0-alpha.0 - 2026-08-23
 
 - Add the opt-in portable CLI-agent orchestration runtime (alpha): explicit

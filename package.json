@@ -1,6 +1,7 @@
 {
   "name": "@gyga-browser/webmcp-ai",
-  "version": "0.3.0-alpha.0",
+  "version": "0.3.0-alpha.1",
+  "webmcpArtifactIdentity": "webmcp-ai-core/extracted-v1",
   "description": "Provider-neutral CLI and JSON-stdio tool protocol for invoking local AI CLIs.",
   "license": "MIT",
   "author": "uyencss",

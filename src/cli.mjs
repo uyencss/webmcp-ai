@@ -24,17 +24,18 @@ function isMissingRequestedPackage(error) {
     && String(error?.message ?? '').includes(ORCHESTRATION_PACKAGE);
 }
 
-async function loadOrchestrationCompanion() {
+async function loadOrchestrationCompanion(env = process.env) {
   let resolvedEntry;
   const resolvers = [];
   try {
     const { createRequire } = await import('node:module');
     resolvers.push(createRequire(import.meta.url));
-    // Source/workspace compatibility: tests and local paired consumers may
-    // place the companion under the caller's package tree instead of beside
-    // the core entrypoint. This fallback is still exact-package resolution,
-    // never a path guessed from prompt/task input.
-    resolvers.push(createRequire(join(process.cwd(), 'package.json')));
+    // A cwd resolver is only an explicit source-worktree test/operator opt-in.
+    // Installed consumers resolve through the core package's own dependency
+    // graph; an untrusted cwd must not select arbitrary executable code.
+    if (env.WEBMCP_AI_ALLOW_CWD_COMPANION === '1') {
+      resolvers.push(createRequire(join(process.cwd(), 'package.json')));
+    }
   } catch (error) {
     throw new AiCliError('ORCHESTRATION_PACKAGE_REQUIRED', 'Install @gyga-browser/webmcp-ai-orchestration before using orchestration commands', { exitCode: 2, cause: error });
   }
@@ -78,6 +79,16 @@ async function loadOrchestrationCompanion() {
       'ORCHESTRATION_PACKAGE_INCOMPATIBLE',
       `The orchestration companion requires core ${String(requiredCore ?? '(missing)')}; current core is ${packageJson.version}`,
       { exitCode: 2, details: { coreVersion: packageJson.version, requiredCore: requiredCore ?? null } },
+    );
+  }
+  const coreArtifactIdentity = packageJson.webmcpArtifactIdentity;
+  const companionCoreArtifactIdentity = companionManifest.webmcpCoreArtifactIdentity;
+  if (typeof coreArtifactIdentity !== 'string'
+    || companionCoreArtifactIdentity !== coreArtifactIdentity) {
+    throw new AiCliError(
+      'ORCHESTRATION_PACKAGE_INCOMPATIBLE',
+      'The orchestration companion is not built for this core artifact identity',
+      { exitCode: 2, details: { coreArtifactIdentity: coreArtifactIdentity ?? null, companionCoreArtifactIdentity: companionCoreArtifactIdentity ?? null } },
     );
   }
 
@@ -885,7 +896,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   }
 
   if (command === 'orchestration') {
-    const orchestrationMod = await loadOrchestrationCompanion();
+    const orchestrationMod = await loadOrchestrationCompanion(env);
     const orchestration = orchestrationMod.createOrchestrationClient({ env });
     if (subcommand === 'capabilities') {
       printValue(orchestration.capabilities(), json);

@@ -68,7 +68,7 @@ test('doctor, inspect, models, agents, tools, and version commands are independe
 
   const version = run(['--version']);
   assert.equal(version.status, 0, version.stderr);
-  assert.match(version.stdout, /^0\.3\.0-alpha\.0/);
+  assert.match(version.stdout, /^0\.3\.0-alpha\.1/);
 });
 
 test('orchestration subcommand requires extracted package and keeps one-shots stable', () => {

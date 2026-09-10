@@ -121,6 +121,7 @@ test("transitional CLI compatibility shim: delegates successfully when orchestra
       env: {
         PATH: process.env.PATH,
         WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir,
+        WEBMCP_AI_ALLOW_CWD_COMPANION: "1",
       },
     });
     assert.equal(res.status, 0, res.stderr);
