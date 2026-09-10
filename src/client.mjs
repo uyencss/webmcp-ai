@@ -18,6 +18,11 @@ import {
 import { AiCliError } from './errors.mjs';
 import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
+import { validateClaudeReviewSupport } from './providers/claude.mjs';
+import { validateCodexReviewSupport } from './providers/codex.mjs';
+import { validateOpencodeReviewSupport } from './providers/opencode.mjs';
+import { resolveTaskIntent } from './task-intent.mjs';
+import { createHash } from 'node:crypto';
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -34,11 +39,34 @@ function normalizeToolPolicy(value) {
   return policy;
 }
 
+function rejectAgyVNext(provider, request) {
+  if (provider.id !== 'agy' || request.taskIntent === null || request.taskIntent === undefined) return;
+  throw new AiCliError('UNSUPPORTED_CAPABILITY', 'AGY does not support preventive deny-write review mode', {
+    exitCode: 2,
+    details: { capability: 'review', taskIntent: request.taskIntent, accessProfile: request.accessProfile ?? null },
+  });
+}
+
 function normalizeRequest(input) {
   const provider = getProvider(input.provider);
   const prompt = typeof input.prompt === 'string' ? input.prompt : '';
   if (!prompt.trim()) {
     throw new AiCliError('INVALID_INPUT', 'prompt must be a non-empty string', { exitCode: 2 });
+  }
+  // Strict portable taskIntent validation. When taskIntent is present the
+  // pair is validated (including defaulting and contradiction checks)
+  // BEFORE any capability work or provider spawn. Legacy callers without
+  // taskIntent keep the exact prior path.
+  let effectiveAccessProfile = input.accessProfile;
+  let taskIntent = input.taskIntent ?? null;
+  if (taskIntent !== null && taskIntent !== undefined) {
+    const resolved = resolveTaskIntent(
+      effectiveAccessProfile === undefined || effectiveAccessProfile === null
+        ? { taskIntent }
+        : { taskIntent, accessProfile: effectiveAccessProfile },
+    );
+    taskIntent = resolved.taskIntent;
+    effectiveAccessProfile = resolved.accessProfile;
   }
   const timeoutMs = Number(input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -54,7 +82,7 @@ function normalizeRequest(input) {
   // Validate capability fields with strict canonicalization and profile handling.
   // validateCapabilityRequest handles accessProfile/toolPolicy merging, workspace, roots, protectedPaths, projectId/storeRevisions, and gateway-tool fail-closed.
   const capability = validateCapabilityRequest({
-    accessProfile: input.accessProfile,
+    accessProfile: taskIntent !== null && taskIntent !== undefined ? effectiveAccessProfile : input.accessProfile,
     toolPolicy: input.toolPolicy,
     workspace: input.workspace,
     allowedReadRoots: input.allowedReadRoots,
@@ -69,12 +97,25 @@ function normalizeRequest(input) {
 
   // Derive the effective toolPolicy for legacy provider capability checks and compose-only temp workspace handling
   const toolPolicy = capability.accessProfile === 'compose-only' ? 'compose-only' : (input.toolPolicy ?? (capability.accessProfile === 'provider-default' ? 'provider-default' : capability.accessProfile));
-  // For legacy providers that only declare toolPolicies, map new profiles to unsupported
-  // Only opencode is expected to support review-readonly/bounded-edit; others fail closed.
-  // 'full' is explicit opt-in passthrough and is supported by every provider.
+  // Provider support matrix. Legacy (no taskIntent) keeps the exact prior
+  // rule: only opencode supports review-readonly/bounded-edit. The portable
+  // reviewer lane (taskIntent present) exposes review-readonly on
+  // claude/codex/opencode via their new review hardening; bounded-edit stays
+  // opencode-only; full stays universal. AGY review fails at the provider
+  // adapter with UNSUPPORTED_CAPABILITY (preventive deny-write unproven).
   const providerSupported = (() => {
     if (capability.accessProfile === 'gateway-tool') return false;
     if (capability.accessProfile === 'full') return true;
+    if (taskIntent !== null && taskIntent !== undefined) {
+      if (capability.accessProfile === 'review-readonly') {
+        return provider.id === 'opencode' || provider.id === 'claude' || provider.id === 'codex';
+      }
+      if (capability.accessProfile === 'bounded-edit') {
+        return provider.id === 'opencode';
+      }
+      if (capability.accessProfile === 'compose-only') return true;
+      return true;
+    }
     if (['review-readonly', 'bounded-edit'].includes(capability.accessProfile)) {
       return provider.id === 'opencode';
     }
@@ -112,6 +153,7 @@ function normalizeRequest(input) {
       agent: input.agent || null,
       toolPolicy: effectiveToolPolicy,
       accessProfile: capability.accessProfile,
+      taskIntent,
       workspace: capability.workspace,
       allowedReadRoots: capability.allowedReadRoots,
       allowedWriteRoots: capability.allowedWriteRoots,
@@ -124,9 +166,80 @@ function normalizeRequest(input) {
   };
 }
 
+/**
+ * Bounded, read-only reviewer capability probes for the spawn lane.
+ * Runs `<bin> --help` through the existing safe-env/runProcess/
+ * resolveProviderBin seams (no shell), validates the installed reviewer
+ * flags via the provider validator, and maps drift/unavailable to
+ * typed errors without leaking executable paths or raw help text. No model
+ * is invoked. Called only for taskIntent review on claude/codex/opencode;
+ * legacy generate paths never probe. Dry-run never reaches here
+ * (describe*DryRun returns before generate).
+ */
+async function ensureClaudeReviewSupport({ provider, env }) {
+  const command = resolveProviderBin(provider, env);
+  const safeEnv = buildSafeChildEnv(env, {});
+  let helpText = null;
+  try {
+    const help = await runProcess(command, ['--help'], {
+      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+    });
+    helpText = `${help.stdout}\n${help.stderr}`;
+  } catch (error) {
+    if (error?.code === 'CLI_NOT_INSTALLED') {
+      throw new AiCliError('CLI_NOT_INSTALLED', 'Claude CLI binary not installed or not executable', {
+        exitCode: 2,
+        details: { capability: 'review' },
+      });
+    }
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed Claude CLI reviewer capability unproven: ${error?.code || 'probe failed'}`, {
+      exitCode: 2,
+      details: { capability: 'review' },
+    });
+  }
+  // validateClaudeReviewSupport throws typed PROVIDER_CAPABILITY_DRIFT with
+  // only flag names in details; never leaks paths or raw help.
+  validateClaudeReviewSupport(helpText);
+}
+
+/**
+ * Shared bounded help probe used by the Codex/OpenCode review spawn lane.
+ * `label` is the human name for messages only; `validate` is the provider
+ * validator (throws typed drift with bounded missing names). No model is
+ * spawned. Missing binary maps to CLI_NOT_INSTALLED; any other probe
+ * failure maps to PROVIDER_CAPABILITY_DRIFT. Never leaks paths/raw help.
+ */
+async function ensureHelpReviewSupport({ provider, env, label, validate, helpArgs = ['--help'] }) {
+  const command = resolveProviderBin(provider, env);
+  const safeEnv = buildSafeChildEnv(env, {});
+  let helpText = null;
+  try {
+    const help = await runProcess(command, helpArgs, {
+      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+    });
+    helpText = `${help.stdout}\n${help.stderr}`;
+  } catch (error) {
+    if (error?.code === 'CLI_NOT_INSTALLED') {
+      throw new AiCliError('CLI_NOT_INSTALLED', `${label} CLI binary not installed or not executable`, {
+        exitCode: 2,
+        details: { capability: 'review' },
+      });
+    }
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed ${label} CLI reviewer capability unproven: ${error?.code || 'probe failed'}`, {
+      exitCode: 2,
+      details: { capability: 'review' },
+    });
+  }
+  validate(helpText);
+}
+
 export async function generate(input) {
   const startedAt = Date.now();
   const { provider, request, capability } = normalizeRequest(input);
+  // Reject every portable AGY intent before allocating a compose workspace.
+  // The adapter remains the final defence for direct callers, but generate's
+  // policy workspace must not be created for a request that cannot spawn.
+  rejectAgyVNext(provider, request);
   const env = input.env || process.env;
   const command = resolveProviderBin(provider, env);
   // compose-only uses disposable temp workspace; otherwise use validated workspace
@@ -135,12 +248,53 @@ export async function generate(input) {
     ? mkdtempSync(join(tmpdir(), `webmcp-ai-${provider.id}-compose-`))
     : null;
   const workspace = policyWorkspace || capability.workspace || process.cwd();
+  // Library-only observers are inspected before invocation so provider-native
+  // telemetry (Claude stream-json --verbose) can be selected without a second
+  // pass. Telemetry only — never control.
+  const onStreamEarly = typeof input.onStream === 'function' ? input.onStream : null;
+  const onEventEarly = typeof input.onEvent === 'function' ? input.onEvent : null;
+  const eventsRequested = onEventEarly !== null;
   // The effective environment is handed to the provider adapter so env-derived
   // settings (e.g. the isolated OpenCode database) resolve from what actually
   // reaches the child process, never from process.env behind the caller.
   const invocation = provider.buildInvocation({
     ...request, workspace, env, allowedReadRoots: capability.allowedReadRoots, allowedWriteRoots: capability.allowedWriteRoots, protectedPaths: capability.protectedPaths, projectId: capability.projectId, storeRevisions: capability.storeRevisions,
+    eventsRequested,
   });
+
+  // Reviewer spawn-lane probes: before any model spawn, validate the
+  // installed flags via a bounded `<bin> --help` (no model invocation).
+  // Dry-run never reaches here (describe*DryRun returns before generate);
+  // legacy generate without taskIntent review never probes. Probe failures
+  // clean up the preview invocation + compose workspace before rethrow so
+  // drifted review never leaks temp dirs.
+  if (provider.id === 'claude' && request.taskIntent === 'review') {
+    try {
+      await ensureClaudeReviewSupport({ provider, env });
+    } catch (error) {
+      try { invocation.cleanup?.(); } catch {}
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw error;
+    }
+  }
+  if (provider.id === 'codex' && request.taskIntent === 'review') {
+    try {
+      await ensureHelpReviewSupport({ provider, env, label: 'Codex', helpArgs: ['exec', '--help'], validate: validateCodexReviewSupport });
+    } catch (error) {
+      try { invocation.cleanup?.(); } catch {}
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw error;
+    }
+  }
+  if (provider.id === 'opencode' && request.taskIntent === 'review') {
+    try {
+      await ensureHelpReviewSupport({ provider, env, label: 'opencode', helpArgs: ['run', '--help'], validate: validateOpencodeReviewSupport });
+    } catch (error) {
+      try { invocation.cleanup?.(); } catch {}
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw error;
+    }
+  }
 
   // Child environment: bounded profiles use the explicit safe allowlist and
   // never receive arbitrary env or secrets. Full passthrough uses native-CLI
@@ -165,10 +319,10 @@ export async function generate(input) {
   // Library-only live stream: input.onStream({ stream: 'stdout'|'stderr', chunk })
   // forwards provider bytes as they arrive. Not part of the JSON protocol
   // (functions cannot cross it); CLI exposes the same via --stream.
-  const onStream = typeof input.onStream === 'function' ? input.onStream : null;
+  const onStream = onStreamEarly;
   // Library-only advisory events: input.onEvent({ seq, stream, state, summary,
   // provider }). Telemetry only — never control. CLI exposes via --events.
-  const onEvent = typeof input.onEvent === 'function' ? input.onEvent : null;
+  const onEvent = onEventEarly;
   let eventSeq = 0;
   const emitEvent = (stream, state, summary) => {
     if (!onEvent) return;
@@ -254,6 +408,96 @@ function executablePathAvailable(command) {
     }
   }
   return true;
+}
+
+function sanitizeGenerateArgs(args, capability, sessionId = null) {
+  const roots = [
+    capability.workspace,
+    ...(capability.allowedReadRoots || []),
+    ...(capability.allowedWriteRoots || []),
+    ...(capability.protectedPaths || []),
+  ].filter(Boolean).sort((a, b) => b.length - a.length);
+  const tmpRoot = tmpdir();
+  const sessionValue = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : null;
+  return (args || []).map((arg) => {
+    if (typeof arg !== 'string') return '<redacted>';
+    let out = arg;
+    if (sessionValue && out === sessionValue) return '<session>';
+    for (const root of roots) {
+      if (out === root) { out = '<workspace>'; break; }
+      if (out.startsWith(`${root}/`)) { out = `<workspace>${out.slice(root.length)}`; break; }
+    }
+    if (out.includes(tmpRoot)) return '<tmp>';
+    if (out.includes('last-message.txt') || out.includes('output-schema.json')) return '<tmp>';
+    if (out.startsWith('/') && out.length > 1 && out !== '<workspace>' && !out.startsWith('<workspace>') && !out.startsWith('<tmp>')) {
+      if (out.includes('/')) return '<path>';
+    }
+    return out;
+  });
+}
+
+/**
+ * Sanitized generate dry-run. Reuses normalizeRequest + provider preview
+ * without spawning. Never includes prompt text, secrets, absolute paths or
+ * temp output paths — digests/placeholders only.
+ */
+export function describeGenerateDryRun(input = {}) {
+  const { provider, request, capability } = normalizeRequest(input);
+  // Keep dry-run side-effect free even when a provider rejects a vNext intent
+  // before returning an invocation cleanup hook.
+  rejectAgyVNext(provider, request);
+  // Dry-run must never mutate caller files. AGY compose-only installs a
+  // workspace-local `.agents` guard; preview it inside a disposable temp
+  // dir so neither the real workspace nor cwd is touched.
+  const needsTempPreview = provider.id === 'agy' && (request.toolPolicy === 'compose-only' || request.accessProfile === 'compose-only');
+  const tempPreviewDir = needsTempPreview ? mkdtempSync(join(tmpdir(), 'webmcp-ai-dryrun-')) : null;
+  const workspace = needsTempPreview ? tempPreviewDir : (capability.workspace || process.cwd());
+  const preview = provider.buildInvocation({
+    ...request,
+    workspace,
+    env: input.env || {},
+    allowedReadRoots: capability.allowedReadRoots,
+    allowedWriteRoots: capability.allowedWriteRoots,
+    protectedPaths: capability.protectedPaths,
+    projectId: capability.projectId,
+    storeRevisions: capability.storeRevisions,
+  });
+  let args = sanitizeGenerateArgs(preview.args || [], capability, request.sessionId);
+  // AGY carries the prompt as `-p <prompt>` argv; never leak it in dry-run.
+  if (provider.id === 'agy') {
+    args = args.map((a) => (a === request.prompt ? '<prompt>' : a));
+    // Also redact any arg that contains a long prompt substring (defence).
+    args = args.map((a) => (typeof a === 'string' && request.prompt && a.includes(request.prompt.slice(0, 32)) && a.length > 32 ? '<prompt>' : a));
+  }
+  try {
+    preview.cleanup?.();
+  } catch {
+    // Preview cleanup must never fail inspection.
+  }
+  if (tempPreviewDir) {
+    try { rmSync(tempPreviewDir, { recursive: true, force: true }); } catch {}
+  }
+  const promptDigest = createHash('sha256').update(String(request.prompt)).digest('hex').slice(0, 16);
+  return {
+    ok: true,
+    dryRun: true,
+    provider: provider.id,
+    taskIntent: request.taskIntent ?? null,
+    accessProfile: capability.accessProfile,
+    model: request.model,
+    sessionId: request.sessionId ? '<resumed-session>' : null,
+    args,
+    capability: computeCapabilityDigests({
+      workspace: capability.workspace,
+      allowedReadRoots: capability.allowedReadRoots,
+      allowedWriteRoots: capability.allowedWriteRoots,
+      protectedPaths: capability.protectedPaths,
+      projectId: capability.projectId,
+      storeRevisions: capability.storeRevisions,
+      accessProfile: capability.accessProfile,
+    }),
+    promptDigest,
+  };
 }
 
 export async function probeProviders({ env = process.env } = {}) {

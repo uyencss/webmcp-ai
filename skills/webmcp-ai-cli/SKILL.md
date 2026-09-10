@@ -41,11 +41,12 @@ Two packaged coordination surfaces exist — use exactly one per task:
   monitoring, cleanup, independent verification). It needs no runtime state
   and stays the correct choice for one-shot handoffs or whenever the runtime
   is absent or disabled.
-- **Runtime routing** — [references/orchestration-runtime.md](references/orchestration-runtime.md).
-  The opt-in machine-local coordination runtime (`webmcp-ai orchestration …`):
-  single-writer supervisor, append-only journal, fenced epochs, worker
-  callbacks, and an independent verifier. Use it for multi-step supervised
-  lanes that must survive restarts.
+- **Runtime routing** — the companion package
+  `@gyga-browser/webmcp-ai-orchestration` and its
+  [runtime guide](references/orchestration-runtime.md). The legacy
+  `webmcp-ai orchestration …` command is only a lazy compatibility shim and
+  requires that package to be installed; the core package itself does not load
+  supervisor, journal or managed-host code for one-shot/review calls.
 
 Read the brief before any dispatch; read the runtime guide before creating a
 Coordination. Adapter maturity is honest and evidence-derived: alpha adapters
@@ -59,7 +60,7 @@ before dispatch. It defines full handoff vs. supervision, exact executable and
 model discovery, the task packet, bounded monitoring and intervention, worker
 cleanup, and independent verification.
 
-`webmcp-ai` remains the safe discovery and one-shot invocation surface. Without
+`webmcp-ai` remains the safe discovery and one-shot/review invocation surface. Without
 `--stream`/`--events`, it buffers provider output until process exit and does
 not expose a live supervision/control stream. With `--stream` (raw provider
 bytes) and `--events` (one advisory JSON object per line), progress appears
@@ -97,6 +98,46 @@ cancellation, and strict output/evidence validation. Pass it through JSON stdin
 or `--agent-mode accept-edits`; never combine it with dangerous permission
 bypass. opencode honors the same `plan`/`accept-edits` option (accept-edits adds
 `--auto` plus a bash deny-list); Claude and Codex reject it.
+
+Migration: prefer portable `taskIntent` (`compose|review|implement|plan`) with
+`accessProfile` (`compose-only|review-readonly|bounded-edit|full`) over legacy
+`agentMode`. Unknown intents fail with `TASK_INTENT_INVALID`;
+intent/profile contradictions (including `implement` without
+`bounded-edit`/`full`) fail with `TASK_INTENT_ACCESS_CONFLICT` before spawn.
+`agentMode` remains for `generate` compatibility but is rejected
+for `review`. `ai.review` (`webmcp-ai review`) accepts only `taskIntent: review`
+(default) with `accessProfile: review-readonly` and returns
+`schema: webmcp-ai-review-result/1` (`approve|request-changes|blocked|
+indeterminate`; `severity: critical|high|medium|low`; findings carry
+`id/severity/message/recommendation` with `file`/`line` optional only for
+architectural findings; `blocked` requires `blockedReason`; `approve` rejects
+`critical`/`high`/`medium`). `plan` needs a separate `webmcp-ai-plan-result/1`
+contract and is uniformly rejected. No vNext intent selects native Plan mode
+(OpenCode review/compose use `build` with generated read-only/deny-all
+permissions). Claude review uses version-probed `dontAsk`, `Read,Glob,Grep`,
+deny `Edit,Write,NotebookEdit`, `safe-mode`, `--no-chrome`,
+`--no-session-persistence`, no MCP, no fallback to full, and native
+`stream-json --verbose` only when events are requested in `generate`
+(`review` disallows `--stream`/`--events`). Omitted review workspace defaults
+to `cwd` read-only (prefer explicit; never written). Resumed reviews set
+`resumed:true` and are not fresh final-auditor evidence. `review`/`plan`
+accept only `review-readonly` (`review`+`compose-only` fails
+`TASK_INTENT_ACCESS_CONFLICT` before any compose workspace is created; legacy
+no-`taskIntent` `compose-only` is unchanged). `providers inspect
+<id> --task-intent review` probes each provider's required CLI mapping via
+installed version/help without model invocation — Claude the reviewer flags,
+Codex `exec`/`--sandbox`/`read-only`/`--ephemeral`/`--ignore-user-config`/
+`--ignore-rules`/`--skip-git-repo-check`/`--output-last-message`/`--color`
+plus resume (`resume`/`-c`); its
+resume sandbox mapping uses config key `sandbox_mode` and is tested separately,
+opencode `run`/`--format`/`--agent`/`--dir` plus `--model`/`--variant` with the
+wrapper read-only config mapping — and reports
+installed/authenticated/policy-supported/canary-proven/
+task-ready without leaking paths/secrets. `task-ready` means only that the
+wrapper mapping is installed and help-proven; it does not claim authentication
+or canary acceptance, which remain separate null/false axes when unproven.
+Managed or enterprise settings may
+override command-line grants; reviewer flags are requested, not guaranteed.
 
 When the caller depends on a constrained AGY custom agent, pass its discovered
 name as `agent` in JSON input or via `--agent`. The AI CLI selects the agent but

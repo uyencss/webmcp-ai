@@ -1,8 +1,0 @@
-{"type":"thread.started","thread_id":"thr_fixture"}
-{"type":"turn.started"}
-{"type":"item.started","item":{"id":"it_1","type":"command_execution","command":"node -v"}}
-{"type":"item.completed","item":{"id":"it_1","type":"command_execution","exit_code":0,"aggregated_output":"v18.0.0\n"}}
-{"type":"item.completed","item":{"id":"it_2","type":"reasoning","summary":"private reasoning summary"}}
-{"type":"item.completed","item":{"id":"it_3","type":"file_change","changes":["src/a.ts","src/b.ts"]}}
-{"type":"error","message":"transient provider hiccup"}
-{"type":"turn.completed","usage":{"total_tokens":7}}

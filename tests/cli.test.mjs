@@ -71,7 +71,7 @@ test('doctor, inspect, models, agents, tools, and version commands are independe
   assert.match(version.stdout, /^0\.3\.0-alpha\.0/);
 });
 
-test('the kill switch keeps read-only orchestration and one-shots stable', () => {
+test('orchestration subcommand requires extracted package and keeps one-shots stable', () => {
   const stateDir = join(tmpdir(), `webmcp-ai-cli-disabled-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
   const capabilities = run(['orchestration', 'capabilities', '--json'], {
     env: {
@@ -79,11 +79,18 @@ test('the kill switch keeps read-only orchestration and one-shots stable', () =>
       WEBMCP_AI_ORCHESTRATION_STATE_DIR: stateDir,
     },
   });
-  assert.equal(capabilities.status, 0, capabilities.stderr);
+  assert.equal(capabilities.status, 2, capabilities.stderr);
   const payload = JSON.parse(capabilities.stdout);
-  assert.equal(payload.ok, true);
-  assert.equal(payload.enabled, false);
-  assert.equal(existsSync(stateDir), false, 'disabled mode never creates state');
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error.code, 'ORCHESTRATION_PACKAGE_REQUIRED');
+  assert.match(payload.error.message, /@gyga-browser\/webmcp-ai-orchestration/);
+  assert.equal(capabilities.stderr, '', 'shim emits typed JSON without stack trace');
+  assert.equal(existsSync(stateDir), false, 'missing package never creates state');
+
+  const textMode = run(['orchestration', 'capabilities']);
+  assert.equal(textMode.status, 2);
+  assert.match(textMode.stderr, /^ORCHESTRATION_PACKAGE_REQUIRED:/);
+  assert.doesNotMatch(textMode.stderr, /at /);
 
   const providers = run(['providers', 'list', '--json'], {
     env: { WEBMCP_AI_ORCHESTRATION_DISABLED: '1' },

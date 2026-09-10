@@ -14,7 +14,7 @@ const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.
 
 test('runProcess forwards stdout/stderr chunks live and keeps the final result', async () => {
   const seen = [];
-  const result = await runProcess(process.execPath, ['-e', "process.stdout.write('out-1');process.stderr.write('err-1');process.stdout.write('out-2');"], {
+  const result = await runProcess(process.execPath, ['-e', "process.stdout.write('out-1');process.stderr.write('err-1');setTimeout(() => process.stdout.write('out-2'), 25);"], {
     timeoutMs: 10_000,
     maxOutputBytes: 1024 * 1024,
     onStdout: (chunk) => seen.push(['stdout', String(chunk)]),

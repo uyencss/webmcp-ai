@@ -4,6 +4,52 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 
+// Bounded, safe review-lane capability requirements for the Codex reviewer.
+// Probed via `codex exec --help` (no model) before spawn and in
+// `providers inspect --task-intent review`. The fresh path uses
+// `exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules
+// --skip-git-repo-check --output-last-message --color`; the resume path uses `exec resume -c
+// sandbox_mode="..."` (and omits --sandbox/--color). We require the fresh
+// primitives plus the resume mapping requirements that are exposed by the
+// installed help (`resume` subcommand and `-c/--config`). The
+// `sandbox_mode="..."` key is a config value rather than a CLI flag, so it
+// cannot be proven by substring matching; the adapter owns that mapping and
+// tests it separately. Missing flags fail closed with typed drift; only
+// bounded flag names are reported, never paths or raw help.
+export const CODEX_REVIEW_REQUIRED_FLAGS = Object.freeze([
+  'exec',
+  '--sandbox',
+  'read-only',
+  '--ephemeral',
+  '--ignore-user-config',
+  '--ignore-rules',
+  '--skip-git-repo-check',
+  '--output-last-message',
+  '--color',
+  'resume',
+  '-c',
+  '--config',
+]);
+
+function helpContainsToken(helpText, token) {
+  const escaped = String(token).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // CLI help commonly renders short options as `-c, --config`; accept the
+  // punctuation around an option but never let `--color` satisfy `-c`.
+  return new RegExp(`(?:^|[\\s,=<>()[\\]"'])${escaped}(?=$|[\\s,=<>()[\\]"'])`).test(String(helpText ?? ''));
+}
+
+export function validateCodexReviewSupport(helpText) {
+  const text = String(helpText ?? '');
+  const missing = CODEX_REVIEW_REQUIRED_FLAGS.filter((flag) => !helpContainsToken(text, flag));
+  if (missing.length > 0) {
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed Codex CLI lacks reviewer flags: ${missing.join(', ')}`, {
+      exitCode: 2,
+      details: { capability: 'review', missing },
+    });
+  }
+  return true;
+}
+
 export const codexProvider = {
   id: 'codex',
   name: 'Codex CLI',
@@ -27,6 +73,63 @@ export const codexProvider = {
         exitCode: 2,
       });
     }
+    // Portable intents: no vNext intent selects provider Plan mode (Codex has
+    // none; sandbox is the authority). `plan` is uniformly rejected until a
+    // separate webmcp-ai-plan-result/1 contract exists — never silently
+    // executed through the read-only sandbox.
+    // Validation runs before any filesystem side effect so a rejected vNext
+    // request never leaks an empty temp directory.
+    const taskIntent = request.taskIntent ?? null;
+    if (typeof taskIntent === 'string' && !['review', 'compose', 'implement', 'plan'].includes(taskIntent)) {
+      throw new AiCliError('TASK_INTENT_INVALID', `Unknown taskIntent: ${taskIntent}`, {
+        exitCode: 2,
+        details: { taskIntent },
+      });
+    }
+    if (taskIntent === 'plan') {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'Codex does not support taskIntent plan; use a separate webmcp-ai-plan-result/1 contract', {
+        exitCode: 2,
+        details: { taskIntent },
+      });
+    }
+    if (taskIntent === 'compose') {
+      const profile = request.accessProfile ?? 'compose-only';
+      if (profile !== 'compose-only') {
+        throw new AiCliError('TASK_INTENT_ACCESS_CONFLICT', `Codex compose requires accessProfile compose-only (got ${profile})`, {
+          exitCode: 2,
+          details: { taskIntent, accessProfile: profile },
+        });
+      }
+    }
+    if (taskIntent === 'review') {
+      const profile = request.accessProfile ?? 'review-readonly';
+      if (profile !== 'review-readonly') {
+        throw new AiCliError('TASK_INTENT_ACCESS_CONFLICT', `Codex review requires accessProfile review-readonly (got ${profile})`, {
+          exitCode: 2,
+          details: { taskIntent, accessProfile: profile },
+        });
+      }
+      if (request.codexHelpText !== undefined && request.codexHelpText !== null) {
+        validateCodexReviewSupport(request.codexHelpText);
+      }
+    }
+    if (taskIntent === 'implement' && request.accessProfile !== 'full' && request.accessProfile !== 'bounded-edit') {
+      throw new AiCliError('TASK_INTENT_ACCESS_CONFLICT', 'Codex implement requires an explicit write accessProfile', {
+        exitCode: 2,
+        details: { taskIntent, accessProfile: request.accessProfile ?? null },
+      });
+    }
+    // Codex writes are proven only via `full` (workspace-write). bounded-edit
+    // has no Codex-native primitive and is rejected at the client admission
+    // layer; a direct adapter call with bounded-edit fails here rather than
+    // silently running read-only.
+    if (taskIntent === 'implement' && request.accessProfile === 'bounded-edit') {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'Codex does not support bounded-edit; use full or opencode', {
+        exitCode: 2,
+        details: { taskIntent, accessProfile: request.accessProfile },
+      });
+    }
+
     const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-codex-'));
     const outputFile = join(dir, 'last-message.txt');
     const schemaFile = request.schema ? join(dir, 'output-schema.json') : null;

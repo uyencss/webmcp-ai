@@ -4,6 +4,10 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Extract the durable orchestration runtime into the companion package
+  `@gyga-browser/webmcp-ai-orchestration`; keep a lazy typed compatibility shim
+  for `webmcp-ai orchestration ...` while removing orchestration code and the
+  OpenCode SDK from the core artifact.
 - Add `--stream-to stdout` routing for advisory live provider output and events,
   separating the JSON envelope onto its own last line and separating text-mode
   final output with a leading newline to prevent concatenation with provider
@@ -23,6 +27,69 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 - Isolate every OpenCode test runtime database under a per-test temporary data
   root, reject unsandboxed starts under `node:test`, and use unique binding IDs
   so concurrent suites cannot share or mutate the real user data root.
+- Align `webmcp-ai-review-result/1` with the frozen task-intent plan: finding
+  severity is `critical|high|medium|low` with fields
+  `id/severity/file/line/message/recommendation` (`file`/`line` optional only
+  for architectural findings); safe aliases (`summary` for `message`, `path`
+  for `file`) apply only as fallbacks and never discard canonical fields;
+  `approve` rejects `critical`/`high`/`medium`; malformed or plan-only output
+  is `REVIEW_RESULT_INCOMPLETE`.
+- Add typed task-intent errors: unknown intents fail with
+  `TASK_INTENT_INVALID`; intent/profile contradictions (including `implement`
+  without explicit `bounded-edit`/`full`) fail with
+  `TASK_INTENT_ACCESS_CONFLICT` before spawn; malformed primitives stay
+  `INVALID_INPUT`.
+- Remove implicit native Plan mode from every vNext path: OpenCode
+  review/compose use the known `build` agent with generated read-only/deny-all
+  permissions; Codex `plan` and AGY vNext intents are uniformly rejected until
+  a separate `webmcp-ai-plan-result/1` contract exists.
+- Harden the Claude reviewer to the exact plan mapping (version-probed
+  `dontAsk`, `Read,Glob,Grep`, deny `Edit,Write,NotebookEdit`, `safe-mode`,
+  `--no-chrome`, `--no-session-persistence`, no MCP, no fallback to full) and
+  use native `stream-json --verbose` only when events are requested in
+  `generate`; `review` intentionally disallows `--stream`/`--events`. The
+  review/`ai.review` spawn lane now version-probes `claude --help` (bounded,
+  read-only, no model) before spawn and maps drift/unavailable to typed
+  `PROVIDER_CAPABILITY_DRIFT`/`CLI_NOT_INSTALLED` without leaking paths or
+  raw help; dry-run remains no-spawn and legacy `generate` without review is
+  unchanged. Managed or enterprise settings may override command-line grants;
+  reviewer flags are requested, not guaranteed.
+- Harden the Codex reviewer to its exact mapping (version-probed `exec`,
+  `--sandbox`, `read-only`, `--ephemeral`, `--ignore-user-config`,
+  `--ignore-rules`, `--skip-git-repo-check`, `--output-last-message`, `--color`
+  plus resume `resume`/`-c`; the
+  `sandbox_mode` resume mapping is a config key tested separately)
+  and the opencode reviewer to its exact mapping (version-probed `run`,
+  `--format`, `--agent`, `--dir`, `--model`/`--variant` with the generated
+  read-only config mapping); the review spawn lane probes each provider's
+  `--help` before the model and maps drift/unavailable to typed
+  `PROVIDER_CAPABILITY_DRIFT`/`CLI_NOT_INSTALLED` without leaking paths or raw
+  help; dry-run remains no-spawn; `authenticated:null` and `canaryProven:false`
+  are preserved (no canary or auth claim).
+- Narrow the task-intent matrix so `review`/`plan` accept only
+  `review-readonly` (`review`+`compose-only` fails
+  `TASK_INTENT_ACCESS_CONFLICT` before any compose temp workspace is created;
+  legacy no-`taskIntent` `compose-only` is unchanged) with a regression proving
+  no new compose directory appears after the rejection.
+- Make `providers inspect <id> --task-intent review` truthful: it probes each
+  provider's required CLI mapping via the installed binary/version/help in a
+  bounded read-only way (no model), calls `validateClaudeReviewSupport`,
+  `validateCodexReviewSupport`, and `validateOpencodeReviewSupport`
+  respectively, and reports
+  `installed/authenticated/policy-supported/canary-proven/task-ready`
+  separately with typed `PROVIDER_CAPABILITY_DRIFT`/unavailable reasons and no
+  path/secret leakage; ordinary review dry-run never spawns. Claude review
+  inspection reports a bounded `limitations` field whenever
+  task-ready/support is reported: managed or enterprise settings may override
+  command-line grants; reviewer flags are requested, not guaranteed.
+- Sanitize review dry-run previews so resumed session identifiers are represented
+  only by `resumed:true`/`<resumed-session>` and never echoed as resumable argv
+  material; provider `task-ready` remains explicitly mapping-only, separate from
+  authentication and canary proof.
+- Document the review read boundary (omitted workspace defaults to `cwd`
+  read-only for compatibility; prefer explicit; never writes caller files)
+  and mark resumed reviews with `resumed:true` (not fresh final-auditor
+  evidence) while keeping legacy `generate` resume compatibility.
 
 ## 0.3.0-alpha.0 - 2026-08-23
 

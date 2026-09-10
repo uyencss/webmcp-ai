@@ -44,6 +44,25 @@ export const agyProvider = {
     toolPolicies: ['provider-default', 'compose-only'],
   },
   buildInvocation(request) {
+    // Portable vNext lane: AGY cannot prove preventive deny-write for a
+    // review sandbox and has no proven non-Plan reviewer/compose mapping, so
+    // every vNext taskIntent fails closed with UNSUPPORTED_CAPABILITY. This
+    // guarantees no vNext request implicitly selects native Plan mode and
+    // never widens to accept-edits. Legacy callers without taskIntent keep
+    // the exact prior plan/accept-edits path below.
+    const taskIntent = request.taskIntent ?? null;
+    if (typeof taskIntent === 'string' && !['compose', 'review', 'implement', 'plan'].includes(taskIntent)) {
+      throw new AiCliError('TASK_INTENT_INVALID', `Unknown taskIntent: ${taskIntent}`, {
+        exitCode: 2,
+        details: { taskIntent },
+      });
+    }
+    if (taskIntent === 'review' || taskIntent === 'plan' || taskIntent === 'compose' || taskIntent === 'implement') {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'AGY does not support preventive deny-write review mode', {
+        exitCode: 2,
+        details: { capability: 'review', taskIntent, accessProfile: request.accessProfile ?? null },
+      });
+    }
     const agentMode = request.agentMode ?? 'plan';
     if (!['plan', 'accept-edits'].includes(agentMode)) {
       throw new AiCliError('INVALID_INPUT', 'AGY agentMode must be plan or accept-edits', {

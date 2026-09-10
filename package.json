@@ -22,9 +22,9 @@
   "exports": {
     ".": "./src/client.mjs",
     "./bin": "./bin/webmcp-ai.mjs",
+    "./errors": "./src/errors.mjs",
     "./providers": "./src/providers/index.mjs",
     "./protocol": "./src/protocol.mjs",
-    "./orchestration": "./src/orchestration/public-entry.mjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -37,24 +37,17 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node scripts/orchestration-coverage.mjs --test-only",
-    "test:coverage": "node scripts/orchestration-coverage.mjs",
+    "test": "node scripts/coverage.mjs --test-only",
+    "test:coverage": "node scripts/coverage.mjs",
     "install:agent": "node scripts/install-agent.mjs all",
     "install:codex": "node scripts/install-agent.mjs codex",
     "install:gemini": "node scripts/install-agent.mjs gemini",
     "install:claude": "node scripts/install-agent.mjs claude",
     "pack:dry-run": "npm pack --dry-run",
-    "prepublishOnly": "node scripts/orchestration-coverage.mjs --test-only && node scripts/orchestration-coverage.mjs && node scripts/orchestration-package-closure.mjs && npm pack --dry-run",
-    "test:package-closure": "node scripts/orchestration-package-closure.mjs",
-    "canary": "node scripts/orchestration-live-canary.mjs"
+    "prepublishOnly": "node scripts/coverage.mjs --test-only && node scripts/coverage.mjs && node scripts/package-closure.mjs && npm pack --dry-run",
+    "test:package-closure": "node scripts/package-closure.mjs"
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "@opencode-ai/sdk": "1.18.21"
-  },
-  "bundledDependencies": [
-    "@opencode-ai/sdk"
-  ]
+  }
 }

@@ -1,7 +1,0 @@
-{"type":"system","subtype":"init","session_id":"ses_claude_fixture","model":"claude-fixture-model","cwd":"/ws"}
-{"type":"assistant","session_id":"ses_claude_fixture","message":{"content":[{"type":"thinking","thinking":"private reasoning must be dropped"},{"type":"text","text":"Starting the bounded change"}]}}
-{"type":"assistant","session_id":"ses_claude_fixture","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"/ws/src/a.ts"}}]}}
-{"type":"user","session_id":"ses_claude_fixture","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"RAW_TOOL_OUTPUT_SHOULD_NOT_PERSIST_VERBATIM"}]}}
-{"type":"assistant","session_id":"ses_claude_fixture","message":{"content":[{"type":"text","text":"Done with the edit"}]}}
-{"type":"result","subtype":"success","result":"final summary text","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30},"session_id":"ses_claude_fixture","duration_ms":1200}
-{"type":"result","subtype":"error_during_execution","error":"provider exploded","session_id":"ses_claude_fixture"}

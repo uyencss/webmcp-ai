@@ -6,11 +6,29 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
-  generate, listAgents, listModels, probeProviders,
+  describeGenerateDryRun, generate, listAgents, listModels, probeProviders,
 } from '../src/client.mjs';
 
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
 chmodSync(fakeBin, 0o755);
+
+test('generate dry-run redacts resumable session identifiers', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'webmcp-ai-generate-preview-'));
+  try {
+    const preview = describeGenerateDryRun({
+      provider: 'opencode',
+      prompt: 'preview',
+      workspace,
+      sessionId: 'ses_generate_private',
+      env: {},
+    });
+    const text = JSON.stringify(preview);
+    assert.equal(preview.sessionId, '<resumed-session>');
+    assert.equal(text.includes('ses_generate_private'), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
 
 function createFakeOpencode(t) {
   const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-task0-'));

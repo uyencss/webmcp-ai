@@ -25,40 +25,27 @@ Install the companion skill for all supported local agents:
 npm run install:agent
 ```
 
-## Orchestration runtime (alpha)
+## Orchestration companion package
 
-Beyond one-shot generation, `webmcp-ai` ships an opt-in, machine-local
-coordination runtime for supervised CLI-agent lanes: an explicit Coordination
-lifecycle, a single-writer supervisor with fenced epochs, an append-only
-journal for durable recovery, worker callbacks, and independent acceptance
-through `dispatch.verify`.
+The durable Coordination runtime is released separately as
+`@gyga-browser/webmcp-ai-orchestration`; this package now owns only the
+provider-neutral one-shot/review wrapper and `webmcp-tool-v1` protocol.
 
 ```bash
-webmcp-ai orchestration capabilities --json
-webmcp-ai orchestration guide --format markdown
+npm install @gyga-browser/webmcp-ai-orchestration
+webmcp-ai-orchestration capabilities --json
+webmcp-ai-orchestration guide --format markdown
 ```
 
-The runtime is disabled by default in spirit — nothing runs unless you create
-a Coordination. Set `WEBMCP_AI_ORCHESTRATION_DISABLED=1` to hard-disable all
-mutations while one-shot commands stay stable. Adapter maturity is honest:
-alpha adapters (`owned-process`, `opencode-server`, `claude-stream`,
-`codex-exec`) are `fixture-only`, which is not supported; promotion requires
-separately authorized live canary receipts.
+The legacy `webmcp-ai orchestration ...` command remains a lazy compatibility
+shim. It loads the companion package only at that command boundary and returns
+typed `ORCHESTRATION_PACKAGE_REQUIRED` when the companion is not installed;
+one-shot and review commands never load supervisor code.
 
-After separate operator authorization (`WEBMCP_AI_LIVE_CANARY=1` plus a
-per-adapter flag), `npm run canary -- <adapter-id>` records a machine-local
-receipt that promotes exactly that adapter to `canary-proven` on this machine.
-
-Teardown proof is platform-scoped. On POSIX, `group-stopped` is emitted only
-after an independent `kill(-pgid, 0)` probe proves the whole process group is
-absent. On Windows, this alpha has no Job Object integration, so the same label
-proves only that the single owned process exited; descendant-group absence is
-not guaranteed there.
-
-See [skills/webmcp-ai-cli/references/orchestration-runtime.md](skills/webmcp-ai-cli/references/orchestration-runtime.md)
-for the operator guide and
-[skills/webmcp-ai-cli/references/cli-subagent-orchestration.md](skills/webmcp-ai-cli/references/cli-subagent-orchestration.md)
-for the no-runtime coordination brief.
+The companion package owns the machine-local state root, supervisor, journal,
+IPC, adapters, verifier, canary and managed-host runtime. Its fixture-only
+alpha adapters and live-canary authorization remain separate from core review
+acceptance.
 
 ## Commands
 
@@ -86,6 +73,56 @@ workspace, policy, cancellation, and output validation may explicitly opt into
 and never enables dangerous permission bypass. opencode honors the same option
 (default `plan`; `accept-edits` adds `--auto` and a bash deny-list); Claude and
 Codex reject it.
+
+Migration: prefer portable `taskIntent` (`compose|review|implement|plan`) with
+`accessProfile` (`compose-only|review-readonly|bounded-edit|full`) over legacy
+`--agent-mode`. Unknown intents fail with `TASK_INTENT_INVALID`;
+intent/profile contradictions (including `implement` without
+`bounded-edit`/`full`) fail with `TASK_INTENT_ACCESS_CONFLICT` before spawn;
+malformed primitives stay `INVALID_INPUT`. `agentMode` remains for `generate`
+compatibility but is rejected for `review`. `ai.review` accepts only
+`taskIntent: review` with `accessProfile: review-readonly` and returns `schema:
+webmcp-ai-review-result/1` (`approve|request-changes|blocked|indeterminate`;
+`severity` is `critical|high|medium|low`; findings carry
+`id/severity/message/recommendation` with `file`/`line` optional only for
+architectural findings; `blocked` requires `blockedReason`; `approve` rejects
+`critical`/`high`/`medium`). `plan` needs a separate `webmcp-ai-plan-result/1`
+contract and is uniformly rejected. No vNext intent selects native Plan mode:
+OpenCode review/compose use the known `build` agent with generated
+read-only/deny-all permissions. Claude review uses version-probed `dontAsk`
+with `Read,Glob,Grep`, denies `Edit,Write,NotebookEdit`, keeps `safe-mode`,
+`--no-chrome` and `--no-session-persistence` (MCP disabled by omission plus
+safe-env filtering), never falls back to full, and uses native `stream-json
+--verbose` only when events are requested in `generate` (`review`
+intentionally disallows `--stream`/`--events`). `review` defaults an omitted
+workspace to `cwd` for compatibility (read-only, never written; prefer
+explicit). A resumed review sets `resumed:true` and is not fresh
+final-auditor evidence. `review`/`plan` accept only `review-readonly`
+(`review`+`compose-only` fails `TASK_INTENT_ACCESS_CONFLICT` before any
+compose workspace is created; legacy no-`taskIntent` `compose-only` is
+unchanged). `providers inspect <id> --task-intent review`
+probes each provider's required CLI mapping via the installed
+binary/version/help (bounded, read-only, no model) — Claude requires the
+reviewer flags, Codex requires `exec`/`--sandbox`/`read-only`/`--ephemeral`/
+`--ignore-user-config`/`--ignore-rules`/`--skip-git-repo-check`/
+`--output-last-message`/`--color` plus resume
+(`resume`/`-c`); the resume sandbox mapping uses config key `sandbox_mode`
+and is tested separately, opencode requires `run`/`--format`/`--agent`/
+`--dir` plus `--model`/`--variant` with the wrapper read-only config mapping —
+and reports `installed`/`authenticated`/`policy-supported`/`canary-proven`/
+`task-ready` separately without leaking paths/secrets. Here `task-ready` means
+the wrapper's provider mapping is installed and help-proven; it does not claim
+authentication or canary acceptance (`authenticated`/`canary-proven` remain
+explicitly null/false when unproven). Managed or enterprise
+settings may override command-line grants; reviewer flags are requested, not
+guaranteed.
+
+```bash
+webmcp-ai review --provider opencode --prompt-file ./prompt.md --workspace /abs/ws --json
+webmcp-ai review --provider opencode --prompt-file ./prompt.md --workspace /abs/ws --dry-run --json
+webmcp-ai providers inspect opencode --task-intent review --json
+webmcp-ai generate --provider opencode --prompt-file ./prompt.md --workspace /abs/ws --dry-run --json
+```
 
 Use `agent: "webmcp-node-executor"` in JSON input (or
 `--agent webmcp-node-executor`) to select a preinstalled AGY custom agent. The

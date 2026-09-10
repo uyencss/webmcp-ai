@@ -2,7 +2,10 @@
 
 Package version: **{{PACKAGE_VERSION}}** · Protocol: `webmcp.ai-orchestration/v0`
 
-This is the opt-in, machine-local coordination runtime for `@gyga-browser/webmcp-ai`.
+This is the opt-in, machine-local coordination runtime for the companion
+package `@gyga-browser/webmcp-ai-orchestration`, which depends on
+`@gyga-browser/webmcp-ai`. The core package keeps only a lazy compatibility
+shim for the legacy command and does not contain the supervisor implementation.
 The stable one-shot commands (`generate`, `tool-call`, `providers`, `doctor`)
 remain unchanged and remain valid when the runtime is absent or disabled.
 
@@ -18,6 +21,12 @@ same rules. Do not mix them mid-task: once a Coordination exists, lifecycle
 decisions go through its operations, not ad-hoc process spawns.
 
 ## 1. CLI surface (alpha)
+
+Install the companion package before using the runtime:
+
+```bash
+npm install @gyga-browser/webmcp-ai-orchestration
+```
 
 ```bash
 webmcp-ai orchestration capabilities --json

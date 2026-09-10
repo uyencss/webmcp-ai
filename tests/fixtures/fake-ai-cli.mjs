@@ -11,6 +11,17 @@ if (args.includes('--version') || args.includes('-V') || args.includes('-v')) {
   process.exit(0);
 }
 
+if (args.includes('--help')) {
+  if (provider === 'codex') {
+    process.stdout.write('codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --output-last-message resume -c sandbox_mode model_reasoning_effort\n');
+  } else if (provider === 'opencode') {
+    process.stdout.write('opencode run --format json --agent build --dir /ws --model sonnet --variant effort\n');
+  } else {
+    process.stdout.write('--permission-mode --tools --disallowedTools --safe-mode --no-chrome --no-session-persistence\n');
+  }
+  process.exit(0);
+}
+
 if (args[0] === 'models') {
   process.stdout.write('model-one\nmodel-two\n');
   process.exit(0);
