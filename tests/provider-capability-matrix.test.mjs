@@ -158,7 +158,7 @@ function classifyDryRun(input) {
 
 // Runtime-accepted set for one provider×intent over the complete portable
 // profile cross-product, independent of the declaration under test. Also
-// asserts the typed runtime contract: incompatible profile => 
+// asserts the typed runtime contract: incompatible profile =>
 // TASK_INTENT_ACCESS_CONFLICT, bogus profile => INVALID_INPUT, and an allowed
 // profile is either accepted or fails with UNSUPPORTED_CAPABILITY.
 function acceptedProfiles(meta, intent, workspace) {
