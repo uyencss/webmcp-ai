@@ -45,16 +45,17 @@ export const claudeProvider = {
     modelDiscovery: false,
     toolPolicies: ['provider-default'],
     // Machine-readable mirror of buildInvocation below: no AGY agentMode;
-    // review/implement are supported vNext intents (review needs the
+    // review/compose/implement are supported vNext intents (review needs the
     // installed help probe); plan needs a separate contract and is rejected.
-    // vNext compose is declared unsupported because the legacy toolPolicy
-    // gate in client.mjs rejects compose-only for providers without the
-    // legacy compose-only policy (claude alone); the adapter branch exists
-    // but is unreachable until that gate is fixed under its own plan.
+    // Compose rides the portable lane only: the client gate exempts
+    // `taskIntent compose` + `compose-only` from the legacy toolPolicy check,
+    // so the adapter's text-only, disposable-workspace branch is reachable
+    // while `toolPolicies` stays ['provider-default'] and the legacy
+    // no-taskIntent compose-only lane remains rejected (F6 follow-up).
     agentModes: { supported: false, values: [], default: null, reason: 'Claude does not support AGY agentMode' },
     taskIntents: {
       review: { supported: true, accessProfile: 'review-readonly', probe: 'help' },
-      compose: { supported: false, reason: 'vNext compose is unreachable: the legacy toolPolicy gate rejects compose-only for a provider without the legacy compose-only policy; pending a gated fix' },
+      compose: { supported: true, accessProfile: 'compose-only' },
       implement: { supported: true, accessProfiles: ['full'] },
       plan: { supported: false, reason: 'requires a separate webmcp-ai-plan-result/1 contract' },
     },

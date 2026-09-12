@@ -178,6 +178,49 @@ export function resolveOpencodeCliDb(env, { homeDir = homedir() } = {}) {
   return join(homeDir, '.local', 'share', 'opencode', 'opencode-cli.db');
 }
 
+/**
+ * Allocate the private per-invocation config boundary and roll it back if any
+ * setup step throws: callers only receive the cleanup hook after a fully
+ * successful setup, so a failed config write cannot strand
+ * webmcp-ai-opencode-*. Deterministic config content is written to a
+ * disposable directory private to this invocation, preventing inheritance of
+ * the operator's ~/.config/opencode MCP configuration and project/user config.
+ */
+function createIsolatedOpencodeRuntime(request, baseConfig) {
+  const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
+  try {
+    const xdgConfigHome = join(privateDir, 'xdg-config');
+    const openCodeConfig = join(privateDir, 'opencode.json');
+    const openCodeConfigDir = join(privateDir, 'opencode.d');
+    mkdirSync(xdgConfigHome, { recursive: true });
+    mkdirSync(openCodeConfigDir, { recursive: true });
+    // OPENCODE_CONFIG points at the same content as OPENCODE_CONFIG_CONTENT
+    // for defense-in-depth.
+    writeFileSync(openCodeConfig, JSON.stringify(baseConfig, null, 2), 'utf8');
+    return {
+      env: {
+        OPENCODE_DB: resolveOpencodeCliDb(request.env),
+        XDG_CONFIG_HOME: xdgConfigHome,
+        OPENCODE_CONFIG: openCodeConfig,
+        OPENCODE_CONFIG_DIR: openCodeConfigDir,
+        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+        OPENCODE_PURE: '1',
+        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
+        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
+        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
+        OPENCODE_DISABLE_AUTOUPDATE: '1',
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(baseConfig),
+      },
+      cleanup: () => {
+        try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
+      },
+    };
+  } catch (error) {
+    try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
+    throw error;
+  }
+}
+
 export const opencodeProvider = {
   id: 'opencode',
   name: 'opencode',
@@ -368,39 +411,12 @@ export const opencodeProvider = {
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
 
-    // Create private per-invocation config boundary directory.
-    // Deterministic content (cfg) is written to a disposable directory; the directory
-    // is private to this invocation and removed on cleanup. This prevents inheritance
-    // of the operator's ~/.config/opencode MCP configuration and project/user config.
-    const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
-    const xdgConfigHome = join(privateDir, 'xdg-config');
-    const openCodeConfig = join(privateDir, 'opencode.json');
-    const openCodeConfigDir = join(privateDir, 'opencode.d');
-    mkdirSync(xdgConfigHome, { recursive: true });
-    mkdirSync(openCodeConfigDir, { recursive: true });
-    // Write the isolated config file – this is the file that OPENCODE_CONFIG points to.
-    // It contains the same content as OPENCODE_CONFIG_CONTENT for defense-in-depth.
-    writeFileSync(openCodeConfig, JSON.stringify(baseConfig, null, 2), 'utf8');
-
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
     return {
       args,
       stdin: request.prompt,
-      env: {
-        OPENCODE_DB: resolveOpencodeCliDb(request.env),
-        XDG_CONFIG_HOME: xdgConfigHome,
-        OPENCODE_CONFIG: openCodeConfig,
-        OPENCODE_CONFIG_DIR: openCodeConfigDir,
-        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
-        OPENCODE_PURE: '1',
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
-        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
-        OPENCODE_DISABLE_AUTOUPDATE: '1',
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(baseConfig),
-      },
-      cleanup: () => {
-        try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
-      },
+      env: isolatedEnv,
+      cleanup,
     };
   },
   parseOutput({ stdout }) {
@@ -514,32 +530,12 @@ function buildVNextReviewInvocation(request, taskIntent) {
     pushModelEffortArgs(args, request, profile);
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
-    const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
-    const xdgConfigHome = join(privateDir, 'xdg-config');
-    const openCodeConfig = join(privateDir, 'opencode.json');
-    const openCodeConfigDir = join(privateDir, 'opencode.d');
-    mkdirSync(xdgConfigHome, { recursive: true });
-    mkdirSync(openCodeConfigDir, { recursive: true });
-    writeFileSync(openCodeConfig, JSON.stringify(baseConfig, null, 2), 'utf8');
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
     return {
       args,
       stdin: request.prompt,
-      env: {
-        OPENCODE_DB: resolveOpencodeCliDb(request.env),
-        XDG_CONFIG_HOME: xdgConfigHome,
-        OPENCODE_CONFIG: openCodeConfig,
-        OPENCODE_CONFIG_DIR: openCodeConfigDir,
-        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
-        OPENCODE_PURE: '1',
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
-        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
-        OPENCODE_DISABLE_AUTOUPDATE: '1',
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(baseConfig),
-      },
-      cleanup: () => {
-        try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
-      },
+      env: isolatedEnv,
+      cleanup,
     };
   }
   if (taskIntent === 'implement') {
@@ -596,32 +592,12 @@ function buildVNextReviewInvocation(request, taskIntent) {
     pushModelEffortArgs(args, request, profile);
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
-    const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
-    const xdgConfigHome = join(privateDir, 'xdg-config');
-    const openCodeConfig = join(privateDir, 'opencode.json');
-    const openCodeConfigDir = join(privateDir, 'opencode.d');
-    mkdirSync(xdgConfigHome, { recursive: true });
-    mkdirSync(openCodeConfigDir, { recursive: true });
-    writeFileSync(openCodeConfig, JSON.stringify(baseConfig, null, 2), 'utf8');
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
     return {
       args,
       stdin: request.prompt,
-      env: {
-        OPENCODE_DB: resolveOpencodeCliDb(request.env),
-        XDG_CONFIG_HOME: xdgConfigHome,
-        OPENCODE_CONFIG: openCodeConfig,
-        OPENCODE_CONFIG_DIR: openCodeConfigDir,
-        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
-        OPENCODE_PURE: '1',
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
-        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
-        OPENCODE_DISABLE_AUTOUPDATE: '1',
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(baseConfig),
-      },
-      cleanup: () => {
-        try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
-      },
+      env: isolatedEnv,
+      cleanup,
     };
   }
   if (taskIntent === 'compose') {
@@ -676,32 +652,12 @@ function buildVNextReviewInvocation(request, taskIntent) {
     pushModelEffortArgs(args, request, profile);
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
-    const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
-    const xdgConfigHome = join(privateDir, 'xdg-config');
-    const openCodeConfig = join(privateDir, 'opencode.json');
-    const openCodeConfigDir = join(privateDir, 'opencode.d');
-    mkdirSync(xdgConfigHome, { recursive: true });
-    mkdirSync(openCodeConfigDir, { recursive: true });
-    writeFileSync(openCodeConfig, JSON.stringify(baseConfig, null, 2), 'utf8');
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
     return {
       args,
       stdin: request.prompt,
-      env: {
-        OPENCODE_DB: resolveOpencodeCliDb(request.env),
-        XDG_CONFIG_HOME: xdgConfigHome,
-        OPENCODE_CONFIG: openCodeConfig,
-        OPENCODE_CONFIG_DIR: openCodeConfigDir,
-        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
-        OPENCODE_PURE: '1',
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
-        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
-        OPENCODE_DISABLE_AUTOUPDATE: '1',
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(baseConfig),
-      },
-      cleanup: () => {
-        try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
-      },
+      env: isolatedEnv,
+      cleanup,
     };
   }
   throw new AiCliError('TASK_INTENT_INVALID', `Unknown taskIntent: ${taskIntent}`, { exitCode: 2, details: { taskIntent } });

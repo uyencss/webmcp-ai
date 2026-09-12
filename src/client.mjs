@@ -168,6 +168,12 @@ function normalizeRequest(input) {
     mcpConfig: input.mcpConfig,
   });
 
+  // A caller-supplied legacy toolPolicy must be well-formed even when the
+  // portable profile drives the effective policy (compose-only derives from
+  // taskIntent); otherwise an invalid value would be silently discarded.
+  if (input.toolPolicy !== undefined && input.toolPolicy !== null) {
+    normalizeToolPolicy(input.toolPolicy);
+  }
   // Derive the effective toolPolicy for legacy provider capability checks and compose-only temp workspace handling
   const toolPolicy = capability.accessProfile === 'compose-only' ? 'compose-only' : (input.toolPolicy ?? (capability.accessProfile === 'provider-default' ? 'provider-default' : capability.accessProfile));
   // Provider support matrix. Legacy (no taskIntent) keeps the exact prior
@@ -203,8 +209,15 @@ function normalizeRequest(input) {
   // Retain legacy toolPolicy validation for backward compat
   // 'full' maps onto provider-default for the legacy capability check; the
   // provider adapter branches on accessProfile === 'full' for passthrough.
+  // The portable compose lane (taskIntent compose + compose-only) joins the
+  // review-readonly/bounded-edit/full exemption: the adapter owns the
+  // compose-only contract (disposable workspace, text-only args), while the
+  // legacy no-taskIntent compose-only lane keeps requiring the provider's
+  // legacy toolPolicies declaration (claude legacy compose-only stays
+  // rejected).
   const legacyPolicy = normalizeToolPolicy(toolPolicy === 'review-readonly' || toolPolicy === 'bounded-edit' || toolPolicy === 'full' ? 'provider-default' : toolPolicy);
-  if (!provider.capabilities?.toolPolicies?.includes(legacyPolicy) && !['review-readonly', 'bounded-edit', 'full'].includes(capability.accessProfile)) {
+  const portableCompose = taskIntent === 'compose' && capability.accessProfile === 'compose-only';
+  if (!provider.capabilities?.toolPolicies?.includes(legacyPolicy) && !['review-readonly', 'bounded-edit', 'full'].includes(capability.accessProfile) && !portableCompose) {
     throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not support toolPolicy ${legacyPolicy}`, {
       exitCode: 2,
       details: { capability: 'toolPolicy', toolPolicy: legacyPolicy },
@@ -391,25 +404,37 @@ export async function generate(input) {
   if (provider.id === 'opencode' && (request.opencodeProfile === null || request.opencodeProfile === undefined)) {
     request.opencodeProfile = await detectOpencodeProfile({ command, env });
   }
+  // Library-only observers are inspected before invocation so provider-native
+  // telemetry (Claude stream-json --verbose) can be selected without a second
+  // pass. Telemetry only — never control. These caller accessors are read
+  // before any temp allocation: a throwing accessor must fail before the
+  // disposable compose workspace exists.
+  const onStreamEarly = typeof input.onStream === 'function' ? input.onStream : null;
+  const onEventEarly = typeof input.onEvent === 'function' ? input.onEvent : null;
+  const eventsRequested = onEventEarly !== null;
   // compose-only uses disposable temp workspace; otherwise use validated workspace
   const isComposeOnly = request.accessProfile === 'compose-only' || request.toolPolicy === 'compose-only';
   const policyWorkspace = isComposeOnly && !capability.workspace
     ? mkdtempSync(join(tmpdir(), `webmcp-ai-${provider.id}-compose-`))
     : null;
   const workspace = policyWorkspace || capability.workspace || process.cwd();
-  // Library-only observers are inspected before invocation so provider-native
-  // telemetry (Claude stream-json --verbose) can be selected without a second
-  // pass. Telemetry only — never control.
-  const onStreamEarly = typeof input.onStream === 'function' ? input.onStream : null;
-  const onEventEarly = typeof input.onEvent === 'function' ? input.onEvent : null;
-  const eventsRequested = onEventEarly !== null;
   // The effective environment is handed to the provider adapter so env-derived
   // settings (e.g. the isolated OpenCode database) resolve from what actually
   // reaches the child process, never from process.env behind the caller.
-  const invocation = provider.buildInvocation({
-    ...request, workspace, env, allowedReadRoots: capability.allowedReadRoots, allowedWriteRoots: capability.allowedWriteRoots, protectedPaths: capability.protectedPaths, projectId: capability.projectId, storeRevisions: capability.storeRevisions,
-    eventsRequested,
-  });
+  // A provider may reject the request inside buildInvocation (e.g. claude
+  // agentMode/agent on a portable compose). Clean the disposable compose
+  // workspace before rethrow: the generic try/finally below only starts
+  // after invocation construction.
+  let invocation;
+  try {
+    invocation = provider.buildInvocation({
+      ...request, workspace, env, allowedReadRoots: capability.allowedReadRoots, allowedWriteRoots: capability.allowedWriteRoots, protectedPaths: capability.protectedPaths, projectId: capability.projectId, storeRevisions: capability.storeRevisions,
+      eventsRequested,
+    });
+  } catch (error) {
+    if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+    throw error;
+  }
 
   // Reviewer spawn-lane probes: before any model spawn, validate the
   // installed flags via a bounded `<bin> --help` (no model invocation).
@@ -462,9 +487,18 @@ export async function generate(input) {
   // opencode provider keeps ambient operator config/MCP in full mode.
   const isFull = request.accessProfile === 'full';
   const buildEnv = isFull ? buildFullChildEnv : buildSafeChildEnv;
-  const safeBase = buildEnv(env, {});
-  const privateEnv = buildEnv(invocation.env || {}, {});
-  const childEnv = { ...safeBase, ...privateEnv };
+  let childEnv;
+  try {
+    const safeBase = buildEnv(env, {});
+    const privateEnv = buildEnv(invocation.env || {}, {});
+    childEnv = { ...safeBase, ...privateEnv };
+  } catch (error) {
+    // A throwing env source (e.g. hostile getter) must not strand the
+    // disposable workspace or the provider temp artifacts.
+    try { invocation.cleanup?.(); } catch {}
+    if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+    throw error;
+  }
 
   // Output cap: explicit caller value wins; full defaults higher than the
   // runner default so long generations are not cut mid-stream.
@@ -575,8 +609,10 @@ export async function generate(input) {
     emitEvent('stdout', terminalStateForError(error), error?.code || error?.message || 'failed');
     throw error;
   } finally {
-    invocation.cleanup?.();
-    if (policyWorkspace) rmSync(policyWorkspace, { recursive: true, force: true });
+    // Independent guards: a throwing provider cleanup must not strand the
+    // disposable compose workspace (and vice versa).
+    try { invocation.cleanup?.(); } catch {}
+    if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
   }
 }
 
@@ -651,30 +687,37 @@ export function describeGenerateDryRun(input = {}) {
   const needsTempPreview = provider.id === 'agy' && (request.toolPolicy === 'compose-only' || request.accessProfile === 'compose-only');
   const tempPreviewDir = needsTempPreview ? mkdtempSync(join(tmpdir(), 'webmcp-ai-dryrun-')) : null;
   const workspace = needsTempPreview ? tempPreviewDir : (capability.workspace || process.cwd());
-  const preview = provider.buildInvocation({
-    ...request,
-    workspace,
-    env: input.env || {},
-    allowedReadRoots: capability.allowedReadRoots,
-    allowedWriteRoots: capability.allowedWriteRoots,
-    protectedPaths: capability.protectedPaths,
-    projectId: capability.projectId,
-    storeRevisions: capability.storeRevisions,
-  });
-  let args = sanitizeGenerateArgs(preview.args || [], capability, request.sessionId);
-  // AGY carries the prompt as `-p <prompt>` argv; never leak it in dry-run.
-  if (provider.id === 'agy') {
-    args = args.map((a) => (a === request.prompt ? '<prompt>' : a));
-    // Also redact any arg that contains a long prompt substring (defence).
-    args = args.map((a) => (typeof a === 'string' && request.prompt && a.includes(request.prompt.slice(0, 32)) && a.length > 32 ? '<prompt>' : a));
-  }
+  let args;
+  let preview = null;
   try {
-    preview.cleanup?.();
-  } catch {
-    // Preview cleanup must never fail inspection.
-  }
-  if (tempPreviewDir) {
-    try { rmSync(tempPreviewDir, { recursive: true, force: true }); } catch {}
+    preview = provider.buildInvocation({
+      ...request,
+      workspace,
+      env: input.env || {},
+      allowedReadRoots: capability.allowedReadRoots,
+      allowedWriteRoots: capability.allowedWriteRoots,
+      protectedPaths: capability.protectedPaths,
+      projectId: capability.projectId,
+      storeRevisions: capability.storeRevisions,
+    });
+    args = sanitizeGenerateArgs(preview.args || [], capability, request.sessionId);
+    // AGY carries the prompt as `-p <prompt>` argv; never leak it in dry-run.
+    if (provider.id === 'agy') {
+      args = args.map((a) => (a === request.prompt ? '<prompt>' : a));
+      // Also redact any arg that contains a long prompt substring (defence).
+      args = args.map((a) => (typeof a === 'string' && request.prompt && a.includes(request.prompt.slice(0, 32)) && a.length > 32 ? '<prompt>' : a));
+    }
+  } finally {
+    // buildInvocation may throw (e.g. invalid AGY compose args); preview
+    // cleanup and the disposable preview dir must not strand on any path.
+    try {
+      preview?.cleanup?.();
+    } catch {
+      // Preview cleanup must never fail inspection.
+    }
+    if (tempPreviewDir) {
+      try { rmSync(tempPreviewDir, { recursive: true, force: true }); } catch {}
+    }
   }
   const promptDigest = createHash('sha256').update(String(request.prompt)).digest('hex').slice(0, 16);
   return {

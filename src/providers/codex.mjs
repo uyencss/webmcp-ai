@@ -141,10 +141,18 @@ export const codexProvider = {
       });
     }
 
+    // Serialize the schema before allocating the temp dir: a circular or
+    // BigInt schema must fail without stranding webmcp-ai-codex-*.
+    const schemaPayload = request.schema ? `${JSON.stringify(request.schema, null, 2)}\n` : null;
     const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-codex-'));
     const outputFile = join(dir, 'last-message.txt');
     const schemaFile = request.schema ? join(dir, 'output-schema.json') : null;
-    if (schemaFile) writeFileSync(schemaFile, `${JSON.stringify(request.schema, null, 2)}\n`, { mode: 0o600 });
+    try {
+      if (schemaFile) writeFileSync(schemaFile, schemaPayload, { mode: 0o600 });
+    } catch (error) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+      throw error;
+    }
 
     // Full passthrough (opt-in via --full): explicit workspace-write sandbox.
     // Omitting the sandbox would fall back to the config default (usually

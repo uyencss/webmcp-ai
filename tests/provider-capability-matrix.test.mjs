@@ -4,14 +4,14 @@
 // longer matches the gates fails here instead of silently misleading a
 // caller. Inspect declared responses are exercised through the real CLI.
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { describeGenerateDryRun } from '../src/client.mjs';
+import { describeGenerateDryRun, generate } from '../src/client.mjs';
 import { listProviders } from '../src/providers/index.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
@@ -50,7 +50,7 @@ const EXPECTED_INTENT_ARRAYS = {
   opencode: { implement: ['bounded-edit', 'full'] },
 };
 const EXPECTED_INTENT_SINGULAR_PROFILES = {
-  claude: { review: 'review-readonly' },
+  claude: { review: 'review-readonly', compose: 'compose-only' },
   codex: { review: 'review-readonly', compose: 'compose-only' },
   opencode: { review: 'review-readonly', compose: 'compose-only' },
 };
@@ -74,7 +74,7 @@ const EXPECTED_INTENT_KEYS = {
   },
   claude: {
     review: ['supported', 'accessProfile', 'probe'],
-    compose: ['supported', 'reason'],
+    compose: ['supported', 'accessProfile'],
     implement: ['supported', 'accessProfiles'],
     plan: ['supported', 'reason'],
   },
@@ -100,7 +100,6 @@ const EXPECTED_INTENT_METADATA = {
   },
   claude: {
     review: { probe: 'help' },
-    compose: { reason: 'vNext compose is unreachable: the legacy toolPolicy gate rejects compose-only for a provider without the legacy compose-only policy; pending a gated fix' },
     plan: { reason: 'requires a separate webmcp-ai-plan-result/1 contract' },
   },
   codex: {
@@ -153,6 +152,27 @@ function classifyDryRun(input) {
     return { outcome: 'ok', args: result.args };
   } catch (error) {
     return { outcome: 'error', code: error?.code ?? 'UNKNOWN' };
+  }
+}
+
+// Race-free leak check: run the probe under a private TMPDIR so only
+// directories created by this test can appear, then assert that no
+// webmcp-ai-* artifact remains. File-level test parallelism cannot interfere.
+async function withPrivateTmp(probe) {
+  const privateTmp = mkdtempSync(join(tmpdir(), 'webmcp-ai-leak-check-'));
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = privateTmp;
+  try {
+    await probe();
+    assert.deepEqual(
+      readdirSync(privateTmp).filter((name) => name.startsWith('webmcp-ai-')),
+      [],
+      'leaked temp artifacts under the private TMPDIR',
+    );
+  } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+    rmSync(privateTmp, { recursive: true, force: true });
   }
 }
 
@@ -265,6 +285,89 @@ test('declared taskIntents match every runtime-accepted profile', () => {
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+test('claude portable compose is reachable while legacy compose-only stays rejected', () => {
+  // F6 follow-up: the portable lane (taskIntent compose + compose-only) is
+  // exempt from the legacy toolPolicy declaration check, so claude reaches its
+  // text-only compose branch. The legacy no-taskIntent lane is frozen:
+  // `toolPolicies` stays ['provider-default'] and compose-only still fails.
+  const portable = classifyDryRun({ provider: 'claude', prompt: 'compose probe', taskIntent: 'compose' });
+  assert.equal(portable.outcome, 'ok', 'claude portable compose must reach the adapter');
+  const toolsIndex = portable.args.indexOf('--tools');
+  assert.ok(toolsIndex !== -1 && portable.args[toolsIndex + 1] === '', 'compose must deny tools with an empty --tools list');
+  assert.ok(portable.args.includes('--safe-mode'), 'compose must stay in safe-mode');
+  const legacy = classifyDryRun({ provider: 'claude', prompt: 'compose probe', toolPolicy: 'compose-only' });
+  assert.equal(legacy.outcome, 'error', 'legacy claude compose-only must stay rejected');
+  assert.equal(legacy.code, 'UNSUPPORTED_CAPABILITY');
+  // A caller-supplied legacy toolPolicy must be well-formed even when the
+  // portable profile drives the effective policy.
+  for (const bogus of ['unsafe', 'full']) {
+    const invalid = classifyDryRun({ provider: 'claude', prompt: 'compose probe', taskIntent: 'compose', toolPolicy: bogus });
+    assert.equal(invalid.outcome, 'error', `compose + toolPolicy ${bogus} must fail`);
+    assert.equal(invalid.code, 'INVALID_INPUT', `compose + toolPolicy ${bogus} code`);
+  }
+});
+
+test('rejected claude compose cleans up its disposable workspace', async () => {
+  await withPrivateTmp(async () => {
+    await assert.rejects(
+      generate({
+        provider: 'claude', prompt: 'compose probe', taskIntent: 'compose', agentMode: 'plan',
+        env: { ...process.env, CLAUDE_BIN: fakeBin },
+      }),
+      (error) => error.code === 'UNSUPPORTED_CAPABILITY',
+    );
+  });
+});
+
+test('rejected legacy agy compose dry-run cleans its preview temp dir', async () => {
+  await withPrivateTmp(() => {
+    assert.throws(
+      () => describeGenerateDryRun({ provider: 'agy', prompt: 'compose probe', toolPolicy: 'compose-only', agentMode: 'bogus' }),
+      (error) => error.code === 'INVALID_INPUT',
+    );
+  });
+});
+
+test('hostile env source does not leak the claude compose workspace', async () => {
+  await withPrivateTmp(async () => {
+    const hostileEnv = new Proxy({}, {
+      ownKeys() { throw new Error('hostile env'); },
+      getOwnPropertyDescriptor() { throw new Error('hostile env'); },
+    });
+    await assert.rejects(
+      generate({ provider: 'claude', prompt: 'compose probe', taskIntent: 'compose', env: hostileEnv }),
+      /hostile env/,
+    );
+  });
+});
+
+test('throwing observer accessor does not leak the claude compose workspace', async () => {
+  await withPrivateTmp(async () => {
+    for (const field of ['onStream', 'onEvent']) {
+      const hostile = {
+        provider: 'claude', prompt: 'compose probe', taskIntent: 'compose',
+        env: { ...process.env, CLAUDE_BIN: fakeBin },
+      };
+      Object.defineProperty(hostile, field, {
+        enumerable: true,
+        get() { throw new Error(`hostile ${field}`); },
+      });
+      await assert.rejects(generate(hostile), new RegExp(`hostile ${field}`));
+    }
+  });
+});
+
+test('unserializable codex schema does not leak a provider temp dir', async () => {
+  await withPrivateTmp(() => {
+    const circular = {};
+    circular.self = circular;
+    assert.throws(
+      () => describeGenerateDryRun({ provider: 'codex', prompt: 'schema probe', schema: circular }),
+      TypeError,
+    );
+  });
 });
 
 test('declared agentModes match every runtime-accepted mode', () => {
