@@ -108,6 +108,28 @@ An unrecognized major or unparseable version fails closed with typed
 opencode --task-intent review` reports the detected profile in
 `mapping.profile`.
 
+## Capability discovery (agentModes / taskIntents)
+
+Every provider entry from `providers list --json` — and the same
+`capabilities` object echoed by `providers inspect <id> --json`,
+`models inspect`, `preflight`, and `doctor` — carries the machine-readable
+dispatch matrix:
+
+- `capabilities.agentModes`: `{ supported, values, default, reason? }` for the
+  legacy `generate --agent-mode` lane (AGY/opencode only).
+- `capabilities.taskIntents`: one entry per portable intent
+  (`review|compose|implement|plan`) with `supported`, the accepted
+  `accessProfile`/`accessProfiles`, `probe` (`help` when the installed binary
+  help is probed before spawn), and a typed `reason` when unsupported.
+
+`providers inspect <id> --task-intent compose|implement|plan --json` reports the
+declared capability without spawning a provider (`probe: "declared"`, exit 0),
+so a caller can choose a route before dispatch; `--task-intent review` keeps the
+bounded binary/help probe described above. `plan` is unsupported everywhere
+until a separate `webmcp-ai-plan-result/1` contract exists. `tools describe` is
+protocol-level and is not a provider capability surface — use the `providers`
+discovery for routing decisions.
+
 ## Provider quota (external)
 
 Quota is not owned by this wrapper. Query the companion AI Usage Bar service or
@@ -202,9 +224,10 @@ fail-closed. `--full` is an explicit provider workspace/tool access profile
 and does not place private keys, credentials, bearer tokens, or machine
 identity into model context, child authority env, or portable receipts.
 What `--full` grants is provider-specific (do not assume unrestricted ambient
-access for non-OpenCode providers): OpenCode v1 is the only provider that keeps
-ambient operator config/tools/MCP (with the session database isolated to
-`opencode-cli.db` via `OPENCODE_DB`); Codex uses the `workspace-write` sandbox
+access for non-OpenCode providers): OpenCode (v1 and v2) is the only provider
+that keeps the ambient operator config, tools, and MCP surface (the session
+database stays isolated to `opencode-cli.db` via `OPENCODE_DB`; v2 additionally
+runs its private server via `--standalone`); Codex uses the `workspace-write` sandbox
 instead of `read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`,
 so it does not inherit ambient user config/MCP; Claude drops the
 `--tools '' --safe-mode` text-only deny; AGY drops the forced `--sandbox`.

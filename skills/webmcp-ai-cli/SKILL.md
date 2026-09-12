@@ -126,6 +126,18 @@ or canary acceptance, which remain separate null/false axes when unproven.
 Managed or enterprise settings may
 override command-line grants; reviewer flags are requested, not guaranteed.
 
+Provider capability discovery: `providers list --json` (and the same
+`capabilities` object echoed by `providers inspect`, `models inspect`,
+`preflight`, and `doctor`) exposes `agentModes` plus a `taskIntents` entry for
+every portable intent with `supported`, the accepted `accessProfile(s)`,
+`probe`, and a typed `reason` when unsupported. `providers inspect <id>
+--task-intent compose|implement|plan --json` reports that declaration without
+spawning (`probe: declared`, exit 0); `--task-intent review` keeps the bounded
+help probe above. `plan` is unsupported everywhere until a separate
+`webmcp-ai-plan-result/1` contract exists. `tools describe` is protocol-level,
+not a provider capability surface — route decisions belong to the `providers`
+discovery.
+
 When the caller depends on a constrained AGY custom agent, pass its discovered
 name as `agent` in JSON input or via `--agent`. The AI CLI selects the agent but
 does not install it or change machine-level permissions.

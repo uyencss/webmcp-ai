@@ -189,6 +189,18 @@ export const opencodeProvider = {
     explicitResume: true,
     modelDiscovery: true,
     toolPolicies: ['provider-default', 'compose-only'],
+    // Machine-readable mirror of buildVNextReviewInvocation below: legacy
+    // generate defaults to plan and honors accept-edits; review/compose/
+    // implement are supported vNext intents (review needs the installed help
+    // probe, implement accepts bounded-edit or full); plan needs a separate
+    // contract and is rejected.
+    agentModes: { supported: true, values: ['plan', 'accept-edits'], default: 'plan' },
+    taskIntents: {
+      review: { supported: true, accessProfile: 'review-readonly', probe: 'help' },
+      compose: { supported: true, accessProfile: 'compose-only' },
+      implement: { supported: true, accessProfiles: ['bounded-edit', 'full'] },
+      plan: { supported: false, reason: 'requires a separate webmcp-ai-plan-result/1 contract' },
+    },
   },
   buildInvocation(request) {
     if (request.schema) {

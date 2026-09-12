@@ -144,7 +144,7 @@ Usage:
   ${commandName} doctor [--json]
   ${commandName} preflight [--json]
   ${commandName} providers list [--json]
-  ${commandName} providers inspect <provider> [--task-intent review] [--json]
+  ${commandName} providers inspect <provider> [--task-intent review|compose|implement|plan] [--json]
   ${commandName} models list --provider <agy|claude|codex|opencode> [--json]
   ${commandName} models inspect --provider <id> [--model <model>] [--json]
   ${commandName} agents list --provider agy [--json]
@@ -228,7 +228,11 @@ Migration:
   review probes each provider's required CLI mapping via the installed
   binary/version/help (bounded, read-only, no model) and reports
   installed/authenticated/policy-supported/canary-proven/task-ready
-  separately without leaking paths/secrets.
+  separately without leaking paths/secrets. For compose/implement/plan the
+  same command reports the declared provider capability (probe: declared,
+  no spawn), including the typed reason when unsupported, so a caller can
+  decide before dispatch; providers list also exposes agentModes and
+  taskIntents per provider.
 
 Environment:
   AGY_BIN, CLAUDE_BIN, CODEX_BIN, OPENCODE_BIN   Override provider executables
@@ -499,16 +503,40 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         });
       }
       if (!['compose', 'review', 'implement', 'plan'].includes(intentStr)) {
-        throw new AiCliError('TASK_INTENT_INVALID', `Unknown taskIntent: ${intentStr} (inspect supports review)`, {
+        throw new AiCliError('TASK_INTENT_INVALID', `Unknown taskIntent: ${intentStr} (inspect supports review|compose|implement|plan)`, {
           exitCode: 2,
           details: { taskIntent: intentStr },
         });
       }
       if (intentStr !== 'review') {
-        throw new AiCliError('UNSUPPORTED_CAPABILITY', `providers inspect --task-intent only supports review in MVP (got ${intentStr})`, {
-          exitCode: 2,
-          details: { taskIntent: intentStr },
-        });
+        // Declared-intent inspection: no provider spawn and no help probe.
+        // Reports the same policy truth the runtime gates enforce (mirrored
+        // in provider.capabilities.taskIntents) so a caller can decide before
+        // dispatch. `review` keeps the bounded help-probe lane below.
+        const declared = providerMeta.capabilities?.taskIntents?.[intentStr] ?? null;
+        if (!declared) {
+          throw new AiCliError('INVALID_INPUT', `provider ${providerMeta.id} has no declared taskIntent ${intentStr}`, {
+            exitCode: 2,
+            details: { provider: providerMeta.id, taskIntent: intentStr },
+          });
+        }
+        const declaredSupported = declared.supported === true;
+        printValue({
+          ok: true,
+          provider: providerMeta.id,
+          taskIntent: intentStr,
+          accessProfile: declared.accessProfile ?? null,
+          ...(declared.accessProfiles ? { accessProfiles: declared.accessProfiles } : {}),
+          probe: 'declared',
+          supported: declaredSupported,
+          policySupported: declaredSupported,
+          taskReady: null,
+          code: declaredSupported ? null : 'UNSUPPORTED_CAPABILITY',
+          reason: declaredSupported ? null : (declared.reason ?? 'intent is not supported for this provider'),
+          ...(declared.note ? { note: declared.note } : {}),
+          mapping: null,
+        }, json);
+        return 0;
       }
       // Truthful, bounded, read-only capability inspection. Probes the
       // installed binary/version/help without leaking executable paths,

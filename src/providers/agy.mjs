@@ -42,6 +42,17 @@ export const agyProvider = {
     explicitResume: true,
     modelDiscovery: true,
     toolPolicies: ['provider-default', 'compose-only'],
+    // Machine-readable mirror of the gates below: legacy generate defaults to
+    // plan and also honors accept-edits; every portable vNext taskIntent is
+    // rejected here (preventive deny-write unproven), so discovery must not
+    // advertise any of them. Legacy toolPolicy compose-only stays supported.
+    agentModes: { supported: true, values: ['plan', 'accept-edits'], default: 'plan' },
+    taskIntents: {
+      review: { supported: false, reason: 'AGY does not support preventive deny-write review mode' },
+      compose: { supported: false, reason: 'AGY vNext compose is not deny-write provable; legacy toolPolicy compose-only remains supported' },
+      implement: { supported: false, reason: 'AGY does not support preventive deny-write review mode' },
+      plan: { supported: false, reason: 'AGY does not support preventive deny-write review mode; plan additionally needs a separate webmcp-ai-plan-result/1 contract' },
+    },
   },
   buildInvocation(request) {
     // Portable vNext lane: AGY cannot prove preventive deny-write for a

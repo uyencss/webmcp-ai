@@ -61,6 +61,17 @@ export const codexProvider = {
     explicitResume: true,
     modelDiscovery: false,
     toolPolicies: ['provider-default', 'compose-only'],
+    // Machine-readable mirror of buildInvocation below: Codex has no AGY
+    // agentMode; review/compose/implement are supported vNext intents (review
+    // needs the installed help probe); plan needs a separate contract. Writes
+    // exist only as `full` (workspace-write); bounded-edit is rejected.
+    agentModes: { supported: false, values: [], default: null, reason: 'Codex does not support AGY agentMode' },
+    taskIntents: {
+      review: { supported: true, accessProfile: 'review-readonly', probe: 'help' },
+      compose: { supported: true, accessProfile: 'compose-only' },
+      implement: { supported: true, accessProfiles: ['full'], note: 'bounded-edit is unsupported; use full' },
+      plan: { supported: false, reason: 'requires a separate webmcp-ai-plan-result/1 contract' },
+    },
   },
   buildInvocation(request) {
     if (request.agentMode) {
