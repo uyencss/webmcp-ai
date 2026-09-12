@@ -115,8 +115,10 @@ Codex `exec`/`--sandbox`/`read-only`/`--ephemeral`/`--ignore-user-config`/
 `--ignore-rules`/`--skip-git-repo-check`/`--output-last-message`/`--color`
 plus resume (`resume`/`-c`); its
 resume sandbox mapping uses config key `sandbox_mode` and is tested separately,
-opencode `run`/`--format`/`--agent`/`--dir` plus `--model`/`--variant` with the
-wrapper read-only config mapping — and reports
+opencode `run`/`--format`/`--agent`/`--model` plus the detected profile
+syntax (v1 1.x: `--dir`, `--variant`; v2 2.x: `--standalone`, variant folded
+as `model#variant`, no `--dir`; `mapping.profile` reports it) with the wrapper
+read-only config mapping — and reports
 installed/authenticated/policy-supported/canary-proven/
 task-ready without leaking paths/secrets. `task-ready` means only that the
 wrapper mapping is installed and help-proven; it does not claim authentication
@@ -127,6 +129,20 @@ override command-line grants; reviewer flags are requested, not guaranteed.
 When the caller depends on a constrained AGY custom agent, pass its discovered
 name as `agent` in JSON input or via `--agent`. The AI CLI selects the agent but
 does not install it or change machine-level permissions.
+
+## OpenCode profiles (v1/v2)
+
+Every opencode spawn detects the installed profile with one bounded
+`<bin> --version` probe (no model). v1 (1.x) keeps the legacy argv
+(`--dir`/`--variant`) and v1 `permission`/`external_directory` config. v2
+(2.x) runs `--standalone` (private server so the invocation env/config apply
+instead of the shared background service), uses the spawn `cwd` as workspace
+(no `--dir`), folds effort as `--model provider/model#variant`, and receives
+the v2 ordered `permissions` config (`mcp.servers`/`plugins` emptied, updates
+disabled). An unrecognized major or unparseable version fails closed with
+typed `PROVIDER_CAPABILITY_DRIFT` before any argv or temp artifact exists;
+`--effort` without a model on v2 is `INVALID_INPUT`. No profile is guessed
+from help text.
 
 ## Full access (opt-in passthrough)
 
@@ -147,10 +163,11 @@ webmcp-ai generate \
 provider workspace/tool access profile and does not place private keys,
 credentials, bearer tokens, or machine identity into model context, child
 authority env, or portable receipts. What it does is provider-specific (do not
-promise unrestricted ambient access for non-OpenCode providers): OpenCode v1
-is the only provider that keeps the ambient operator config, tools, and MCP
-surface (only the session database stays isolated to `opencode-cli.db` via
-`OPENCODE_DB`); Codex uses the `workspace-write` sandbox instead of
+promise unrestricted ambient access for non-OpenCode providers): OpenCode
+(v1 and v2) is the only provider that keeps the ambient operator config, tools,
+and MCP surface (only the session database stays isolated to `opencode-cli.db`
+via `OPENCODE_DB`; v2 additionally runs its private server via `--standalone`);
+Codex uses the `workspace-write` sandbox instead of
 `read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`, so it
 does not inherit ambient user config/MCP (and explicit resume binds
 `-c sandbox_mode="workspace-write"`, never claiming `danger-full-access`);
@@ -238,7 +255,10 @@ An explicit `OPENCODE_DB` value in the calling environment is respected as an
 operator override. Task JSON and model prompts cannot select the database path.
 
 V2 (beta) resolves contention architecturally through a background server that
-serializes all writes.
+serializes all writes. The wrapper still sets `OPENCODE_DB` on v2 and adds
+`--standalone` per spawn, so the private server starts with the invocation
+env/config (isolated DB, wrapper `permissions`, empty MCP/plugins) instead of
+inheriting the shared background service.
 
 ## Safety
 

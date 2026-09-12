@@ -47,7 +47,7 @@ function createFakeOpencode(t) {
     `  process.stdout.write('Available agents:' + ${JSON.stringify(nl)});`,
     `  process.stdout.write('db=' + db + ${JSON.stringify(nl)});`,
     '} else {',
-    `  process.stdout.write(${JSON.stringify(`fake-opencode 1.0${nl}`)});`,
+    `  process.stdout.write(${JSON.stringify(`fake-opencode 1.18.30${nl}`)});`,
     '}',
     '',
   ].join('\n'), 'utf8');

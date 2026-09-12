@@ -228,6 +228,8 @@ function writeAlwaysLockedOpencode() {
   writeFileSync(script, [
     '#!/usr/bin/env node',
     "import { appendFileSync } from 'node:fs';",
+    "const args = process.argv.slice(2);",
+    "if (args.includes('--version')) { process.stdout.write('locked-opencode 1.18.30\\n'); process.exit(0); }",
     `appendFileSync(${JSON.stringify(counter)}, 'x');`,
     "process.stderr.write('Error: database is locked\\n');",
     'process.exit(1);',

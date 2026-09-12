@@ -10,12 +10,19 @@ const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 // Bounded, safe review-lane capability requirements for the opencode reviewer.
 // Probed via `opencode run --help` (no model) before spawn and in
-// `providers inspect --task-intent review`. The adapter maps review to
-// `run --format json --agent build --dir <workspace>` with `--model`/`--variant`
-// overrides; the read-only boundary comes from the wrapper-generated config
-// (edit/write deny, no --auto), which is reported in the inspect mapping.
-// Missing flags fail closed with typed drift; only bounded flag names are
-// reported, never paths or raw help.
+// `providers inspect --task-intent review`. Two installed profiles exist:
+//
+//   v1 (1.x):  `run --format json --agent build --dir <ws> --model m --variant e`
+//   v2 (2.x):  `run --standalone --format json --agent build --model m#e`
+//              (no --variant; no --dir — the workspace is the spawn cwd)
+//
+// The profile is detected from a bounded `<bin> --version` probe and passed
+// into the adapter; an unrecognized profile fails closed with typed drift.
+// The read-only boundary comes from the wrapper-generated config (edit/write
+// deny, no --auto), which is reported in the inspect mapping. Missing flags
+// fail closed with typed drift; only bounded flag names are reported, never
+// paths or raw help.
+export const OPENCODE_PROFILES = Object.freeze(['v1', 'v2']);
 export const OPENCODE_REVIEW_REQUIRED_FLAGS = Object.freeze([
   'run',
   '--format',
@@ -24,26 +31,120 @@ export const OPENCODE_REVIEW_REQUIRED_FLAGS = Object.freeze([
   '--model',
   '--variant',
 ]);
+export const OPENCODE_V2_REVIEW_REQUIRED_FLAGS = Object.freeze([
+  'run',
+  '--standalone',
+  '--format',
+  '--agent',
+  '--model',
+]);
 
 function helpContainsToken(helpText, token) {
   const escaped = String(token).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?:^|[\\s,=<>()[\\]"'])${escaped}(?=$|[\\s,=<>()[\\]"'])`).test(String(helpText ?? ''));
 }
 
-export function validateOpencodeReviewSupport(helpText) {
+/**
+ * Parse a semver-shaped version from `opencode --version` output.
+ * v2 prints `opencode v2.0.1`; v1 prints `1.18.30`. Returns null when no
+ * version-shaped token exists.
+ */
+export function parseOpencodeVersion(output) {
+  const match = String(output ?? '').match(/(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?/u);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]), raw: match[0] };
+}
+
+/**
+ * Map a version probe output to a known adapter profile. Only major 1 and
+ * major 2 are recognized; anything else (including unparseable output)
+ * returns null so callers can fail closed with typed drift instead of
+ * guessing argv/config syntax.
+ */
+export function opencodeProfileForVersion(versionOutput) {
+  const parsed = parseOpencodeVersion(versionOutput);
+  if (!parsed) return null;
+  if (parsed.major === 1) return 'v1';
+  if (parsed.major === 2) return 'v2';
+  return null;
+}
+
+/**
+ * Resolve the effective adapter profile for a request. An absent profile
+ * preserves legacy v1 behavior byte-for-byte; an unrecognized profile is a
+ * typed capability drift (fail-closed), never a silent v1 fallback.
+ */
+export function normalizeOpencodeProfile(profile) {
+  if (profile === null || profile === undefined || profile === '') return 'v1';
+  if (OPENCODE_PROFILES.includes(profile)) return profile;
+  const bounded = String(profile).slice(0, 32);
+  throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Unrecognized opencode profile: ${bounded}`, {
+    exitCode: 2,
+    details: { capability: 'profile', profile: bounded },
+  });
+}
+
+export function validateOpencodeReviewSupport(helpText, { profile = 'v1' } = {}) {
+  const normalized = normalizeOpencodeProfile(profile);
+  const required = normalized === 'v2' ? OPENCODE_V2_REVIEW_REQUIRED_FLAGS : OPENCODE_REVIEW_REQUIRED_FLAGS;
   const text = String(helpText ?? '');
-  const missing = OPENCODE_REVIEW_REQUIRED_FLAGS.filter((flag) => !helpContainsToken(text, flag));
+  const missing = required.filter((flag) => !helpContainsToken(text, flag));
   if (missing.length > 0) {
-    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed opencode CLI lacks reviewer flags: ${missing.join(', ')}`, {
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed opencode CLI (${normalized}) lacks reviewer flags: ${missing.join(', ')}`, {
       exitCode: 2,
-      details: { capability: 'review', missing },
+      details: { capability: 'review', profile: normalized, missing },
     });
   }
   return true;
 }
 
+/**
+ * Append model/effort argv for the resolved profile.
+ * v1: `--model m` + separate `--variant e`; v2: folded `--model m#e`.
+ * v2 effort without a model cannot be encoded and fails closed.
+ */
+function pushModelEffortArgs(args, request, profile) {
+  if (profile === 'v2') {
+    if (request.effort) {
+      if (!request.model) {
+        throw new AiCliError('INVALID_INPUT', 'opencode v2 effort requires an explicit model (provider/model#variant)', {
+          exitCode: 2,
+          details: { capability: 'model#variant' },
+        });
+      }
+      args.push('--model', `${request.model}#${request.effort}`);
+    } else if (request.model) {
+      args.push('--model', request.model);
+    }
+    return;
+  }
+  if (request.model) args.push('--model', request.model);
+  if (request.effort) args.push('--variant', request.effort);
+}
+
 function trimTrailingSeparators(value) {
   return value.replace(/[\\/]+$/, '');
+}
+
+// v2 mapping of the legacy provider-default accept-edits overlay (workspace
+// edit allow + shell deny-list with --auto). Ordered rules; later wins.
+function v2SupervisedEditPermissions(cfg) {
+  const external = cfg.permissions.filter((r) => r.action === 'external_directory');
+  return [
+    { action: '*', resource: '*', effect: 'deny' },
+    { action: 'read', resource: '*', effect: 'allow' },
+    { action: 'glob', resource: '*', effect: 'allow' },
+    { action: 'grep', resource: '*', effect: 'allow' },
+    { action: 'shell', resource: '*', effect: 'allow' },
+    { action: 'shell', resource: 'rm *', effect: 'deny' },
+    { action: 'shell', resource: 'rm -rf *', effect: 'deny' },
+    { action: 'shell', resource: 'git push *', effect: 'deny' },
+    { action: 'shell', resource: 'sudo *', effect: 'deny' },
+    { action: 'edit', resource: '*', effect: 'allow' },
+    { action: 'webfetch', resource: '*', effect: 'deny' },
+    { action: 'websearch', resource: '*', effect: 'deny' },
+    ...external,
+  ];
 }
 
 function firstNonEmptyString(value) {
@@ -103,6 +204,9 @@ export const opencodeProvider = {
         { exitCode: 2 },
       );
     }
+    // Resolved once per invocation: v1 (legacy, default) or v2 (installed
+    // 2.x CLI). Unknown profiles fail closed before any argv is built.
+    const profile = normalizeOpencodeProfile(request.opencodeProfile);
     // Portable vNext reviewer lane (taskIntent present). Legacy v1
     // plan/build behavior below is preserved verbatim when taskIntent is
     // absent (compatibility). vNext review uses the known installed
@@ -141,13 +245,14 @@ export const opencodeProvider = {
       const fullAuto = agentMode === 'accept-edits';
       const fullAgent = request.agent || (fullAuto ? 'build' : 'plan');
       const fullArgs = [
-        'run', '--format', 'json', '--agent', fullAgent,
+        'run',
+        ...(profile === 'v2' ? ['--standalone'] : []),
+        '--format', 'json', '--agent', fullAgent,
         ...(fullAuto ? ['--auto'] : []),
-        ...(request.model ? ['--model', request.model] : []),
-        ...(request.effort ? ['--variant', request.effort] : []),
-        ...(request.sessionId ? ['--session', request.sessionId] : []),
-        '--dir', request.workspace,
       ];
+      pushModelEffortArgs(fullArgs, request, profile);
+      if (request.sessionId) fullArgs.push('--session', request.sessionId);
+      if (profile === 'v1') fullArgs.push('--dir', request.workspace);
       return {
         args: fullArgs,
         stdin: request.prompt,
@@ -170,6 +275,7 @@ export const opencodeProvider = {
         allowedReadRoots: request.allowedReadRoots || [],
         allowedWriteRoots: request.allowedWriteRoots || [],
         protectedPaths: request.protectedPaths || [],
+        profile,
       });
     } catch (e) {
       throw e;
@@ -213,34 +319,42 @@ export const opencodeProvider = {
       external_directory = [];
     }
 
-    // Rebuild baseConfig with isolated surface, preserving cfg's explicit mcp/plugin isolation
-    const baseConfig = {
-      ...cfg,
-      permission,
-      share: 'disabled',
-      autoupdate: false,
-      mdns: false,
-      cors: [],
-      plugin: [],
-      mcp: {},
-    };
-    if (external_directory && external_directory.length) {
-      baseConfig.external_directory = external_directory;
-    } else {
-      delete baseConfig.external_directory;
+    // Rebuild the private config surface. v2 cfg is already the complete v2
+    // document; v1-only fields (permission singular, external_directory,
+    // autoupdate, plugin singular, mcp:{}) must never be layered onto it.
+    const v2SupervisedEdit = profile === 'v2' && accessProfile === 'provider-default' && agentMode === 'accept-edits';
+    const baseConfig = profile === 'v2'
+      ? (v2SupervisedEdit ? { ...cfg, permissions: v2SupervisedEditPermissions(cfg) } : cfg)
+      : {
+        ...cfg,
+        permission,
+        share: 'disabled',
+        autoupdate: false,
+        mdns: false,
+        cors: [],
+        plugin: [],
+        mcp: {},
+      };
+    if (profile === 'v1') {
+      if (external_directory && external_directory.length) {
+        baseConfig.external_directory = external_directory;
+      } else {
+        delete baseConfig.external_directory;
+      }
     }
     // Ensure no secret-bearing fields are introduced
     // baseConfig must not contain private keys, credentials, etc – it only carries permission + boundary.
 
     const agentName = request.agent || (auto ? 'build' : 'plan');
     const args = [
-      'run', '--format', 'json', '--agent', agentName,
+      'run',
+      ...(profile === 'v2' ? ['--standalone'] : []),
+      '--format', 'json', '--agent', agentName,
       ...(auto ? ['--auto'] : []),
-      ...(request.model ? ['--model', request.model] : []),
-      ...(request.effort ? ['--variant', request.effort] : []),
-      ...(request.sessionId ? ['--session', request.sessionId] : []),
-      '--dir', request.workspace,
     ];
+    pushModelEffortArgs(args, request, profile);
+    if (request.sessionId) args.push('--session', request.sessionId);
+    if (profile === 'v1') args.push('--dir', request.workspace);
 
     // Create private per-invocation config boundary directory.
     // Deterministic content (cfg) is written to a disposable directory; the directory
@@ -307,6 +421,7 @@ export const opencodeProvider = {
 function buildVNextReviewInvocation(request, taskIntent) {
   const agentMode = request.agentMode ?? null;
   const accessProfile = request.accessProfile || (request.toolPolicy === 'compose-only' ? 'compose-only' : null);
+  const profile = normalizeOpencodeProfile(request.opencodeProfile);
   if (typeof taskIntent === 'string' && !['review', 'compose', 'implement', 'plan'].includes(taskIntent)) {
     throw new AiCliError('TASK_INTENT_INVALID', `Unknown taskIntent: ${taskIntent}`, {
       exitCode: 2,
@@ -342,7 +457,7 @@ function buildVNextReviewInvocation(request, taskIntent) {
       });
     }
     if (request.opencodeHelpText !== undefined && request.opencodeHelpText !== null) {
-      validateOpencodeReviewSupport(request.opencodeHelpText);
+      validateOpencodeReviewSupport(request.opencodeHelpText, { profile });
     }
     const cfg = buildOpenCodeConfig({
       accessProfile: 'review-readonly',
@@ -350,23 +465,28 @@ function buildVNextReviewInvocation(request, taskIntent) {
       allowedReadRoots: request.allowedReadRoots || [],
       allowedWriteRoots: [],
       protectedPaths: request.protectedPaths || [],
+      profile,
     });
     const permission = cfg.permission;
     const external_directory = cfg.external_directory;
-    const baseConfig = {
-      ...cfg,
-      permission,
-      share: 'disabled',
-      autoupdate: false,
-      mdns: false,
-      cors: [],
-      plugin: [],
-      mcp: {},
-    };
-    if (external_directory && external_directory.length) {
-      baseConfig.external_directory = external_directory;
-    } else {
-      delete baseConfig.external_directory;
+    const baseConfig = profile === 'v2'
+      ? cfg
+      : {
+        ...cfg,
+        permission,
+        share: 'disabled',
+        autoupdate: false,
+        mdns: false,
+        cors: [],
+        plugin: [],
+        mcp: {},
+      };
+    if (profile === 'v1') {
+      if (external_directory && external_directory.length) {
+        baseConfig.external_directory = external_directory;
+      } else {
+        delete baseConfig.external_directory;
+      }
     }
     // Known installed built-in `build` (never native `plan`) with the
     // generated read-only permission config (edit/write deny, no --auto).
@@ -375,12 +495,13 @@ function buildVNextReviewInvocation(request, taskIntent) {
     // no-write. No wrapper-owned `review` agent is asserted.
     const agentName = 'build';
     const args = [
-      'run', '--format', 'json', '--agent', agentName,
-      ...(request.model ? ['--model', request.model] : []),
-      ...(request.effort ? ['--variant', request.effort] : []),
-      ...(request.sessionId ? ['--session', request.sessionId] : []),
-      '--dir', request.workspace,
+      'run',
+      ...(profile === 'v2' ? ['--standalone'] : []),
+      '--format', 'json', '--agent', agentName,
     ];
+    pushModelEffortArgs(args, request, profile);
+    if (request.sessionId) args.push('--session', request.sessionId);
+    if (profile === 'v1') args.push('--dir', request.workspace);
     const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
     const xdgConfigHome = join(privateDir, 'xdg-config');
     const openCodeConfig = join(privateDir, 'opencode.json');
@@ -419,15 +540,17 @@ function buildVNextReviewInvocation(request, taskIntent) {
     if (accessProfile === 'full') {
       const fullAuto = true;
       const fullAgent = request.agent || 'build';
+      const fullArgs = [
+        'run',
+        ...(profile === 'v2' ? ['--standalone'] : []),
+        '--format', 'json', '--agent', fullAgent,
+        ...(fullAuto ? ['--auto'] : []),
+      ];
+      pushModelEffortArgs(fullArgs, request, profile);
+      if (request.sessionId) fullArgs.push('--session', request.sessionId);
+      if (profile === 'v1') fullArgs.push('--dir', request.workspace);
       return {
-        args: [
-          'run', '--format', 'json', '--agent', fullAgent,
-          ...(fullAuto ? ['--auto'] : []),
-          ...(request.model ? ['--model', request.model] : []),
-          ...(request.effort ? ['--variant', request.effort] : []),
-          ...(request.sessionId ? ['--session', request.sessionId] : []),
-          '--dir', request.workspace,
-        ],
+        args: fullArgs,
         stdin: request.prompt,
         env: { OPENCODE_DB: resolveOpencodeCliDb(request.env) },
         cleanup: () => {},
@@ -439,24 +562,28 @@ function buildVNextReviewInvocation(request, taskIntent) {
       allowedReadRoots: request.allowedReadRoots || [],
       allowedWriteRoots: request.allowedWriteRoots || [],
       protectedPaths: request.protectedPaths || [],
+      profile,
     });
-    const baseConfig = {
-      ...cfg,
-      share: 'disabled',
-      autoupdate: false,
-      mdns: false,
-      cors: [],
-      plugin: [],
-      mcp: {},
-    };
+    const baseConfig = profile === 'v2'
+      ? cfg
+      : {
+        ...cfg,
+        share: 'disabled',
+        autoupdate: false,
+        mdns: false,
+        cors: [],
+        plugin: [],
+        mcp: {},
+      };
     const agentName = request.agent || 'build';
     const args = [
-      'run', '--format', 'json', '--agent', agentName, '--auto',
-      ...(request.model ? ['--model', request.model] : []),
-      ...(request.effort ? ['--variant', request.effort] : []),
-      ...(request.sessionId ? ['--session', request.sessionId] : []),
-      '--dir', request.workspace,
+      'run',
+      ...(profile === 'v2' ? ['--standalone'] : []),
+      '--format', 'json', '--agent', agentName, '--auto',
     ];
+    pushModelEffortArgs(args, request, profile);
+    if (request.sessionId) args.push('--session', request.sessionId);
+    if (profile === 'v1') args.push('--dir', request.workspace);
     const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
     const xdgConfigHome = join(privateDir, 'xdg-config');
     const openCodeConfig = join(privateDir, 'opencode.json');
@@ -514,25 +641,29 @@ function buildVNextReviewInvocation(request, taskIntent) {
       allowedReadRoots: [],
       allowedWriteRoots: [],
       protectedPaths: [],
+      profile,
     });
-    const baseConfig = {
-      ...cfg,
-      permission: { '*': 'deny' },
-      share: 'disabled',
-      autoupdate: false,
-      mdns: false,
-      cors: [],
-      plugin: [],
-      mcp: {},
-    };
-    delete baseConfig.external_directory;
+    const baseConfig = profile === 'v2'
+      ? cfg
+      : {
+        ...cfg,
+        permission: { '*': 'deny' },
+        share: 'disabled',
+        autoupdate: false,
+        mdns: false,
+        cors: [],
+        plugin: [],
+        mcp: {},
+      };
+    if (profile === 'v1') delete baseConfig.external_directory;
     const args = [
-      'run', '--format', 'json', '--agent', 'build',
-      ...(request.model ? ['--model', request.model] : []),
-      ...(request.effort ? ['--variant', request.effort] : []),
-      ...(request.sessionId ? ['--session', request.sessionId] : []),
-      '--dir', request.workspace,
+      'run',
+      ...(profile === 'v2' ? ['--standalone'] : []),
+      '--format', 'json', '--agent', 'build',
     ];
+    pushModelEffortArgs(args, request, profile);
+    if (request.sessionId) args.push('--session', request.sessionId);
+    if (profile === 'v1') args.push('--dir', request.workspace);
     const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
     const xdgConfigHome = join(privateDir, 'xdg-config');
     const openCodeConfig = join(privateDir, 'opencode.json');

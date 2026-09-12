@@ -31,7 +31,7 @@ function makeReviewFixture(t, payloadObj, provider) {
     `const payload = ${JSON.stringify(payload)};`,
     `const goodHelp = ${JSON.stringify(goodHelp)};`,
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 9.9.9\\n"); process.exit(0); }',
+    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
     'if (args.includes("--help")) { process.stdout.write(goodHelp + "\\n"); process.exit(0); }',
     'const outIdx = args.indexOf("--output-last-message");',
     'if (outIdx >= 0) { writeFileSync(args[outIdx + 1], payload); process.stdout.write("{\\"type\\":\\"completed\\"}\\n"); process.exit(0); }',
@@ -309,7 +309,7 @@ test('F6: edit-claim text without a verdict is REVIEW_RESULT_INCOMPLETE, not suc
   writeFileSync(fake, [
     '#!/usr/bin/env node',
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 9.9.9\\n"); process.exit(0); }',
+    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
     'if (args.includes("--help")) {',
     '  const p = process.env.FAKE_PROVIDER || "claude";',
     '  if (p === "codex") { process.stdout.write("codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode\\n"); process.exit(0); }',

@@ -4,6 +4,15 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Support installed OpenCode v2 (2.x) alongside v1 (1.x) in the opencode
+  adapter: per-spawn profile detection from one bounded `<bin> --version`
+  probe; v2 runs with `--standalone`, drops `--dir` (workspace is the spawn
+  cwd), folds effort as `--model provider/model#variant`, and receives the v2
+  ordered `permissions` config (`mcp.servers`/`plugins` emptied, updates
+  disabled), while v1 argv/config stays byte-compatible; an unrecognized major
+  or unparseable version fails closed with typed `PROVIDER_CAPABILITY_DRIFT`
+  before any argv/temp artifact, and `providers inspect opencode
+  --task-intent review` reports `mapping.profile`.
 - Extract the durable orchestration runtime into the companion package
   `@gyga-browser/webmcp-ai-orchestration`; keep a lazy typed compatibility shim
   for `webmcp-ai orchestration ...` while removing orchestration code and the

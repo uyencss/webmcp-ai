@@ -22,7 +22,7 @@ import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 import { validateClaudeReviewSupport } from './providers/claude.mjs';
 import { validateCodexReviewSupport } from './providers/codex.mjs';
-import { validateOpencodeReviewSupport } from './providers/opencode.mjs';
+import { opencodeProfileForVersion, validateOpencodeReviewSupport } from './providers/opencode.mjs';
 import { parseReviewOutput } from './review-result.mjs';
 import { resolveTaskIntent } from './task-intent.mjs';
 import { createHash } from 'node:crypto';
@@ -233,6 +233,7 @@ function normalizeRequest(input) {
       protectedPaths: capability.protectedPaths,
       projectId: capability.projectId,
       storeRevisions: capability.storeRevisions,
+      opencodeProfile: input.opencodeProfile ?? null,
       timeoutMs,
       maxOutputBytes,
     },
@@ -306,6 +307,42 @@ async function ensureHelpReviewSupport({ provider, env, label, validate, helpArg
   validate(helpText);
 }
 
+/**
+ * Bounded `<bin> --version` probe used once per opencode spawn to select the
+ * adapter profile (v1 = 1.x argv/config, v2 = 2.x argv/config). Never spawns
+ * a model. Missing binary maps to CLI_NOT_INSTALLED; probe failure or an
+ * unrecognized major version maps to typed PROVIDER_CAPABILITY_DRIFT.
+ */
+async function detectOpencodeProfile({ command, env }) {
+  const safeEnv = buildSafeChildEnv(env, {});
+  let output = null;
+  try {
+    const probe = await runProcess(command, ['--version'], {
+      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 64 * 1024,
+    });
+    output = `${probe.stdout}\n${probe.stderr}`;
+  } catch (error) {
+    if (error?.code === 'CLI_NOT_INSTALLED') {
+      throw new AiCliError('CLI_NOT_INSTALLED', 'opencode CLI binary not installed or not executable', {
+        exitCode: 2,
+        details: { capability: 'profile' },
+      });
+    }
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed opencode profile unproven: ${error?.code || 'probe failed'}`, {
+      exitCode: 2,
+      details: { capability: 'profile' },
+    });
+  }
+  const profile = opencodeProfileForVersion(output);
+  if (!profile) {
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed opencode version is not a recognized v1/v2 profile', {
+      exitCode: 2,
+      details: { capability: 'profile' },
+    });
+  }
+  return profile;
+}
+
 // AGY print mode can return only a summary while the full answer is written to
 // its brain directory. When the caller opts in (`resolveArtifacts`), recover
 // the artifact written during this run. A single match longer than stdout
@@ -347,6 +384,13 @@ export async function generate(input) {
   const lockRetries = lockRetryCount(input.retryLock);
   const env = input.env || process.env;
   const command = resolveProviderBin(provider, env);
+  // OpenCode dual-profile detection: one bounded `<bin> --version` probe per
+  // spawn (no model). An explicit request.opencodeProfile (tests/advanced
+  // callers) skips the probe. Unknown/unparseable versions fail closed with
+  // typed drift before any temp artifact or argv is created.
+  if (provider.id === 'opencode' && (request.opencodeProfile === null || request.opencodeProfile === undefined)) {
+    request.opencodeProfile = await detectOpencodeProfile({ command, env });
+  }
   // compose-only uses disposable temp workspace; otherwise use validated workspace
   const isComposeOnly = request.accessProfile === 'compose-only' || request.toolPolicy === 'compose-only';
   const policyWorkspace = isComposeOnly && !capability.workspace
@@ -393,7 +437,13 @@ export async function generate(input) {
   }
   if (provider.id === 'opencode' && request.taskIntent === 'review') {
     try {
-      await ensureHelpReviewSupport({ provider, env, label: 'opencode', helpArgs: ['run', '--help'], validate: validateOpencodeReviewSupport });
+      await ensureHelpReviewSupport({
+        provider,
+        env,
+        label: 'opencode',
+        helpArgs: ['run', '--help'],
+        validate: (helpText) => validateOpencodeReviewSupport(helpText, { profile: request.opencodeProfile }),
+      });
     } catch (error) {
       try { invocation.cleanup?.(); } catch {}
       if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }

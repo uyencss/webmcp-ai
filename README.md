@@ -89,6 +89,25 @@ A concurrent `--provider opencode` run can hit the shared SQLite database with
 `PROVIDER_DB_LOCKED` and retries with backoff (`--retry-lock <n>`, default 3);
 serialize or limit concurrent opencode lanes if it persists.
 
+### OpenCode profiles (v1/v2)
+
+The adapter supports both installed OpenCode majors. Each spawn detects the
+profile with one bounded `<bin> --version` probe (no model):
+
+- **v1 (1.x)** — legacy argv (`--dir`, `--variant`) and the v1
+  `permission`/`external_directory` config schema; behavior is unchanged.
+- **v2 (2.x)** — `--standalone` private server (so the invocation env/config
+  apply instead of the shared background service), workspace taken from the
+  spawn `cwd` (no `--dir`), variant folded as `--model provider/model#variant`,
+  and the v2 ordered `permissions` config schema (`mcp.servers`/`plugins`
+  emptied, updates disabled).
+
+An unrecognized major or unparseable version fails closed with typed
+`PROVIDER_CAPABILITY_DRIFT` before any argv or temp artifact exists;
+`--effort` without a model on v2 is `INVALID_INPUT`. `providers inspect
+opencode --task-intent review` reports the detected profile in
+`mapping.profile`.
+
 ## Provider quota (external)
 
 Quota is not owned by this wrapper. Query the companion AI Usage Bar service or
@@ -140,7 +159,10 @@ reviewer flags, Codex requires `exec`/`--sandbox`/`read-only`/`--ephemeral`/
 `--output-last-message`/`--color` plus resume
 (`resume`/`-c`); the resume sandbox mapping uses config key `sandbox_mode`
 and is tested separately, opencode requires `run`/`--format`/`--agent`/
-`--dir` plus `--model`/`--variant` with the wrapper read-only config mapping —
+`--model` plus the installed profile syntax (v1 1.x: `--dir` and
+`--variant`; v2 2.x: `--standalone`, no `--dir`, variant folded into
+`--model provider/model#variant`) with the wrapper read-only config mapping
+(`mapping.profile` reports the detected profile) —
 and reports `installed`/`authenticated`/`policy-supported`/`canary-proven`/
 `task-ready` separately without leaking paths/secrets. Here `task-ready` means
 the wrapper's provider mapping is installed and help-proven; it does not claim
@@ -249,6 +271,9 @@ generic exits remain distinct failure classes.
   default.
 - opencode: read-only `plan` agent with an injected deny-by-default permission
   sandbox; `accept-edits` is opt-in supervised writes with a bash deny-list.
+  Both installed profiles are supported (v1 1.x legacy argv/config; v2 2.x
+  `--standalone`, `model#variant`, v2 `permissions` schema); an unrecognized
+  profile fails closed with `PROVIDER_CAPABILITY_DRIFT`.
 - `compose-only`: empty temporary workspace; no task MCP/browser bridge or
   writable project data.
 - Resume requires an explicit session ID. There is no implicit “last session”.

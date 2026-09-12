@@ -5,9 +5,12 @@ import { basename } from 'node:path';
 
 const args = process.argv.slice(2);
 const provider = process.env.FAKE_PROVIDER || basename(process.argv[1]).split('-')[0];
+// Test-controlled CLI version. OpenCode defaults to a v1 profile so legacy
+// argv assertions stay valid; set FAKE_VERSION=2.x for v2 profile tests.
+const version = process.env.FAKE_VERSION || (provider === 'opencode' ? '1.18.30' : '9.9.9');
 
 if (args.includes('--version') || args.includes('-V') || args.includes('-v')) {
-  process.stdout.write(`${provider}-cli 9.9.9\n`);
+  process.stdout.write(`${provider}-cli ${version}\n`);
   process.exit(0);
 }
 
@@ -15,7 +18,10 @@ if (args.includes('--help')) {
   if (provider === 'codex') {
     process.stdout.write('codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --output-last-message resume -c sandbox_mode model_reasoning_effort\n');
   } else if (provider === 'opencode') {
-    process.stdout.write('opencode run --format json --agent build --dir /ws --model sonnet --variant effort\n');
+    const help = String(version).startsWith('2.')
+      ? 'opencode run --standalone --format json --agent build --model sonnet#effort'
+      : 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort';
+    process.stdout.write(`${help}\n`);
   } else {
     process.stdout.write('--permission-mode --tools --disallowedTools --safe-mode --no-chrome --no-session-persistence\n');
   }
@@ -62,6 +68,10 @@ if (process.env.FAKE_ECHO_ENV) {
     .map((s) => s.trim()).filter(Boolean)
     .map((k) => `${k}=${process.env[k] ?? ''}`).join(';');
   reply += `|env:${shown}`;
+}
+// Test-only argv observability: FAKE_ECHO_ARGS=1 appends |args:<argv joined>
+if (process.env.FAKE_ECHO_ARGS === '1') {
+  reply += `|args:${args.join(' ')}`;
 }
 const outputIndex = args.indexOf('--output-last-message');
 

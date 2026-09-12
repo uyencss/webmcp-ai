@@ -14,7 +14,7 @@ const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 const CODEX_GOOD_HELP = 'codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode model_reasoning_effort';
 const OPENCODE_GOOD_HELP = 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort';
 
-function makeHelpFake(t, { provider, helpText, versionText = 'fake-cli 9.9.9' }) {
+function makeHelpFake(t, { provider, helpText, versionText = 'fake-cli 1.18.30' }) {
   const dir = mkdtempSync(join(tmpdir(), `probe-help-${provider}-`));
   const fake = join(dir, `fake-${provider}.mjs`);
   writeFileSync(fake, [
@@ -67,7 +67,7 @@ function makeOpencodeSpawnFake(t, { helpText, markerPath, verdict }) {
     `const verdict = ${JSON.stringify(verdictText)};`,
     `const marker = ${JSON.stringify(markerPath)};`,
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("opencode-cli 9.9.9\\n"); process.exit(0); }',
+    'if (args.includes("--version")) { process.stdout.write("opencode-cli 1.18.30\\n"); process.exit(0); }',
     'if (args.includes("--help")) { process.stdout.write(help + "\\n"); process.exit(0); }',
     'try { appendFileSync(marker, "model-invoked\\n"); } catch {}',
     'const line = JSON.stringify({ type: "text", sessionID: "ses_probe", part: { type: "text", text: verdict } });',

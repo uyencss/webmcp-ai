@@ -25,7 +25,7 @@ function makeReviewFake(t, verdict = 'approve') {
     "import { readFileSync, writeFileSync } from 'node:fs';",
     `const payload = ${JSON.stringify(payload)};`,
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 9.9.9\\n"); process.exit(0); }',
+    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
     'if (args.includes("--help")) {',
     '  const p = process.env.FAKE_PROVIDER || "opencode";',
     '  if (p === "codex") { process.stdout.write("codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode\\n"); process.exit(0); }',
@@ -117,7 +117,7 @@ test('review() plan-only fixture is typed REVIEW_RESULT_INCOMPLETE', async (t) =
   writeFileSync(fake, [
     '#!/usr/bin/env node',
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 9.9.9\\n"); process.exit(0); }',
+    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
     'if (args.includes("--help")) { process.stdout.write("opencode run --format json --agent build --dir /ws --model sonnet --variant effort\\n"); process.exit(0); }',
     'const line = JSON.stringify({ type: "text", sessionID: "ses_test", part: { type: "text", text: JSON.stringify({ plan: "do things" }) } });',
     'process.stdout.write(line + "\\n");',

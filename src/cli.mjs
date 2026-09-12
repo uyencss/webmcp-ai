@@ -14,7 +14,7 @@ import { describeTools, handleToolCall, TOOL_PROTOCOL } from './protocol.mjs';
 import { describeReviewDryRun, review } from './review.mjs';
 import { validateClaudeReviewSupport } from './providers/claude.mjs';
 import { validateCodexReviewSupport } from './providers/codex.mjs';
-import { validateOpencodeReviewSupport } from './providers/opencode.mjs';
+import { opencodeProfileForVersion, validateOpencodeReviewSupport } from './providers/opencode.mjs';
 
 const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
 
@@ -726,8 +726,10 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         return 0;
       }
       // opencode: bounded read-only help probe requiring run/--format/--agent/
-      // --dir plus model/variant. Wrapper read-only config mapping is reported
-      // in mapping (build + edit/write deny, no --auto). No model spawn.
+      // plus model plus profile-specific syntax (v1: --dir/--variant; v2:
+      // model#variant, no --dir). Version-parsed profile is required; unknown
+      // profiles fail closed. Wrapper read-only config mapping is reported in
+      // mapping (build + edit/write deny, no --auto). No model spawn.
       if (provider.id === 'opencode') {
         if (!installed) {
           printValue({
@@ -739,7 +741,22 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
             code: 'CLI_NOT_INSTALLED',
             reason: 'opencode CLI binary not installed or not executable',
             missing: ['installed opencode binary'],
-            mapping: { agent: 'build', permissions: 'read-only (edit/write deny, no --auto)' },
+            mapping: { agent: 'build', profile: null, permissions: 'read-only (edit/write deny, no --auto)' },
+          }, json);
+          return 0;
+        }
+        const opencodeProfile = version ? opencodeProfileForVersion(version) : null;
+        if (!opencodeProfile) {
+          printValue({
+            ok: true, provider: provider.id, taskIntent: 'review',
+            accessProfile: 'review-readonly',
+            installed: true, version, authenticated,
+            policySupported: true, canaryProven, taskReady: false,
+            supported: false,
+            code: 'PROVIDER_CAPABILITY_DRIFT',
+            reason: 'opencode version is not a recognized v1/v2 profile',
+            missing: ['recognized opencode v1/v2 version'],
+            mapping: { agent: 'build', profile: null, permissions: 'read-only (edit/write deny, no --auto)' },
           }, json);
           return 0;
         }
@@ -755,7 +772,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         }
         if (opencodeHelpText !== null) {
           try {
-            validateOpencodeReviewSupport(opencodeHelpText);
+            validateOpencodeReviewSupport(opencodeHelpText, { profile: opencodeProfile });
           } catch (drift) {
             printValue({
               ok: true, provider: provider.id, taskIntent: 'review',
@@ -766,7 +783,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
               code: 'PROVIDER_CAPABILITY_DRIFT',
               reason: drift.message,
               missing: drift.details?.missing ?? ['reviewer flags'],
-              mapping: { agent: 'build', permissions: 'read-only (edit/write deny, no --auto)' },
+              mapping: { agent: 'build', profile: opencodeProfile, permissions: 'read-only (edit/write deny, no --auto)' },
             }, json);
             return 0;
           }
@@ -777,7 +794,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
             policySupported: true, canaryProven, taskReady: true,
             supported: true,
             code: null, reason: null, missing: [],
-            mapping: { agent: 'build', permissions: 'read-only (edit/write deny, no --auto)' },
+            mapping: { agent: 'build', profile: opencodeProfile, permissions: 'read-only (edit/write deny, no --auto)' },
           }, json);
           return 0;
         }
@@ -790,7 +807,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
           code: opencodeHelpError?.code === 'CLI_NOT_INSTALLED' ? 'CLI_NOT_INSTALLED' : 'PROVIDER_CAPABILITY_DRIFT',
           reason: opencodeHelpError ? `opencode help probe failed: ${opencodeHelpError.code || 'probe failed'}` : 'opencode help probe failed',
           missing: ['version-probed reviewer flags'],
-          mapping: { agent: 'build', permissions: 'read-only (edit/write deny, no --auto)' },
+          mapping: { agent: 'build', profile: opencodeProfile, permissions: 'read-only (edit/write deny, no --auto)' },
         }, json);
         return 0;
       }

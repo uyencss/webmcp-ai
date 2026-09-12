@@ -512,13 +512,75 @@ export function toOpenCodeRelativePatterns(absoluteRoot, workspace) {
   return [rel, `${rel}/**`];
 }
 
-export function buildOpenCodeConfig({ accessProfile, workspace, allowedReadRoots, allowedWriteRoots, protectedPaths }) {
+export function buildOpenCodeConfig({ accessProfile, workspace, allowedReadRoots, allowedWriteRoots, protectedPaths, profile = 'v1' }) {
   if (accessProfile === 'gateway-tool') {
     throw new AiCliError('UNSUPPORTED_CAPABILITY', 'gateway-tool requires a validated local Gateway broker capability', {
       exitCode: 2,
       details: { capability: 'accessProfile', accessProfile },
     });
   }
+  if (profile !== 'v1' && profile !== 'v2') {
+    const bounded = String(profile).slice(0, 32);
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Unrecognized opencode profile: ${bounded}`, {
+      exitCode: 2,
+      details: { capability: 'profile', profile: bounded },
+    });
+  }
+  // external_directory: exact declared roots plus descendant rules, never global /**
+  const roots = [];
+  if (workspace) roots.push(workspace);
+  if (allowedReadRoots) roots.push(...allowedReadRoots);
+  if (accessProfile === 'bounded-edit' && allowedWriteRoots) roots.push(...allowedWriteRoots);
+  const uniqueRoots = [...new Set(roots)].sort();
+  const external_directory = [];
+  for (const r of uniqueRoots) {
+    external_directory.push(r);
+    const descendant = r === '/' ? null : `${r}/**`;
+    if (descendant) external_directory.push(descendant);
+  }
+  const dedupedExternal = [...new Set(external_directory)].sort().filter((v) => v !== '/**' && v !== '**' && v !== '/*' && v !== '/');
+
+  if (dedupedExternal.includes('/**') || dedupedExternal.includes('**')) {
+    throw new AiCliError('INTERNAL_ERROR', 'external_directory contains global wildcard', { exitCode: 1 });
+  }
+
+  // V2 config schema (https://opencode.ai/v2/docs/config + /permissions):
+  // ordered `permissions` rule array {action,resource,effect}; later rules
+  // win; deny-all first then explicit allows; external directory declared per
+  // root. mcp.servers/plugins emptied, update disabled.
+  if (profile === 'v2') {
+    const rules = [{ action: '*', resource: '*', effect: 'deny' }];
+    if (accessProfile !== 'compose-only') {
+      rules.push({ action: 'read', resource: '*', effect: 'allow' });
+      rules.push({ action: 'glob', resource: '*', effect: 'allow' });
+      rules.push({ action: 'grep', resource: '*', effect: 'allow' });
+      if (accessProfile === 'bounded-edit') {
+        for (const wr of (allowedWriteRoots || [])) {
+          for (const pattern of toOpenCodeRelativePatterns(wr, workspace)) {
+            rules.push({ action: 'edit', resource: pattern, effect: 'allow' });
+          }
+        }
+        // Protected paths override even inside write roots.
+        for (const pp of (protectedPaths || [])) {
+          for (const pattern of toOpenCodeRelativePatterns(pp, workspace)) {
+            rules.push({ action: 'edit', resource: pattern, effect: 'deny' });
+          }
+        }
+      }
+      for (const root of uniqueRoots) {
+        if (root === '/' || root === '**' || root.endsWith('/**')) continue;
+        rules.push({ action: 'external_directory', resource: root, effect: 'allow' });
+        rules.push({ action: 'external_directory', resource: `${root}/*`, effect: 'allow' });
+      }
+    }
+    return {
+      permissions: rules,
+      mcp: { servers: {} },
+      plugins: [],
+      update: 'disable',
+    };
+  }
+
   let permission;
   switch (accessProfile) {
     case 'compose-only':
@@ -585,24 +647,6 @@ export function buildOpenCodeConfig({ accessProfile, workspace, allowedReadRoots
     }
     default:
       throw new AiCliError('INVALID_INPUT', `Unknown accessProfile: ${accessProfile}`, { exitCode: 2 });
-  }
-
-  // external_directory: exact declared roots plus descendant rules, never global /**
-  const roots = [];
-  if (workspace) roots.push(workspace);
-  if (allowedReadRoots) roots.push(...allowedReadRoots);
-  if (accessProfile === 'bounded-edit' && allowedWriteRoots) roots.push(...allowedWriteRoots);
-  const uniqueRoots = [...new Set(roots)].sort();
-  const external_directory = [];
-  for (const r of uniqueRoots) {
-    external_directory.push(r);
-    const descendant = r === '/' ? null : `${r}/**`;
-    if (descendant) external_directory.push(descendant);
-  }
-  const dedupedExternal = [...new Set(external_directory)].sort().filter((v) => v !== '/**' && v !== '**' && v !== '/*' && v !== '/');
-
-  if (dedupedExternal.includes('/**') || dedupedExternal.includes('**')) {
-    throw new AiCliError('INTERNAL_ERROR', 'external_directory contains global wildcard', { exitCode: 1 });
   }
 
   // Explicit isolated config surface: no inherited MCP, empty plugin/instruction.
