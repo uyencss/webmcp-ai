@@ -1,15 +1,17 @@
 import {
   accessSync, constants, mkdtempSync, rmSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 
+import { DEFAULT_AGY_BRAIN_DIR, resolveAgyArtifacts } from './artifacts.mjs';
 import {
   buildFullChildEnv,
   buildSafeChildEnv,
   computeCapabilityDigests,
   validateCapabilityRequest,
 } from './capabilities.mjs';
+import { describeModel, effortRejection } from './model-capabilities.mjs';
 import {
   classifyProviderLine,
   createLineSplitter,
@@ -48,8 +50,50 @@ function rejectAgyVNext(provider, request) {
   });
 }
 
+const LOCK_RETRY_DEFAULT = 3;
+
+function lockRetryCount(value) {
+  if (typeof value === 'string' && value.trim() === '') {
+    throw new AiCliError('INVALID_INPUT', 'retryLock must be a non-negative integer', { exitCode: 2 });
+  }
+  if (value === undefined || value === null || value === true) return LOCK_RETRY_DEFAULT;
+  if (value === false) return 0;
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 0) {
+    throw new AiCliError('INVALID_INPUT', 'retryLock must be a non-negative integer', { exitCode: 2 });
+  }
+  return count;
+}
+
+// Retry only the transient concurrent-storage lock; every other provider error
+// (quota, auth, timeout, generic exit) propagates on the first attempt.
+async function runWithLockRetry(run, attempts, onRetry) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (error?.code !== 'PROVIDER_DB_LOCKED' || attempt >= attempts) throw error;
+      onRetry?.(attempt + 1);
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+}
+
 function normalizeRequest(input) {
   const provider = getProvider(input.provider);
+  const rejectedEffort = effortRejection({ providerId: provider.id, modelId: input.model, effort: input.effort });
+  if (rejectedEffort) {
+    throw new AiCliError('UNSUPPORTED_EFFORT', `${provider.name} model ${input.model} does not accept --effort`, {
+      exitCode: 2,
+      details: {
+        provider: provider.id,
+        model: input.model,
+        effort: input.effort,
+        allowedEfforts: rejectedEffort.allowedEfforts,
+        note: rejectedEffort.note ?? null,
+      },
+    });
+  }
   const prompt = typeof input.prompt === 'string' ? input.prompt : '';
   if (!prompt.trim()) {
     throw new AiCliError('INVALID_INPUT', 'prompt must be a non-empty string', { exitCode: 2 });
@@ -262,6 +306,34 @@ async function ensureHelpReviewSupport({ provider, env, label, validate, helpArg
   validate(helpText);
 }
 
+// AGY print mode can return only a summary while the full answer is written to
+// its brain directory. When the caller opts in (`resolveArtifacts`), recover
+// the artifact written during this run. A single match longer than stdout
+// replaces the summary text; several matches are exposed but never guessed at.
+function resolveProviderArtifacts({ provider, input, parsed, startedAt }) {
+  if (provider.id !== 'agy' || !input.resolveArtifacts) {
+    return { text: parsed.text, artifacts: [], resolved: false };
+  }
+  const brainDir = input.agyBrainDir || join(homedir(), DEFAULT_AGY_BRAIN_DIR);
+  const found = resolveAgyArtifacts({
+    brainDir,
+    sinceMs: startedAt,
+    untilMs: Date.now() + 2000,
+  });
+  if (!found.length) return { text: parsed.text, artifacts: [], resolved: false };
+  const useSingle = found.length === 1 && found[0].text.length > parsed.text.length;
+  return {
+    text: useSingle ? found[0].text : parsed.text,
+    resolved: useSingle,
+    artifacts: found.map((entry) => ({
+      kind: 'brain-md',
+      name: basename(entry.path),
+      bytes: entry.bytes,
+      digest: entry.digest,
+    })),
+  };
+}
+
 export async function generate(input) {
   const startedAt = Date.now();
   const { provider, request, capability } = normalizeRequest(input);
@@ -269,6 +341,10 @@ export async function generate(input) {
   // The adapter remains the final defence for direct callers, but generate's
   // policy workspace must not be created for a request that cannot spawn.
   rejectAgyVNext(provider, request);
+  // Validate retryLock before any side-effectful setup (policy workspace
+  // mkdtemp, provider buildInvocation temp artifacts) so an invalid value
+  // cannot leak a temp directory outside the try/finally cleanup.
+  const lockRetries = lockRetryCount(input.retryLock);
   const env = input.env || process.env;
   const command = resolveProviderBin(provider, env);
   // compose-only uses disposable temp workspace; otherwise use validated workspace
@@ -379,20 +455,26 @@ export async function generate(input) {
 
   emitEvent('stdout', 'queued', `${provider.id}${request.model ? ` model ${request.model}` : ''} workspace ${workspace}`);
   try {
-    const processResult = await runProcess(command, invocation.args, {
-      stdin: invocation.stdin,
-      cwd: workspace,
-      env: childEnv,
-      timeoutMs: request.timeoutMs,
-      maxOutputBytes,
-      signal: input.signal,
-      onStdout: streamForward('stdout'),
-      onStderr: streamForward('stderr'),
-    });
+    const processResult = await runWithLockRetry(
+      () => runProcess(command, invocation.args, {
+        stdin: invocation.stdin,
+        cwd: workspace,
+        env: childEnv,
+        timeoutMs: request.timeoutMs,
+        maxOutputBytes,
+        signal: input.signal,
+        onStdout: streamForward('stdout'),
+        onStderr: streamForward('stderr'),
+      }),
+      lockRetries,
+      (attempt) => emitEvent('stdout', 'retrying', `provider storage locked; retry ${attempt}/${lockRetries}`),
+    );
     splitters?.stdout.flush();
     splitters?.stderr.flush();
     const parsed = provider.parseOutput({ ...processResult, invocation, request });
-    if (!parsed.text) {
+    const resolved = resolveProviderArtifacts({ provider, input, parsed, startedAt });
+    const responseText = resolved.text;
+    if (!responseText) {
       throw new AiCliError('EMPTY_RESPONSE', `${provider.name} returned an empty response`, {
         retryable: true,
       });
@@ -403,7 +485,7 @@ export async function generate(input) {
     // response) to become transport success.
     let reviewResult = null;
     if (request.taskIntent === 'review') {
-      const parsedReview = parseReviewOutput({ text: parsed.text, structured: parsed.structured });
+      const parsedReview = parseReviewOutput({ text: responseText, structured: parsed.structured });
       reviewResult = {
         schema: parsedReview.schema,
         verdict: parsedReview.verdict,
@@ -426,7 +508,8 @@ export async function generate(input) {
       ok: true,
       provider: { id: provider.id, name: provider.name },
       model: request.model,
-      response: { text: parsed.text, structured: parsed.structured },
+      response: { text: responseText, structured: parsed.structured },
+      ...(resolved.artifacts.length ? { artifacts: resolved.artifacts, artifactsResolved: resolved.resolved } : {}),
       ...(reviewResult ? { review: reviewResult } : {}),
       // Review envelopes expose only freshness metadata. Legacy generate keeps
       // its existing resumable session identity behavior.
@@ -457,6 +540,23 @@ function executablePathAvailable(command) {
     }
   }
   return true;
+}
+
+// A bare provider name (the default `defaultBin`) must be resolved against
+// PATH, not assumed present. No spawn: one X_OK stat per POSIX PATH entry.
+function pathExecutableAvailable(command, env) {
+  const rawPath = env?.PATH ?? env?.Path ?? '';
+  const separator = process.platform === 'win32' ? ';' : ':';
+  for (const dir of String(rawPath).split(separator)) {
+    if (!dir) continue;
+    try {
+      accessSync(join(dir, command), constants.X_OK);
+      return true;
+    } catch {
+      // try the next PATH entry
+    }
+  }
+  return false;
 }
 
 function sanitizeGenerateArgs(args, capability, sessionId = null) {
@@ -565,6 +665,40 @@ export async function probeProviders({ env = process.env } = {}) {
       return { ...metadata, command, available: false, version: null, error: error.code || 'PROBE_FAILED' };
     }
   }));
+}
+
+/**
+ * Read-only dispatch preflight. Reports what each provider can do and where
+ * quota lives without spawning any provider, so a multi-lane caller can pick a
+ * route before spending a single call.
+ */
+export function describePreflight({ env = process.env } = {}) {
+  const providers = listProviders().map((metadata) => {
+    const provider = getProvider(metadata.id);
+    const command = resolveProviderBin(provider, env);
+    const surface = describeModel(metadata.id, null);
+    return {
+      id: metadata.id,
+      name: metadata.name,
+      installed: command.includes('/') ? executablePathAvailable(command) : pathExecutableAvailable(command, env),
+      capabilities: { ...metadata.capabilities },
+      maxPromptBytes: surface?.maxPromptBytes ?? null,
+      artifacts: surface?.artifacts ?? 'inline',
+    };
+  });
+  return {
+    ok: true,
+    providers,
+    quota: {
+      owner: 'companion',
+      service: 'http://127.0.0.1:8421/api/quotas',
+      cluster: 'http://127.0.0.1:8421/api/quotas?all=1',
+      devices: 'http://127.0.0.1:8421/api/devices',
+      app: 'apps/ai-cli-usage-tray',
+      skill: 'ai-cli-usage',
+      note: 'Quota is not owned by webmcp-ai; query the companion service or skill separately before heavy dispatch.',
+    },
+  };
 }
 
 export async function listModels(providerId, { env = process.env } = {}) {

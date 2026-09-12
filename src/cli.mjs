@@ -3,10 +3,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  describeGenerateDryRun, generate, listAgents, listModels, probeProviders,
+  describeGenerateDryRun, describePreflight, generate, listAgents, listModels, probeProviders,
 } from './client.mjs';
 import { AiCliError, asAiCliError } from './errors.mjs';
 import { buildSafeChildEnv } from './capabilities.mjs';
+import { describeModel } from './model-capabilities.mjs';
 import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 import { describeTools, handleToolCall, TOOL_PROTOCOL } from './protocol.mjs';
@@ -141,9 +142,11 @@ function helpText(commandName) {
 Usage:
   ${commandName} <command> [options]
   ${commandName} doctor [--json]
+  ${commandName} preflight [--json]
   ${commandName} providers list [--json]
   ${commandName} providers inspect <provider> [--task-intent review] [--json]
   ${commandName} models list --provider <agy|claude|codex|opencode> [--json]
+  ${commandName} models inspect --provider <id> [--model <model>] [--json]
   ${commandName} agents list --provider agy [--json]
   ${commandName} generate --provider <id> (--prompt <text> | --prompt-file <path>) [options]
   ${commandName} generate --input-json <path|-> [--json] [--dry-run]
@@ -176,6 +179,9 @@ Generate options:
   --store-revisions <json> JSON object of store revisions
   --timeout-ms <ms>       Process timeout (default: 600000)
   --max-output-bytes <n>  Provider output cap in bytes (default: 32MB, 128MB with --full)
+  --retry-lock <n>        Retries for a transient concurrent provider DB lock (default: 3)
+  --resolve-artifacts     AGY only: recover the full answer from its brain dir when stdout is a summary
+  --agy-brain-dir <path>  Override the AGY brain directory used by --resolve-artifacts
   --dry-run               Resolve + sanitized inspection only; never spawns a provider
   --stream                Forward provider stdout/stderr live to our stderr; stdout keeps one JSON envelope
   --stream-to <ch>        Live channel for --stream/--events: stderr (default) or stdout
@@ -351,6 +357,9 @@ function generateInput(options) {
     projectId: options['project-id'] ?? fromJson.projectId,
     storeRevisions,
     gatewayCapabilityHandle: options['gateway-capability-handle'] ?? fromJson.gatewayCapabilityHandle,
+    retryLock: options['retry-lock'] ?? fromJson.retryLock,
+    resolveArtifacts: isTrueFlag(options['resolve-artifacts'] ?? fromJson.resolveArtifacts),
+    agyBrainDir: options['agy-brain-dir'] ?? fromJson.agyBrainDir,
     dryRun: isTrueFlag(options['dry-run'] ?? fromJson.dryRun),
   };
 }
@@ -469,6 +478,11 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   if (command === 'providers' && subcommand === 'list') {
     const payload = { ok: true, providers: listProviders() };
     printValue(payload, json, (value) => value.providers.map((provider) => `${provider.id}\t${provider.name}`).join('\n'));
+    return 0;
+  }
+  if (command === 'preflight') {
+    const payload = { ...describePreflight({ env }), packageVersion: packageJson.version };
+    printValue(payload, json);
     return 0;
   }
   if (command === 'providers' && subcommand === 'inspect') {
@@ -788,6 +802,16 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     const provider = options.provider;
     const models = await listModels(provider, { env });
     printValue({ ok: true, provider, models }, json, (value) => value.models.join('\n'));
+    return 0;
+  }
+  if (command === 'models' && subcommand === 'inspect') {
+    const providerId = options.provider;
+    const provider = getProvider(providerId);
+    const described = describeModel(providerId, options.model);
+    printValue(
+      { ok: true, ...described, capabilities: { ...provider.capabilities } },
+      json,
+    );
     return 0;
   }
   if (command === 'agents' && subcommand === 'list') {

@@ -51,9 +51,11 @@ acceptance.
 
 ```bash
 webmcp-ai doctor --json
+webmcp-ai preflight --json
 webmcp-ai providers list --json
 webmcp-ai providers inspect claude --json
 webmcp-ai models list --provider agy --json
+webmcp-ai models inspect --provider agy --model claude-opus-4-6-thinking --json
 webmcp-ai agents list --provider agy --json
 webmcp-ai generate --provider claude --prompt-file ./prompt.md --json
 webmcp-ai generate --provider codex --prompt-file ./prompt.md --tool-policy compose-only --json
@@ -65,6 +67,36 @@ Prefer `--prompt-file` or `--input-json -` over `--prompt` so prompts do not
 appear in shell history. Claude and Codex prompts are forwarded over stdin. AGY
 only documents argument-based print mode, so the AGY adapter enforces a
 bounded prompt size.
+
+## Dispatch preflight and per-model facts
+
+`webmcp-ai preflight --json` is a read-only aggregate for multi-lane dispatch:
+each provider's installed state and capabilities, the per-provider prompt-size
+cap, artifact behavior, and where to query quota — without spawning a provider.
+`webmcp-ai models inspect --provider <id> [--model <model>] --json` adds the
+per-model facts installed CLIs do not advertise (effort support, prompt cap,
+artifact mode). `generate` rejects `--effort` for a model positively known to
+refuse it with typed `UNSUPPORTED_EFFORT` before any spawn.
+
+AGY print mode has a 128 KiB prompt cap (`PROMPT_TOO_LARGE` above it) and can
+return only a summary while writing the full answer under its brain directory.
+Pass `--resolve-artifacts` (optionally `--agy-brain-dir <path>`) to recover the
+full text; the envelope then carries `artifacts` (`name`/`bytes`/`digest`, no
+machine path) and `artifactsResolved`.
+
+A concurrent `--provider opencode` run can hit the shared SQLite database with
+`database is locked`. The wrapper classifies this as retryable
+`PROVIDER_DB_LOCKED` and retries with backoff (`--retry-lock <n>`, default 3);
+serialize or limit concurrent opencode lanes if it persists.
+
+## Provider quota (external)
+
+Quota is not owned by this wrapper. Query the companion AI Usage Bar service or
+its skill before heavy dispatch:
+
+- `GET http://127.0.0.1:8421/api/quotas` (local), `?all=1` (cluster), `/api/devices`
+- app: `apps/ai-cli-usage-tray`
+- skill: `ai-cli-usage` (`node .agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`)
 
 AGY defaults to `agentMode: "plan"`. A supervised executor that owns its
 workspace, policy, cancellation, and output validation may explicitly opt into

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import { AiCliError } from '../errors.mjs';
 
-const MAX_PROMPT_ARG_BYTES = 128 * 1024;
+export const MAX_PROMPT_ARG_BYTES = 128 * 1024;
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function installComposeOnlyGuard(workspace) {

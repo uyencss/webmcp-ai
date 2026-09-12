@@ -15,6 +15,15 @@ function classifyProviderExit({ stdout, stderr, exitCode, exitSignal }) {
   const text = boundedDiagnostics(stdout, stderr).toLowerCase();
   const details = { exitCode, signal: exitSignal || null };
 
+  // Concurrent opencode runs contend on the same SQLite database and fail with
+  // "database is locked" (SQLITE_BUSY). This is transient; retrying with
+  // backoff is the fix, so classify it separately from a generic provider exit.
+  if (/\b(database|db)\b.{0,40}\bis locked\b|\bsqlite_busy\b|\bdatabase table is locked\b/.test(text)) {
+    return new AiCliError('PROVIDER_DB_LOCKED', 'Provider storage is locked by a concurrent process', {
+      retryable: true,
+      details,
+    });
+  }
   if (/\b(quota|credit|credits|usage limit|billing limit|insufficient credits|out of credits|resource exhausted)\b/.test(text)
     || /\b429\b/.test(text) && /\b(quota|credit|usage)\b/.test(text)) {
     return new AiCliError('PROVIDER_QUOTA_EXHAUSTED', 'Provider quota or credits are exhausted', {
