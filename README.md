@@ -78,6 +78,14 @@ per-model facts installed CLIs do not advertise (effort support, prompt cap,
 artifact mode). `generate` rejects `--effort` for a model positively known to
 refuse it with typed `UNSUPPORTED_EFFORT` before any spawn.
 
+The optional direct Muse route
+`openrouter/meta/muse-spark-1.3-contributor` is separately recognized when its
+explicit route has been verified. The current evidence proves `high` effort
+only; it does not imply authentication, canary acceptance, or support for
+other effort values. Keep the historical
+`opencode-go/muse-spark-1.3-contributor` route unchanged and never use the bare
+`openrouter/muse-spark-1.3-contributor` form.
+
 AGY print mode has a 128 KiB prompt cap (`PROMPT_TOO_LARGE` above it) and can
 return only a summary while writing the full answer under its brain directory.
 Pass `--resolve-artifacts` (optionally `--agy-brain-dir <path>`) to recover the
@@ -106,7 +114,11 @@ An unrecognized major or unparseable version fails closed with typed
 `PROVIDER_CAPABILITY_DRIFT` before any argv or temp artifact exists;
 `--effort` without a model on v2 is `INVALID_INPUT`. `providers inspect
 opencode --task-intent review` reports the detected profile in
-`mapping.profile`.
+`mapping.profile`. Dry-run deliberately never spawns a provider binary, so it
+cannot auto-detect the installed profile: absent `--opencode-profile` is
+reported as `opencodeProfileSource: "unresolved"` while retaining the legacy
+preview shape. Pass `--opencode-profile v1|v2` when an exact sanitized preview
+is required; real dispatch still auto-detects the profile before model spawn.
 
 ## Capability discovery (agentModes / taskIntents)
 

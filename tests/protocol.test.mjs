@@ -17,6 +17,13 @@ test('tool description declares the protocol, risk, and input schema', () => {
   assert.deepEqual(description.tools[0].inputSchema.properties.toolPolicy, {
     enum: ['provider-default', 'compose-only', null],
   });
+  assert.deepEqual(description.tools[0].inputSchema.properties.opencodeProfile, {
+    enum: ['v1', 'v2', null],
+  });
+  const reviewTool = description.tools.find((tool) => tool.id === 'ai.review');
+  assert.deepEqual(reviewTool.inputSchema.properties.opencodeProfile, {
+    enum: ['v1', 'v2', null],
+  });
 });
 
 for (const [name, request, code] of [
@@ -63,6 +70,15 @@ test('tool-call validates input shape and scalar field types', async () => {
       input: { provider: 'opencode', prompt: 'x', accessProfile: 123 },
     }),
     (error) => error.code === 'INVALID_INPUT' && /accessProfile must be a string/.test(error.message),
+  );
+  await assert.rejects(
+    handleToolCall({
+      protocol: TOOL_PROTOCOL,
+      requestId: 'types-opencode-profile',
+      tool: 'ai.generate',
+      input: { provider: 'opencode', prompt: 'x', opencodeProfile: 123 },
+    }),
+    (error) => error.code === 'INVALID_INPUT' && /opencodeProfile must be a string/.test(error.message),
   );
   await assert.rejects(
     handleToolCall({

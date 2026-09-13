@@ -22,7 +22,11 @@ import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 import { validateClaudeReviewSupport } from './providers/claude.mjs';
 import { validateCodexReviewSupport } from './providers/codex.mjs';
-import { opencodeProfileForVersion, validateOpencodeReviewSupport } from './providers/opencode.mjs';
+import {
+  normalizeOpencodeProfile,
+  opencodeProfileForVersion,
+  validateOpencodeReviewSupport,
+} from './providers/opencode.mjs';
 import { parseReviewOutput } from './review-result.mjs';
 import { resolveTaskIntent } from './task-intent.mjs';
 import { createHash } from 'node:crypto';
@@ -671,6 +675,11 @@ function sanitizeGenerateArgs(args, capability, sessionId = null) {
   });
 }
 
+function explicitOpencodeProfile(provider, profile) {
+  if (provider.id !== 'opencode' || profile === null || profile === undefined || profile === '') return null;
+  return normalizeOpencodeProfile(profile);
+}
+
 /**
  * Sanitized generate dry-run. Reuses normalizeRequest + provider preview
  * without spawning. Never includes prompt text, secrets, absolute paths or
@@ -678,6 +687,7 @@ function sanitizeGenerateArgs(args, capability, sessionId = null) {
  */
 export function describeGenerateDryRun(input = {}) {
   const { provider, request, capability } = normalizeRequest(input);
+  const opencodeProfile = explicitOpencodeProfile(provider, request.opencodeProfile);
   // Keep dry-run side-effect free even when a provider rejects a vNext intent
   // before returning an invocation cleanup hook.
   rejectAgyVNext(provider, request);
@@ -692,6 +702,7 @@ export function describeGenerateDryRun(input = {}) {
   try {
     preview = provider.buildInvocation({
       ...request,
+      ...(opencodeProfile !== null ? { opencodeProfile } : {}),
       workspace,
       env: input.env || {},
       allowedReadRoots: capability.allowedReadRoots,
@@ -726,6 +737,10 @@ export function describeGenerateDryRun(input = {}) {
     provider: provider.id,
     taskIntent: request.taskIntent ?? null,
     accessProfile: capability.accessProfile,
+    ...(provider.id === 'opencode' ? {
+      opencodeProfile,
+      opencodeProfileSource: opencodeProfile === null ? 'unresolved' : 'explicit',
+    } : {}),
     model: request.model,
     sessionId: request.sessionId ? '<resumed-session>' : null,
     args,

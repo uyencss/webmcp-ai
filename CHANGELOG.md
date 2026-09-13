@@ -4,6 +4,15 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Record the verified optional OpenCode/OpenRouter route
+  `openrouter/meta/muse-spark-1.3-contributor` as a separate model fact with
+  `high` effort only; preserve the historical
+  `opencode-go/muse-spark-1.3-contributor` lineage and reject no model merely
+  because its static metadata is unknown. Add
+  explicit `--opencode-profile v1|v2` plumbing to sanitized dry-runs so v2
+  previews can use `--standalone` and `provider/model#variant` without
+  spawning a provider; absent profiles remain explicitly unresolved and real
+  dispatch keeps bounded version auto-detection.
 - Support installed OpenCode v2 (2.x) alongside v1 (1.x) in the opencode
   adapter: per-spawn profile detection from one bounded `<bin> --version`
   probe; v2 runs with `--standalone`, drops `--dir` (workspace is the spawn

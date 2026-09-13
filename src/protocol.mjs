@@ -13,6 +13,7 @@ const GENERATE_INPUT_SCHEMA = {
     prompt: { type: 'string', minLength: 1 },
     model: { type: ['string', 'null'] },
     effort: { type: ['string', 'null'] },
+    opencodeProfile: { enum: ['v1', 'v2', null] },
     timeoutMs: { type: 'number', exclusiveMinimum: 0 },
     maxOutputBytes: { type: ['number', 'null'] },
     schema: { type: ['object', 'null'] },
@@ -41,6 +42,7 @@ const REVIEW_INPUT_SCHEMA = {
     prompt: { type: 'string', minLength: 1 },
     model: { type: ['string', 'null'] },
     effort: { type: ['string', 'null'] },
+    opencodeProfile: { enum: ['v1', 'v2', null] },
     timeoutMs: { type: 'number', exclusiveMinimum: 0 },
     maxOutputBytes: { type: ['number', 'null'] },
     sessionId: { type: ['string', 'null'] },
@@ -77,12 +79,12 @@ export function describeTools() {
 // ergonomic alias that maps to `accessProfile: "full"` (see src/cli.mjs
 // generateInput); the tool-call protocol keeps the explicit canonical form.
 const ALLOWED_INPUT_FIELDS = new Set([
-  'provider', 'prompt', 'model', 'effort', 'timeoutMs', 'maxOutputBytes', 'schema', 'sessionId', 'agentMode', 'agent', 'toolPolicy',
+  'provider', 'prompt', 'model', 'effort', 'opencodeProfile', 'timeoutMs', 'maxOutputBytes', 'schema', 'sessionId', 'agentMode', 'agent', 'toolPolicy',
   'accessProfile', 'taskIntent', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions', 'gatewayCapabilityHandle', 'gatewayHandle', 'mcpConfig',
 ]);
 
 const REVIEW_ALLOWED_INPUT_FIELDS = new Set([
-  'provider', 'prompt', 'model', 'effort', 'timeoutMs', 'maxOutputBytes', 'sessionId', 'taskIntent',
+  'provider', 'prompt', 'model', 'effort', 'opencodeProfile', 'timeoutMs', 'maxOutputBytes', 'sessionId', 'taskIntent',
   'accessProfile', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions',
 ]);
 
@@ -138,6 +140,9 @@ export async function handleToolCall(request, options = {}) {
   // Basic type checks for new fields (detailed canonicalization happens in capabilities)
   if (request.input.accessProfile !== undefined && request.input.accessProfile !== null && typeof request.input.accessProfile !== 'string') {
     throw new AiCliError('INVALID_INPUT', 'accessProfile must be a string', { exitCode: 2 });
+  }
+  if (request.input.opencodeProfile !== undefined && request.input.opencodeProfile !== null && typeof request.input.opencodeProfile !== 'string') {
+    throw new AiCliError('INVALID_INPUT', 'opencodeProfile must be a string', { exitCode: 2 });
   }
   if (request.input.workspace !== undefined && request.input.workspace !== null && typeof request.input.workspace !== 'string') {
     throw new AiCliError('INVALID_INPUT', 'workspace must be a string', { exitCode: 2 });

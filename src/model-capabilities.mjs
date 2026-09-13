@@ -30,6 +30,11 @@ const MODEL_OVERRIDES = Object.freeze({
     effortValues: ['low', 'medium', 'high', 'xhigh'],
     defaultEffort: 'xhigh',
   },
+  'opencode:openrouter/meta/muse-spark-1.3-contributor': {
+    supportsEffort: true,
+    effortValues: ['high'],
+    note: 'Direct OpenRouter evidence covers high effort only',
+  },
   'opencode:opencode-go/deepseek-v4.1-flash': {
     supportsEffort: true,
     effortValues: ['low', 'medium', 'high'],

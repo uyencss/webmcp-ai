@@ -163,6 +163,7 @@ Usage:
 Generate options:
   --model <model>          Provider model override
   --effort <level>        Provider reasoning/effort override
+  --opencode-profile <v1|v2>  Explicit OpenCode adapter profile (dry-run; no binary probe)
   --schema <path>         JSON Schema for structured output
   --session-id <id>       Resume only this explicit provider session
   --agent-mode <mode>     (Deprecated: prefer --task-intent) AGY/opencode only: plan (default) or accept-edits
@@ -195,6 +196,7 @@ Review options (portable one-shot reviewer; reuses the ai.review resolver; read-
   --access-profile <profile>  review-readonly only (absent defaults to review-readonly; mismatch -> TASK_INTENT_ACCESS_CONFLICT)
   --model <model>         Provider model override
   --effort <level>        Provider reasoning/effort override
+  --opencode-profile <v1|v2>  Explicit OpenCode adapter profile for preview/dispatch
   --session-id <id>       Resume only this explicit provider session (resumed results set resumed:true and are not fresh final-auditor evidence; omit for a fresh audit)
   --workspace <path>      Trusted working directory for the provider (defaults to cwd for compatibility; read-only, never written; prefer explicit)
   --allowed-read-root <path>   Repeatable: additional readable root (absolute)
@@ -342,6 +344,7 @@ function generateInput(options) {
     prompt,
     model: options.model ?? fromJson.model,
     effort: options.effort ?? fromJson.effort,
+    opencodeProfile: options['opencode-profile'] ?? fromJson.opencodeProfile,
     schema,
     sessionId: options['session-id'] ?? fromJson.sessionId,
     agentMode: options['agent-mode'] ?? fromJson.agentMode,
@@ -430,6 +433,7 @@ function reviewInput(options) {
     prompt,
     model: options.model ?? fromJson.model,
     effort: options.effort ?? fromJson.effort,
+    opencodeProfile: options['opencode-profile'] ?? fromJson.opencodeProfile,
     sessionId: options['session-id'] ?? fromJson.sessionId,
     taskIntent: options['task-intent'] ?? fromJson.taskIntent,
     accessProfile: options['access-profile'] ?? fromJson.accessProfile,

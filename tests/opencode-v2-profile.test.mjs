@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,13 +14,29 @@ import {
   validateOpencodeReviewSupport,
 } from '../src/providers/opencode.mjs';
 import { buildOpenCodeConfig } from '../src/capabilities.mjs';
-import { generate } from '../src/client.mjs';
+import { describeGenerateDryRun, generate } from '../src/client.mjs';
+import { describeReviewDryRun } from '../src/review.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
 
 const V1_HELP = 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort';
 const V2_HELP = 'opencode run --standalone --format json --agent build --model sonnet#effort';
+
+function makeNoSpawnFake(t, markerPath) {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-no-spawn-'));
+  const fake = join(dir, 'fake-opencode.mjs');
+  writeFileSync(fake, [
+    '#!/usr/bin/env node',
+    "import { writeFileSync } from 'node:fs';",
+    `writeFileSync(${JSON.stringify(markerPath)}, 'invoked');`,
+    'process.exit(99);',
+    '',
+  ].join('\n'));
+  chmodSync(fake, 0o755);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return fake;
+}
 
 // ---- version parsing and profile mapping ----
 
@@ -247,6 +263,105 @@ test('opencode v2 invocations emit only the v2 config schema (no v1 leftovers)',
     } finally {
       invocation.cleanup?.();
     }
+  }
+});
+
+test('generate and review dry-runs preserve explicit profiles and mark absent profile unresolved', (t) => {
+  const ws = mkdtempSync(join(tmpdir(), 'opencode-profile-dry-run-'));
+  const marker = join(ws, 'provider-invoked');
+  const noSpawnFake = makeNoSpawnFake(t, marker);
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  const model = 'opencode-go/muse-spark-1.3-contributor';
+  const env = { ...process.env, OPENCODE_BIN: noSpawnFake };
+
+  const generateV1 = describeGenerateDryRun({
+    provider: 'opencode', prompt: 'secret generate prompt', accessProfile: 'provider-default',
+    agentMode: 'accept-edits', workspace: ws, model, effort: 'xhigh',
+    opencodeProfile: 'v1', env,
+  });
+  assert.deepEqual(generateV1.args, [
+    'run', '--format', 'json', '--agent', 'build', '--auto', '--model', model,
+    '--variant', 'xhigh', '--dir', '<workspace>',
+  ]);
+  assert.equal(generateV1.opencodeProfile, 'v1');
+  assert.equal(generateV1.opencodeProfileSource, 'explicit');
+
+  const generateV2 = describeGenerateDryRun({
+    provider: 'opencode', prompt: 'secret generate prompt', accessProfile: 'provider-default',
+    agentMode: 'accept-edits', workspace: ws, model, effort: 'xhigh',
+    opencodeProfile: 'v2', env,
+  });
+  assert.deepEqual(generateV2.args, [
+    'run', '--standalone', '--format', 'json', '--agent', 'build', '--auto',
+    '--model', `${model}#xhigh`,
+  ]);
+  assert.equal(generateV2.opencodeProfile, 'v2');
+  assert.equal(generateV2.opencodeProfileSource, 'explicit');
+
+  const reviewV1 = describeReviewDryRun({
+    provider: 'opencode', prompt: 'secret review prompt', taskIntent: 'review',
+    workspace: ws, model, effort: 'xhigh', opencodeProfile: 'v1', env,
+  });
+  assert.deepEqual(reviewV1.args, [
+    'run', '--format', 'json', '--agent', 'build', '--model', model,
+    '--variant', 'xhigh', '--dir', '<workspace>',
+  ]);
+  assert.equal(reviewV1.opencodeProfile, 'v1');
+  assert.equal(reviewV1.opencodeProfileSource, 'explicit');
+
+  const reviewV2 = describeReviewDryRun({
+    provider: 'opencode', prompt: 'secret review prompt', taskIntent: 'review',
+    workspace: ws, model, effort: 'xhigh', opencodeProfile: 'v2', env,
+  });
+  assert.deepEqual(reviewV2.args, [
+    'run', '--standalone', '--format', 'json', '--agent', 'build',
+    '--model', `${model}#xhigh`,
+  ]);
+  assert.equal(reviewV2.opencodeProfile, 'v2');
+  assert.equal(reviewV2.opencodeProfileSource, 'explicit');
+
+  const unresolved = describeGenerateDryRun({
+    provider: 'opencode', prompt: 'secret unresolved prompt', accessProfile: 'provider-default',
+    agentMode: 'plan', workspace: ws, model, effort: 'xhigh', env,
+  });
+  assert.equal(unresolved.opencodeProfile, null);
+  assert.equal(unresolved.opencodeProfileSource, 'unresolved');
+  assert.deepEqual(unresolved.args, [
+    'run', '--format', 'json', '--agent', 'plan', '--model', model,
+    '--variant', 'xhigh', '--dir', '<workspace>',
+  ]);
+
+  const serialized = JSON.stringify({ generateV2, reviewV2, unresolved });
+  assert.equal(serialized.includes(ws), false);
+  assert.equal(serialized.includes('secret generate prompt'), false);
+  assert.equal(serialized.includes('secret review prompt'), false);
+  assert.equal(existsSync(marker), false, 'dry-run must not invoke the provider binary');
+});
+
+test('dry-run rejects unknown OpenCode profiles with typed errors and cleans previews', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'opencode-invalid-profile-ws-'));
+  const privateTmp = mkdtempSync(join(tmpdir(), 'opencode-invalid-profile-tmp-'));
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = privateTmp;
+  try {
+    assert.throws(
+      () => describeGenerateDryRun({ provider: 'opencode', prompt: 'x', workspace: ws, opencodeProfile: 'v9' }),
+      (error) => error.code === 'PROVIDER_CAPABILITY_DRIFT' && error.details?.profile === 'v9',
+    );
+    assert.throws(
+      () => describeReviewDryRun({ provider: 'opencode', prompt: 'x', taskIntent: 'review', workspace: ws, opencodeProfile: 'v9' }),
+      (error) => error.code === 'PROVIDER_CAPABILITY_DRIFT' && error.details?.profile === 'v9',
+    );
+    assert.deepEqual(
+      readdirSync(privateTmp).filter((name) => name.startsWith('webmcp-ai-opencode-')),
+      [],
+      'invalid profile must not leak preview directories',
+    );
+  } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+    rmSync(privateTmp, { recursive: true, force: true });
+    rmSync(ws, { recursive: true, force: true });
   }
 });
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,6 +13,32 @@ import { validateReviewResult } from '../src/review-result.mjs';
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 chmodSync(fakeBin, 0o755);
+
+function makeProfileReviewFake(t, { version, markerPath }) {
+  const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-profile-review-fake-'));
+  const fake = join(dir, 'fake-review.mjs');
+  const payload = JSON.stringify({ schema: 'webmcp-ai-review-result/1', verdict: 'approve', summary: 'profile-fixture' });
+  const help = version.startsWith('2.')
+    ? 'opencode run --standalone --format json --agent build --model sonnet#effort'
+    : 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort';
+  writeFileSync(fake, [
+    '#!/usr/bin/env node',
+    "import { writeFileSync } from 'node:fs';",
+    `const payload = ${JSON.stringify(payload)};`,
+    `const help = ${JSON.stringify(help)};`,
+    `const marker = ${JSON.stringify(markerPath)};`,
+    'const args = process.argv.slice(2);',
+    `if (args.includes("--version")) { process.stdout.write(${JSON.stringify(`opencode v${version}\n`)}); process.exit(0); }`,
+    'if (args.includes("--help")) { process.stdout.write(help + "\\n"); process.exit(0); }',
+    'writeFileSync(marker, args.join(" "));',
+    'const line = JSON.stringify({ type: "text", sessionID: "ses_profile", part: { type: "text", text: payload } });',
+    'process.stdout.write(line + "\\n");',
+    '',
+  ].join('\n'));
+  chmodSync(fake, 0o755);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return fake;
+}
 
 function makeReviewFake(t, verdict = 'approve') {
   const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-review-fake-'));
@@ -260,6 +286,34 @@ test('review dry-run redacts resumable session identifiers while preserving resu
   }
 });
 
+test('review real runs keep v1/v2 auto-detected mapping while dry-run accepts explicit v2', async (t) => {
+  for (const version of ['1.18.30', '2.0.3']) {
+    const ws = mkdtempSync(join(tmpdir(), `review-profile-${version}-`));
+    const marker = join(ws, 'real-argv.txt');
+    const fake = makeProfileReviewFake(t, { version, markerPath: marker });
+    try {
+      const result = await review({
+        provider: 'opencode', prompt: 'profile review', taskIntent: 'review', workspace: ws,
+        model: 'opencode-go/muse-spark-1.3-contributor', effort: 'xhigh',
+        env: { ...process.env, OPENCODE_BIN: fake },
+      });
+      assert.equal(result.ok, true);
+      const args = readFileSync(marker, 'utf8');
+      if (version.startsWith('2.')) {
+        assert.match(args, /--standalone/);
+        assert.match(args, /--model opencode-go\/muse-spark-1\.3-contributor#xhigh/);
+        assert.doesNotMatch(args, /--dir|--variant/);
+      } else {
+        assert.doesNotMatch(args, /--standalone/);
+        assert.match(args, /--model opencode-go\/muse-spark-1\.3-contributor --variant xhigh/);
+        assert.match(args, /--dir /);
+      }
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  }
+});
+
 test('CLI review --dry-run and --help reuse the same resolver', async () => {
   const ws = mkdtempSync(join(tmpdir(), 'cli-review-'));
   try {
@@ -275,6 +329,20 @@ test('CLI review --dry-run and --help reuse the same resolver', async () => {
     assert.equal(payload.ok, true);
     assert.equal(payload.dryRun, true);
     assert.equal(payload.accessProfile, 'review-readonly');
+    const v2Dry = spawnSync(process.execPath, [
+      bin, 'review', '--provider', 'opencode', '--prompt', 'hello', '--workspace', ws,
+      '--opencode-profile', 'v2', '--dry-run', '--json',
+    ], {
+      encoding: 'utf8',
+      env: { ...process.env, OPENCODE_BIN: '/definitely/missing/opencode' },
+    });
+    assert.equal(v2Dry.status, 0, v2Dry.stderr);
+    const v2Payload = JSON.parse(v2Dry.stdout);
+    assert.equal(v2Payload.opencodeProfile, 'v2');
+    assert.equal(v2Payload.opencodeProfileSource, 'explicit');
+    assert.ok(v2Payload.args.includes('--standalone'));
+    assert.equal(v2Payload.args.includes('--dir'), false);
+    assert.equal(v2Payload.args.includes('--variant'), false);
     // contradiction via CLI fails before spawn
     const bad = spawnSync(process.execPath, [bin, 'review', '--provider', 'codex', '--prompt', 'x', '--workspace', ws, '--task-intent', 'review', '--access-profile', 'full', '--json'], {
       encoding: 'utf8',

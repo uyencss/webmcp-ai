@@ -274,6 +274,7 @@ test('CLI help/JSON carries the new fields', () => {
   assert.match(help.stdout, /--protected-path/);
   assert.match(help.stdout, /--project-id/);
   assert.match(help.stdout, /--store-revisions/);
+  assert.match(help.stdout, /--opencode-profile/);
 
   const tools = spawnSync(process.execPath, [bin, 'tools', 'describe', '--json'], { encoding: 'utf8' });
   assert.equal(tools.status, 0);
@@ -286,6 +287,7 @@ test('CLI help/JSON carries the new fields', () => {
   assert.ok('protectedPaths' in props);
   assert.ok('projectId' in props);
   assert.ok('storeRevisions' in props);
+  assert.ok('opencodeProfile' in props);
   assert.deepEqual(props.accessProfile.enum, ['provider-default', 'compose-only', 'review-readonly', 'bounded-edit', 'gateway-tool', 'full', null]);
 
   // generate with JSON input carrying new fields

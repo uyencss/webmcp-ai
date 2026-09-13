@@ -48,6 +48,18 @@ test('describeModel surfaces provider limits and per-model effort support', () =
   const gemini = describeModel('agy', 'gemini-3.8-flash-high');
   assert.equal(gemini.supportsEffort, true);
 
+  const historicalMuse = describeModel('opencode', 'opencode-go/muse-spark-1.3-contributor');
+  assert.equal(historicalMuse.known, true);
+  assert.deepEqual(historicalMuse.effortValues, ['low', 'medium', 'high', 'xhigh']);
+  assert.equal(historicalMuse.defaultEffort, 'xhigh');
+
+  const directMuse = describeModel('opencode', 'openrouter/meta/muse-spark-1.3-contributor');
+  assert.equal(directMuse.known, true);
+  assert.equal(directMuse.supportsEffort, true);
+  assert.deepEqual(directMuse.effortValues, ['high']);
+  assert.equal(directMuse.defaultEffort, null);
+  assert.equal(directMuse.note, 'Direct OpenRouter evidence covers high effort only');
+
   const unknown = describeModel('opencode', 'opencode-go/not-a-real-model');
   assert.equal(unknown.known, false);
   assert.equal(unknown.supportsEffort, null);
@@ -87,6 +99,20 @@ test('models inspect exposes the per-model surface', () => {
   assert.equal(payload.supportsEffort, false);
   assert.equal(payload.maxPromptBytes, 128 * 1024);
   assert.equal(payload.capabilities.modelDiscovery, true);
+});
+
+test('models inspect exposes exact direct OpenRouter metadata', () => {
+  const result = run([
+    'models', 'inspect', '--provider', 'opencode',
+    '--model', 'openrouter/meta/muse-spark-1.3-contributor', '--json',
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.known, true);
+  assert.equal(payload.supportsEffort, true);
+  assert.deepEqual(payload.effortValues, ['high']);
+  assert.equal(payload.defaultEffort, null);
+  assert.equal(payload.note, 'Direct OpenRouter evidence covers high effort only');
 });
 
 test('preflight reports providers and the external quota pointer without spawning', () => {

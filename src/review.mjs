@@ -8,6 +8,7 @@ import {
 import { generate } from './client.mjs';
 import { AiCliError } from './errors.mjs';
 import { getProvider } from './providers/index.mjs';
+import { normalizeOpencodeProfile } from './providers/opencode.mjs';
 import { parseReviewOutput, REVIEW_RESULT_SCHEMA } from './review-result.mjs';
 
 export const REVIEW_TASK_DEFAULT = 'review';
@@ -22,6 +23,11 @@ function requireNonEmptyPrompt(prompt) {
     throw new AiCliError('INVALID_INPUT', 'prompt must be a non-empty string', { exitCode: 2 });
   }
   return prompt;
+}
+
+function explicitOpencodeProfile(provider, profile) {
+  if (provider.id !== 'opencode' || profile === null || profile === undefined || profile === '') return null;
+  return normalizeOpencodeProfile(profile);
 }
 
 /**
@@ -151,6 +157,7 @@ export function resolveReviewRequest(input = {}) {
   rejectReviewForbiddenFields(input);
   // 3. Provider registry lookup (no spawn, no filesystem).
   const provider = getProvider(input.provider);
+  const opencodeProfile = explicitOpencodeProfile(provider, input.opencodeProfile);
   // 4. AGY early rejection before any preview (F1/F5: never build AGY argv
   // that would embed prompt text, never install compose guard).
   if (provider.id === 'agy') {
@@ -218,6 +225,7 @@ export function resolveReviewRequest(input = {}) {
     protectedPaths: capability.protectedPaths,
     projectId: capability.projectId,
     storeRevisions: capability.storeRevisions,
+    opencodeProfile,
     timeoutMs: timeoutMs !== undefined ? Number(timeoutMs) : 600_000,
     env: input.env || {},
   });
@@ -242,6 +250,10 @@ export function resolveReviewRequest(input = {}) {
     accessProfile: resolvedIntent.accessProfile,
     capability,
     prompt,
+    ...(provider.id === 'opencode' ? {
+      opencodeProfile,
+      opencodeProfileSource: opencodeProfile === null ? 'unresolved' : 'explicit',
+    } : {}),
     model: input.model || null,
     effort: input.effort || null,
     sessionId: input.sessionId || null,
@@ -299,6 +311,10 @@ export function describeReviewDryRun(input = {}) {
     provider: resolved.provider.id,
     taskIntent: resolved.taskIntent,
     accessProfile: resolved.accessProfile,
+    ...(resolved.provider.id === 'opencode' ? {
+      opencodeProfile: resolved.opencodeProfile,
+      opencodeProfileSource: resolved.opencodeProfileSource,
+    } : {}),
     model: resolved.model,
     // A resumed session is intentionally represented only as a boolean. The
     // provider session identifier is a resumable capability and must not enter
@@ -351,6 +367,7 @@ export async function review(input = {}) {
     prompt: reviewPrompt,
     model: resolved.model,
     effort: input.effort || null,
+    opencodeProfile: resolved.opencodeProfile,
     sessionId: resolved.sessionId || null,
     agentMode: null,
     agent: null,
