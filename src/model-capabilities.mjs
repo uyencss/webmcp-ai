@@ -67,6 +67,21 @@ const MODEL_OVERRIDES = Object.freeze({
     defaultEffort: 'high',
     note: '9Router CX GPT-5.6 Luna Max',
   },
+  'opencode:9router/gpt-4.1': {
+    supportsEffort: false,
+    effortValues: [],
+    note: '9Router GH GPT-4.1 (1M context)',
+  },
+  'opencode:9router/gpt-4o': {
+    supportsEffort: false,
+    effortValues: [],
+    note: '9Router GH GPT-4o',
+  },
+  'opencode:9router/gpt-4o-mini': {
+    supportsEffort: false,
+    effortValues: [],
+    note: '9Router GH GPT-4o Mini',
+  },
 });
 
 export function describeModel(providerId, modelId) {
