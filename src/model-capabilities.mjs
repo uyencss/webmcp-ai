@@ -40,6 +40,33 @@ const MODEL_OVERRIDES = Object.freeze({
     effortValues: ['low', 'medium', 'high'],
     defaultEffort: 'high',
   },
+  'opencode:9router/glm-5.3-flash': {
+    supportsEffort: false,
+    effortValues: [],
+    note: '9Router DO GLM 5.3 Flash (1M context)',
+  },
+  'opencode:9router/deepseek-v4-flash-0731': {
+    supportsEffort: false,
+    effortValues: [],
+    note: '9Router DO DeepSeek V4 Flash 0731 (1M context)',
+  },
+  'opencode:9router/gemini-3.8-flash-high': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high'],
+    defaultEffort: 'high',
+    note: '9Router AG Gemini 3.8 Flash High (1M context)',
+  },
+  'opencode:9router/claude-opus-4-6-thinking': {
+    supportsEffort: false,
+    effortValues: [],
+    note: '9Router AG Claude Opus 4.6 Thinking',
+  },
+  'opencode:9router/gpt-5.6-luna': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high'],
+    defaultEffort: 'high',
+    note: '9Router CX GPT-5.6 Luna Max',
+  },
 });
 
 export function describeModel(providerId, modelId) {

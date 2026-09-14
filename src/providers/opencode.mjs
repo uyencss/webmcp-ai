@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 import { buildOpenCodeConfig } from '../capabilities.mjs';
@@ -178,6 +178,71 @@ export function resolveOpencodeCliDb(env, { homeDir = homedir() } = {}) {
   return join(homeDir, '.local', 'share', 'opencode', 'opencode-cli.db');
 }
 
+function stripJsoncComments(text) {
+  if (typeof text !== 'string') return '';
+  let insideString = false;
+  let stringChar = '';
+  let isEscaped = false;
+  let result = '';
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+    if (insideString) {
+      result += char;
+      if (isEscaped) {
+        isEscaped = false;
+      } else if (char === '\\') {
+        isEscaped = true;
+      } else if (char === stringChar) {
+        insideString = false;
+      }
+    } else {
+      if (char === '"' || char === "'") {
+        insideString = true;
+        stringChar = char;
+        result += char;
+      } else if (char === '/' && nextChar === '/') {
+        while (i < text.length && text[i] !== '\n') i++;
+        if (i < text.length) result += text[i];
+      } else if (char === '/' && nextChar === '*') {
+        i += 2;
+        while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+        i++;
+      } else {
+        result += char;
+      }
+    }
+  }
+  return result.replace(/,\s*([\]}])/g, '$1');
+}
+
+export function resolveUserOpenCodeProviders(env, { homeDir = homedir() } = {}) {
+  const effectiveEnv = env ?? {};
+  const explicit = firstNonEmptyString(effectiveEnv.OPENCODE_CONFIG);
+  const candidates = [];
+  if (explicit) candidates.push(explicit);
+  const xdgConfigHome = firstNonEmptyString(effectiveEnv.XDG_CONFIG_HOME);
+  if (xdgConfigHome) {
+    candidates.push(join(trimTrailingSeparators(xdgConfigHome), 'opencode', 'opencode.jsonc'));
+    candidates.push(join(trimTrailingSeparators(xdgConfigHome), 'opencode', 'opencode.json'));
+  }
+  candidates.push(join(homeDir, '.config', 'opencode', 'opencode.jsonc'));
+  candidates.push(join(homeDir, '.config', 'opencode', 'opencode.json'));
+
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) {
+        const raw = readFileSync(candidate, 'utf8');
+        const parsed = JSON.parse(stripJsoncComments(raw));
+        if (parsed && typeof parsed.provider === 'object' && parsed.provider !== null) {
+          return parsed.provider;
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
 /**
  * Allocate the private per-invocation config boundary and roll it back if any
  * setup step throws: callers only receive the cleanup hook after a fully
@@ -194,9 +259,20 @@ function createIsolatedOpencodeRuntime(request, baseConfig) {
     const openCodeConfigDir = join(privateDir, 'opencode.d');
     mkdirSync(xdgConfigHome, { recursive: true });
     mkdirSync(openCodeConfigDir, { recursive: true });
+
+    // Inherit user-defined custom provider endpoints (such as 9router)
+    // into the isolated runtime if baseConfig does not already declare them.
+    const effectiveConfig = { ...baseConfig };
+    if (!effectiveConfig.provider) {
+      const userProviders = resolveUserOpenCodeProviders(request.env);
+      if (userProviders && Object.keys(userProviders).length > 0) {
+        effectiveConfig.provider = userProviders;
+      }
+    }
+
     // OPENCODE_CONFIG points at the same content as OPENCODE_CONFIG_CONTENT
     // for defense-in-depth.
-    writeFileSync(openCodeConfig, JSON.stringify(baseConfig, null, 2), 'utf8');
+    writeFileSync(openCodeConfig, JSON.stringify(effectiveConfig, null, 2), 'utf8');
     return {
       env: {
         OPENCODE_DB: resolveOpencodeCliDb(request.env),
@@ -209,7 +285,7 @@ function createIsolatedOpencodeRuntime(request, baseConfig) {
         OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
         OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
         OPENCODE_DISABLE_AUTOUPDATE: '1',
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(baseConfig),
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(effectiveConfig),
       },
       cleanup: () => {
         try { rmSync(privateDir, { recursive: true, force: true }); } catch {}
