@@ -229,6 +229,10 @@ needs the protocol request ID for correlation.
 - `tool-call --json`: require `ok: true`, then consume `output.text`.
 - On failure, read `error.code`; do not parse diagnostics from stderr.
 
+OpenCode native JSON failures are normalized without raw diagnostics: a native
+`provider.no-route` becomes `PROVIDER_NO_ROUTE` with
+`details.providerCode: "provider.no-route"`.
+
 ## Tool protocol
 
 Inspect the tool contract before integrating it:
@@ -265,6 +269,9 @@ wrapper never searches or migrates sessions across databases automatically.
 
 An explicit `OPENCODE_DB` value in the calling environment is respected as an
 operator override. Task JSON and model prompts cannot select the database path.
+For OpenCode v2, an explicit override must point to an existing non-empty
+database file; a missing or empty override fails closed as
+`PROVIDER_STATE_UNINITIALIZED` and is never silently replaced.
 
 V2 (beta) resolves contention architecturally through a background server that
 serializes all writes. The wrapper still sets `OPENCODE_DB` on v2 and adds

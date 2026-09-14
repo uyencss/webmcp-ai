@@ -11,9 +11,39 @@ function boundedDiagnostics(stdout, stderr) {
     .slice(-CLASSIFICATION_SAMPLE_BYTES);
 }
 
+function structuredProviderError(text) {
+  const lines = String(text ?? '').split(/\r?\n/).reverse();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      const code = parsed?.error?.type;
+      if (typeof code === 'string' && /^provider\.[a-z0-9][a-z0-9._-]*$/iu.test(code)) {
+        return { providerCode: code };
+      }
+    } catch {
+      // Provider output is untrusted; fall back to bounded text classification.
+    }
+  }
+  return null;
+}
+
 function classifyProviderExit({ stdout, stderr, exitCode, exitSignal }) {
   const text = boundedDiagnostics(stdout, stderr).toLowerCase();
-  const details = { exitCode, signal: exitSignal || null };
+  const nativeError = structuredProviderError(text);
+  const details = {
+    exitCode,
+    signal: exitSignal || null,
+    ...(nativeError ?? {}),
+  };
+
+  if (nativeError?.providerCode === 'provider.no-route') {
+    return new AiCliError('PROVIDER_NO_ROUTE', 'Provider route is unavailable', {
+      retryable: false,
+      details,
+    });
+  }
 
   // Concurrent opencode runs contend on the same SQLite database and fail with
   // "database is locked" (SQLITE_BUSY). This is transient; retrying with

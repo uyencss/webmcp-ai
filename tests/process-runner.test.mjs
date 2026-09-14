@@ -67,3 +67,23 @@ test('process runner classifies bounded provider failures without leaking raw ou
     (error) => error.code === 'PROVIDER_EXIT_ERROR',
   );
 });
+
+test('process runner preserves structured provider no-route failures without leaking raw diagnostics', async () => {
+  const nativeFailure = JSON.stringify({
+    type: 'error',
+    error: {
+      type: 'provider.no-route',
+      message: 'Model unavailable: opencode-go/muse-spark-1.3-contributor',
+    },
+  });
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(nativeFailure)}); process.exit(1)`], {
+      timeoutMs: 1000,
+    }),
+    (error) => error.code === 'PROVIDER_NO_ROUTE'
+      && error.retryable === false
+      && error.details.exitCode === 1
+      && error.details.providerCode === 'provider.no-route'
+      && !JSON.stringify(error).includes('Model unavailable'),
+  );
+});

@@ -391,6 +391,37 @@ test('generate detects the v2 profile, drops --dir, and folds effort', async (t)
   assert.equal(args.includes('--dir'), false, args);
 });
 
+test('generate fails closed before provider run when an explicit v2 DB override is missing or empty', async () => {
+  const ws = mkdtempSync(join(tmpdir(), 'v2-state-ws-'));
+  const missingDb = join(ws, 'missing-opencode.db');
+  const env = {
+    ...process.env,
+    OPENCODE_BIN: fakeBin,
+    FAKE_PROVIDER: 'opencode',
+    FAKE_VERSION: '2.0.3',
+    OPENCODE_DB: missingDb,
+  };
+  const request = () => generate({
+    provider: 'opencode',
+    prompt: 'state probe',
+    workspace: ws,
+    accessProfile: 'full',
+    agentMode: 'plan',
+    env,
+  });
+  const isUninitialized = (error) => error.code === 'PROVIDER_STATE_UNINITIALIZED'
+    && error.retryable === false
+    && error.details?.profile === 'v2'
+    && !JSON.stringify(error).includes(missingDb);
+  try {
+    await assert.rejects(request(), isUninitialized);
+    writeFileSync(missingDb, '');
+    await assert.rejects(request(), isUninitialized);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test('generate fails closed on an unrecognized opencode version', async (t) => {
   const ws = mkdtempSync(join(tmpdir(), 'v2-drift-ws-'));
   t.after(() => rmSync(ws, { recursive: true, force: true }));
