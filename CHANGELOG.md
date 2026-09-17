@@ -4,6 +4,8 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Register `opencode-go/union-alpha` in model capabilities table with `supportsEffort: false`
+  to fail closed against unsupported `--effort` flags before process spawn.
 - Record the verified optional OpenCode/OpenRouter route
   `openrouter/meta/muse-spark-1.3-contributor` as a separate model fact with
   `high` effort only; preserve the historical

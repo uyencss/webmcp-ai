@@ -60,6 +60,11 @@ test('describeModel surfaces provider limits and per-model effort support', () =
   assert.equal(directMuse.defaultEffort, null);
   assert.equal(directMuse.note, 'Direct OpenRouter evidence covers high effort only');
 
+  const unionAlpha = describeModel('opencode', 'opencode-go/union-alpha');
+  assert.equal(unionAlpha.known, true);
+  assert.equal(unionAlpha.supportsEffort, false);
+  assert.deepEqual(unionAlpha.effortValues, []);
+
   const unknown = describeModel('opencode', 'opencode-go/not-a-real-model');
   assert.equal(unknown.known, false);
   assert.equal(unknown.supportsEffort, null);
@@ -69,6 +74,7 @@ test('describeModel surfaces provider limits and per-model effort support', () =
 
 test('effortRejection only fires for a known effort-refusing model', () => {
   assert.equal(effortRejection({ providerId: 'agy', modelId: 'claude-opus-4-6-thinking', effort: 'high' }).allowedEfforts.length, 0);
+  assert.equal(effortRejection({ providerId: 'opencode', modelId: 'opencode-go/union-alpha', effort: 'high' }).allowedEfforts.length, 0);
   assert.equal(effortRejection({ providerId: 'agy', modelId: 'gemini-3.8-flash-high', effort: 'high' }), null);
   assert.equal(effortRejection({ providerId: 'opencode', modelId: 'opencode-go/unknown', effort: 'xhigh' }), null);
   assert.equal(effortRejection({ providerId: 'agy', modelId: 'claude-opus-4-6-thinking', effort: null }), null);
