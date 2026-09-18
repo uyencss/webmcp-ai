@@ -40,11 +40,6 @@ const MODEL_OVERRIDES = Object.freeze({
     effortValues: ['low', 'medium', 'high'],
     defaultEffort: 'high',
   },
-  'opencode:opencode-go/union-alpha': {
-    supportsEffort: false,
-    effortValues: [],
-    note: 'Stealth Union Alpha (cost 0, fast); does not accept --effort flag. Prefer OpenCode native subagent (union-alpha / union-stealth).',
-  },
   'opencode:9router/glm-5.3-flash': {
     supportsEffort: false,
     effortValues: [],
