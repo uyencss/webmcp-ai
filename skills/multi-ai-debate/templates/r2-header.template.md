@@ -15,4 +15,3 @@ bạn đã nói A mà giờ chọn B, phải nói rõ lý do đổi. Ưu tiên t
 ngân sách và không phá các bất biến đã nêu trong context brief.
 
 ---
-

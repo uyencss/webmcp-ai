@@ -103,7 +103,7 @@ II. CHỦ ĐỀ TRANH LUẬN
 [Mô tả chủ đề cụ thể: ví dụ kiến trúc mở rộng, modularity, schema contracts, YAGNI vs extensibility...]
 
 III. PHÂN VAI
-phân vai của tôi như sau: host là bạn (deepseek v4.1 flash), các debator bao gồm: 
+phân vai của tôi như sau: host là bạn (deepseek v4.1 flash), các debator bao gồm:
 1. agy claude 4.6 thinking high
 2. agy flash 3.8 gemini
 3. codex sol (gpt-6-sol)

@@ -8,4 +8,3 @@ từng câu trả lời; chỗ nào mơ hồ sẽ bị chất vấn ở vòng 2.
 Đọc kỹ context brief dưới đây rồi trả lời các câu hỏi theo yêu cầu ở mục 4.
 
 ---
-
