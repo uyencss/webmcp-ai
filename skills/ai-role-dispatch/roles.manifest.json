@@ -1,7 +1,7 @@
 {
   "schema": "webmcp-role-manifest/1",
-  "version": 7,
-  "lastUpdated": "2026-09-22",
+  "version": 8,
+  "lastUpdated": "2026-09-23",
   "description": "Role-based AI model dispatch matrix and fallback rules for WebMCP AI Orchestration",
   "invariants": {
     "opencodeExclusivity": {
@@ -161,8 +161,8 @@
     "reviewer_l1": {
       "id": "reviewer_l1",
       "name": "Reviewer Layer 1 (Pre-acceptance / Hygiene / Review phụ / Tests)",
-      "description": "Đánh giá sơ bộ diffs, kiểm tra cú pháp, convention, unit/integration test, schema invariants và lint.",
-      "swapRule": "TUYỆT ĐỐI KHÔNG để model writer tự review chính diff của mình (No self-review). Nếu Writer là Muse -> Reviewer L1 pre-accept / review phụ là AGY Gemini Flash / Claude Sonnet (swap lineage). Nếu Writer là AGY (fallback) -> Reviewer L1 pre-accept / review phụ là Muse 1.3 (tuân swapRule).",
+      "description": "Đánh giá sơ bộ diffs, kiểm tra cú pháp, convention, unit/integration test, schema invariants và lint. Sonnet và Gemini Flash đóng vai trò reviewer phụ tại lớp này.",
+      "swapRule": "TUYỆT ĐỐI KHÔNG để model writer tự review chính diff của mình (No self-review). Nếu Writer là Muse -> Reviewer L1 pre-accept / review phụ là AGY Gemini Flash / Claude Sonnet (swap lineage). Nếu Writer là AGY (fallback) -> Reviewer L1 pre-accept / review phụ là Muse 1.3 (tuân swapRule). Sonnet chỉ làm reviewer phụ, không làm reviewer chính final gate.",
       "dispatch": {
         "primary": {
           "route": "agy",
@@ -170,7 +170,7 @@
           "effort": "high",
           "node": "ATLAS",
           "condition": "Primary pre-accept & review phụ lane (lineage swap khi Writer là Muse 1.3)",
-          "note": "Reviewer pre-accept / review phụ chính qua AGY Gemini Flash High (tuân swapRule)."
+          "note": "Reviewer phụ & pre-acceptance chính qua AGY Gemini Flash High (tuân swapRule)."
         },
         "parallelLanes": [
           {
@@ -194,11 +194,12 @@
           },
           {
             "priority": 2,
-            "trigger": "Deep architectural pre-audit required",
+            "trigger": "Reviewer phụ kiến trúc / Deep architectural secondary review",
             "route": "agy",
             "model": "claude-sonnet-4-6",
             "effort": null,
-            "node": "ATLAS"
+            "node": "ATLAS",
+            "note": "Claude Sonnet đóng vai trò reviewer phụ (Layer 1), không dùng làm final reviewer L2."
           },
           {
             "priority": 3,
@@ -216,33 +217,36 @@
     "reviewer_l2": {
       "id": "reviewer_l2",
       "name": "Reviewer Layer 2 (Milestone & Final Acceptance Gate)",
-      "description": "Độc lập thẩm định toàn diện logic, an toàn, hồi quy và ranh giới hệ thống trước khi promote/accept.",
+      "description": "Reviewer chính độc lập thẩm định toàn diện logic, an toàn, hồi quy và ranh giới hệ thống trước khi promote/accept.",
       "dispatch": {
         "primary": {
           "route": "codex",
-          "model": "gpt-5.6-sol",
+          "model": "gpt-6-sol",
           "reasoningEffort": "high",
           "node": "ATLAS",
-          "command": "codex exec --model gpt-5.6-sol --sandbox read-only -c model_reasoning_effort=high -c approval_policy=never"
+          "command": "codex exec --model gpt-6-sol --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never",
+          "note": "Reviewer chính (primary final acceptance) qua Native Codex GPT-6-Sol trên ATLAS."
         },
         "fallbacks": [
           {
             "priority": 1,
             "trigger": "ATLAS Codex 5h quota = 0% -> Chuyển sang node ORBIT qua SSH",
             "route": "codex",
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "reasoningEffort": "high",
             "node": "ORBIT (Mac M1 via Tailscale)",
-            "command": "ssh mac-m1 'codex exec --model gpt-5.6-sol --sandbox read-only -c model_reasoning_effort=high -c approval_policy=never'"
+            "command": "ssh mac-m1 'codex exec --model gpt-6-sol --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never'",
+            "note": "Reviewer chính dự phòng node ORBIT: GPT-6-Sol qua Codex CLI v0.155.0."
           },
           {
             "priority": 2,
-            "trigger": "Direct Claude CLI route on ATLAS (when weekly quota >= 20%)",
+            "trigger": "Codex route unavailable -> Claude Code CLI Final Reviewer (when weekly quota >= 20%)",
             "route": "claude-cli",
-            "model": "opus",
-            "effort": "high",
+            "model": "claude-opus-5-5",
+            "alias": "opus",
             "node": "ATLAS",
-            "command": "claude -p --model opus --effort high --restricted"
+            "command": "claude -p --model claude-opus-5-5",
+            "note": "Claude Code dùng Opus 5.5 mới (claude-opus-5-5 / alias opus) cho reviewer chính (final acceptance). Sonnet chỉ làm reviewer phụ L1."
           },
           {
             "priority": 3,
@@ -277,7 +281,7 @@
             "priority": 1,
             "trigger": "High-complexity reasoning audit via Sol",
             "route": "codex",
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "reasoningEffort": "high",
             "node": "ATLAS",
             "options": {

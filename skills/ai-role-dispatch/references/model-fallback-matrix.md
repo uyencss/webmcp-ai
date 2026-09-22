@@ -4,31 +4,31 @@ Tài liệu tham chiếu chi tiết về luồng rẽ nhánh và kích hoạt Fa
 
 ---
 
-## 1. Sơ đồ luồng rẽ nhánh Reviewer Lớp 2 (Final Acceptance Gate)
+## 1. Sơ đồ luồng rẽ nhánh Reviewer Lớp 2 (Reviewer chính / Final Acceptance Gate)
 
 ```
-[Bắt đầu Review Lớp 2]
+[Bắt đầu Review Lớp 2 - Reviewer chính]
          |
          v
 +-------------------------------+
 | Kiểm tra Quota ATLAS Sol 5h    |
 +-------------------------------+
          |
-    (5h > 0% & Quota OK) ----> [Dispatch Native Codex Sol trên ATLAS]
+    (5h > 0% & Quota OK) ----> [Dispatch Native Codex Sol (gpt-6-sol) trên ATLAS]
          |
          v (5h = 0% hoặc Route Blocked)
 +-------------------------------+
 | Probe node ORBIT (Mac M1)     |
 +-------------------------------+
          |
-    (ORBIT Sol OK) ------------> [Dispatch qua Tailscale SSH mac-m1]
+    (ORBIT Sol OK) ------------> [Dispatch gpt-6-sol qua Tailscale SSH mac-m1]
          |
          v (ORBIT không khả dụng hoặc hết quota)
 +-------------------------------+
 | Kiểm tra Quota Claude Code CLI|
 +-------------------------------+
          |
-    (Weekly >= 20%) -----------> [Dispatch Direct Claude Code CLI (opus)]
+    (Weekly >= 20%) -----------> [Dispatch Claude Code CLI Opus 5.5 (claude-opus-5-5 / opus)]
          |
          v (Weekly < 20% hoặc cạn)
 +-------------------------------+
@@ -37,7 +37,7 @@ Tài liệu tham chiếu chi tiết về luồng rẽ nhánh và kích hoạt Fa
 +-------------------------------+
          |
          +--> [BẮT BUỘC: opencode-go/deepseek-v4.1-flash]
-         |    (TUYỆT ĐỐI CẤM deepseek-v4-flash)
+              (TUYỆT ĐỐI CẤM deepseek-v4-flash)
 ```
 
 ---
@@ -57,7 +57,8 @@ Tài liệu tham chiếu chi tiết về luồng rẽ nhánh và kích hoạt Fa
 +-------------------------------------------------------------------------+
          |
          +--> Nếu Writer là Muse Contributor:
-         |    Reviewer L1 = AGY Gemini Flash High / Claude Sonnet
+         |    Reviewer L1 (Review phụ) = AGY Gemini Flash High / Claude Sonnet
+         |    (Lưu ý: Sonnet chỉ đóng vai trò Reviewer phụ L1, không làm Reviewer chính final gate)
          |
          +--> Nếu Writer là AGY Gemini Flash (fallback):
               Reviewer L1 = OpenCode Muse Contributor (TUYỆT ĐỐI CẤM tự review)
