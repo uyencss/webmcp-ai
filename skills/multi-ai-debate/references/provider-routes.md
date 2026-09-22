@@ -12,18 +12,19 @@ ATLAS; treat as defaults with env overrides, not timeless facts.
 > instead of editing the dispatcher.
 
 ```bash
-AI_CLI=${WEBMCP_AI_CLI:-/Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit/packages/webmcp-ai-cli/bin/webmcp-ai.mjs}
-AGY_BIN=${AGY_BIN:-/Users/ttcenter/.local/bin/agy}
-CLAUDE_BIN=${CLAUDE_BIN:-/Users/ttcenter/.local/bin/claude}
-CODEX_BIN=${CODEX_BIN:-/Users/ttcenter/.local/bin/codex}
-OPENCODE_BIN=${OPENCODE_BIN:-/Users/ttcenter/.opencode/bin/opencode}
+# $VIBE_CODE = gốc workspace VIBE_CODE (vd: $HOME/Desktop/VIBE_CODE); $HOME = thư mục người dùng
+AI_CLI=${WEBMCP_AI_CLI:-$VIBE_CODE/webmcp-automation-kit/packages/webmcp-ai-cli/bin/webmcp-ai.mjs}
+AGY_BIN=${AGY_BIN:-$HOME/.local/bin/agy}
+CLAUDE_BIN=${CLAUDE_BIN:-$HOME/.local/bin/claude}
+CODEX_BIN=${CODEX_BIN:-$HOME/.local/bin/codex}
+OPENCODE_BIN=${OPENCODE_BIN:-$HOME/.opencode/bin/opencode}
 ```
 
 ## Quota preflight
 
 ```bash
 curl -s "http://127.0.0.1:8421/api/quotas?all=1" | python3 -m json.tool | head -80
-node /Users/ttcenter/Desktop/VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json
+node $VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json
 ```
 
 Routing rules: Codex 5h=0 → mac-m1 (`ssh mac-m1`) or AGY; Claude weekly <20% →

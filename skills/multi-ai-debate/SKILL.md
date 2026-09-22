@@ -93,9 +93,9 @@ Khi người dùng cần tổ chức một cuộc tranh biện kỹ thuật đa 
 tôi muốn bạn host 1 cuộc tranh luận phản biện mang tính chất kỹ thuật, trong đó bạn nói AI debator kết hợp thêm 2 skill ponytail và speckit được cung cấp để tranh luận về khả năng phát triển tiếp theo cho project kit của tôi, tham khảo:
 
 I. THAM KHẢO
-- /Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit/packages/webmcp-project-kit
-- /Users/ttcenter/Desktop/VIBE_CODE/webmcp-project-library
-- /Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit/docs/initiatives/2026-09-project-kit-and-library
+- $VIBE_CODE/webmcp-automation-kit/packages/webmcp-project-kit
+- $VIBE_CODE/webmcp-project-library
+- $VIBE_CODE/webmcp-automation-kit/docs/initiatives/2026-09-project-kit-and-library
 
 xoay quanh nội dung sau:
 
@@ -170,8 +170,9 @@ hãy triển khai thảo luận 2 vòng và báo cáo kết quả cuối cùng c
 ## Fast path (tái sử dụng)
 
 ```bash
-SKILL=/Users/ttcenter/Desktop/VIBE_CODE/.agents/skills/multi-ai-debate
-TEMP=/Users/ttcenter/Desktop/VIBE_CODE/temp   # hoặc .temp nếu owner muốn
+# $VIBE_CODE = gốc workspace VIBE_CODE (vd: $HOME/Desktop/VIBE_CODE)
+SKILL=$VIBE_CODE/.agents/skills/multi-ai-debate
+TEMP=$VIBE_CODE/temp   # hoặc .temp nếu owner muốn
 
 # 0) (tùy chọn) chạy self-check không gọi provider:
 node "$SKILL/scripts/selfcheck.mjs"

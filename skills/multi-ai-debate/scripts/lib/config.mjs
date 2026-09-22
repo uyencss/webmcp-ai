@@ -2,21 +2,27 @@
 // Single source of truth for role merging, strategy rounds, stances,
 // prompt paths and provider command construction.
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-export const DEFAULT_TEMP = '/Users/ttcenter/Desktop/VIBE_CODE/temp';
+// No machine-local absolute path may be written literally in this file: the skill
+// ships inside a runtime release and the release builder rejects any payload that
+// carries one (RELEASE_ABSOLUTE_PATH). Both roots are derived at runtime and can be
+// overridden with VIBE_CODE_ROOT / VIBE_CODE_TEMP.
+export const VIBE_CODE_ROOT = process.env.VIBE_CODE_ROOT || join(homedir(), 'Desktop', 'VIBE_CODE');
+export const DEFAULT_TEMP = process.env.VIBE_CODE_TEMP || join(VIBE_CODE_ROOT, 'temp');
 export const CONFIG_NAME = 'debate.config.json';
 
 export const BINS = {
   AI_CLI:
     process.env.WEBMCP_AI_CLI ||
-    '/Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit/packages/webmcp-ai-cli/bin/webmcp-ai.mjs',
-  AGY: process.env.AGY_BIN || '/Users/ttcenter/.local/bin/agy',
-  CLAUDE: process.env.CLAUDE_BIN || '/Users/ttcenter/.local/bin/claude',
-  CODEX: process.env.CODEX_BIN || '/Users/ttcenter/.local/bin/codex',
-  OPENCODE: process.env.OPENCODE_BIN || '/Users/ttcenter/.opencode/bin/opencode',
+    join(VIBE_CODE_ROOT, 'webmcp-automation-kit', 'packages', 'webmcp-ai-cli', 'bin', 'webmcp-ai.mjs'),
+  AGY: process.env.AGY_BIN || join(homedir(), '.local', 'bin', 'agy'),
+  CLAUDE: process.env.CLAUDE_BIN || join(homedir(), '.local', 'bin', 'claude'),
+  CODEX: process.env.CODEX_BIN || join(homedir(), '.local', 'bin', 'codex'),
+  OPENCODE: process.env.OPENCODE_BIN || join(homedir(), '.opencode', 'bin', 'opencode'),
 };
 
 export const VALID_ROUTES = ['coordinator', 'agy', 'opencode', 'claude-cli', 'codex'];

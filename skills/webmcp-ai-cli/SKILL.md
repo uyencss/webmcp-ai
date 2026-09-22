@@ -347,7 +347,7 @@ node "$AI_CLI" generate --provider agy --model gemini-3.8-flash-high --effort hi
 ```
 
 ### 3. Preflight & Fallback Rules Cho Agent
-1. **Kiểm tra Quota**: `node /Users/ttcenter/Desktop/VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`
+1. **Kiểm tra Quota**: `node $VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`
 2. **Fallback khi hết Quota**:
    - Codex ATLAS 5h = 0% $\rightarrow$ Route sang Mac M1 (`ssh mac-m1 'codex exec ...'`) hoặc đổi Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
    - Claude Weekly < 20% $\rightarrow$ Ưu tiên AGY Claude / Gemini Flash để bảo vệ quota Claude Code CLI.

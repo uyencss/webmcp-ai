@@ -8,9 +8,9 @@ Mẫu prompt chuẩn dùng để Coordinator/Agent cung cấp ("offer") cho ngư
 tôi muốn bạn host 1 cuộc tranh luận phản biện mang tính chất kỹ thuật, trong đó bạn nói AI debator kết hợp thêm 2 skill ponytail và speckit được cung cấp để tranh luận về khả năng phát triển tiếp theo cho project kit của tôi, tham khảo:
 
 I. THAM KHẢO
-- /Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit/packages/webmcp-project-kit
-- /Users/ttcenter/Desktop/VIBE_CODE/webmcp-project-library
-- /Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit/docs/initiatives/2026-09-project-kit-and-library
+- $VIBE_CODE/webmcp-automation-kit/packages/webmcp-project-kit
+- $VIBE_CODE/webmcp-project-library
+- $VIBE_CODE/webmcp-automation-kit/docs/initiatives/2026-09-project-kit-and-library
 
 xoay quanh nội dung sau:
 

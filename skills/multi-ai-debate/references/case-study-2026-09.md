@@ -1,6 +1,6 @@
 # Case study — 2026-09-10 Phase 2 Project Kit debate (reference run)
 
-Program root: `/Users/ttcenter/Desktop/VIBE_CODE/temp/phase2-debate-20260910/`
+Program root: `$VIBE_CODE/temp/phase2-debate-20260910/`
 (kept as the worked example: prompts, 15 outputs, ledger, final report, receipt).
 
 ## Shape

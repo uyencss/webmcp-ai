@@ -118,7 +118,7 @@ if (rawRefs) {
   const list = rawRefs.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
   refsText = list.map((r) => `- \`${r}\``).join('\n');
 } else {
-  refsText = '- `/Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit`\n- *(Bổ sung các tài liệu, PRD, spec hoặc đường dẫn mã nguồn liên quan)*';
+  refsText = '- `$VIBE_CODE/webmcp-automation-kit`\n- *(Bổ sung các tài liệu, PRD, spec hoặc đường dẫn mã nguồn liên quan)*';
 }
 
 const modInfo = roles.moderator?.route === 'coordinator'
