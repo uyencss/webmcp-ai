@@ -1,0 +1,495 @@
+{
+  "cross-exam": {
+    "id": "cross-exam",
+    "name": "Chất vấn chéo (Cross-examination)",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Quan điểm độc lập",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "cross-exam",
+        "label": "Chất vấn chéo",
+        "perDebater": false
+      },
+      {
+        "n": 3,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "uniform",
+    "defaultStances": {
+      "neutral": [
+        "*"
+      ]
+    },
+    "resolver": "majority-vote",
+    "visibility": "full-anon",
+    "when": "Mặc định. Tranh biện thiết kế có trọng tài: R1 độc lập, R2 thấy toàn bộ R1 ẩn danh, R3 biểu quyết.",
+    "cost": "3 vòng",
+    "refs": [
+      "Du et al. 2023",
+      "Smit et al. 2024"
+    ]
+  },
+  "delphi": {
+    "id": "delphi",
+    "name": "Delphi (ẩn danh lặp)",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Vòng 1 độc lập",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "delphi",
+        "label": "Vòng 2 — chỉ đọc tổng hợp ẩn danh",
+        "perDebater": false
+      },
+      {
+        "n": 3,
+        "kind": "delphi",
+        "label": "Vòng 3 — chỉnh vị trí",
+        "perDebater": false
+      },
+      {
+        "n": 4,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "uniform",
+    "defaultStances": {
+      "neutral": [
+        "*"
+      ]
+    },
+    "resolver": "consensus-threshold",
+    "visibility": "aggregate-only",
+    "when": "Cần đồng thuận ổn định, giảm hiệu ứng nịnh/theo đám; không muốn debater thấy danh tính hay lập luận đầy đủ của nhau.",
+    "cost": "4 vòng",
+    "refs": [
+      "Delphi method (RAND)",
+      "Dalkey & Helmer"
+    ]
+  },
+  "red-team": {
+    "id": "red-team",
+    "name": "Red team vs Blue team",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Đề xuất ban đầu",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "attack",
+        "label": "Tấn công (red team)",
+        "perDebater": true
+      },
+      {
+        "n": 3,
+        "kind": "attack",
+        "label": "Phòng thủ & sửa (blue team)",
+        "perDebater": true
+      },
+      {
+        "n": 4,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "pair",
+    "defaultStances": {
+      "D1": "attacker",
+      "D2": "defender",
+      "D3": "attacker",
+      "D4": "defender",
+      "D5": "attacker"
+    },
+    "resolver": "majority-vote",
+    "visibility": "full-anon",
+    "when": "Thiết kế/ hệ thống security-critical hoặc cần phá giả định: một nửa lane đóng vai tấn công, một nửa phòng thủ.",
+    "cost": "4 vòng",
+    "refs": [
+      "RedDebate 2025/2026 (arXiv 2506.11083)",
+      "Asad et al. 2025"
+    ]
+  },
+  "devil-advocate": {
+    "id": "devil-advocate",
+    "name": "Devil's advocate (một lane phản biện chuyên trách)",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Đề xuất ban đầu",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "challenge",
+        "label": "Devil phản biện",
+        "perDebater": true
+      },
+      {
+        "n": 3,
+        "kind": "respond",
+        "label": "Bảo vệ / điều chỉnh",
+        "perDebater": true
+      },
+      {
+        "n": 4,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "assigned",
+    "defaultStances": {
+      "D1": "devil"
+    },
+    "resolver": "majority-vote",
+    "visibility": "full-anon",
+    "when": "Có một phương án gần như đồng thuận, cần một lane chuyên đóng vai phản biện mạnh để tránh groupthink.",
+    "cost": "4 vòng",
+    "refs": [
+      "Devil's advocate (groupthink, Janis 1972)"
+    ]
+  },
+  "socratic": {
+    "id": "socratic",
+    "name": "Socratic (một lane chỉ đặt câu hỏi)",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Đề xuất ban đầu",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "questions",
+        "label": "Câu hỏi Socratic",
+        "perDebater": true
+      },
+      {
+        "n": 3,
+        "kind": "respond",
+        "label": "Trả lời & làm rõ",
+        "perDebater": true
+      },
+      {
+        "n": 4,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "assigned",
+    "defaultStances": {
+      "D1": "socratic"
+    },
+    "resolver": "majority-vote",
+    "visibility": "full-anon",
+    "when": "Cần moi giả định ngầm và lỗ hổng lập luận thay vì bênh/bác trực tiếp.",
+    "cost": "4 vòng",
+    "refs": [
+      "Socratic Refinement Debate (RedDebate 2025)",
+      "Paul & Elder 2008"
+    ]
+  },
+  "steelman": {
+    "id": "steelman",
+    "name": "Steelman + Pre-mortem",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Đề xuất ban đầu",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "steelman",
+        "label": "Dựng phương án mạnh nhất của người khác",
+        "perDebater": true
+      },
+      {
+        "n": 3,
+        "kind": "premortem",
+        "label": "Pre-mortem: giả sử đã thất bại, vì sao?",
+        "perDebater": true
+      },
+      {
+        "n": 4,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "uniform",
+    "defaultStances": {
+      "neutral": [
+        "*"
+      ]
+    },
+    "resolver": "majority-vote",
+    "visibility": "full-anon",
+    "when": "Chọn giữa vài phương án đều hợp lý; cần hiểu điểm mạnh thật của đối thủ và rủi ro thất bại trước khi chốt.",
+    "cost": "4 vòng",
+    "refs": [
+      "Steelman (Rapoport)",
+      "Pre-mortem (Klein 2007)"
+    ]
+  },
+  "six-hats": {
+    "id": "six-hats",
+    "name": "Sáu chiếc mũ (de Bono)",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Đề xuất theo mũ được giao",
+        "perDebater": true
+      },
+      {
+        "n": 2,
+        "kind": "cross-exam",
+        "label": "Chất vấn chéo giữa các mũ",
+        "perDebater": true
+      },
+      {
+        "n": 3,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "assigned",
+    "defaultStances": {
+      "D1": "hat-white",
+      "D2": "hat-red",
+      "D3": "hat-yellow",
+      "D4": "hat-black",
+      "D5": "hat-green"
+    },
+    "resolver": "majority-vote",
+    "visibility": "full-anon",
+    "when": "Cần quét đủ 6 lăng kính (dữ kiện, cảm xúc, lợi ích, rủi ro, sáng tạo, điều phối) cho một quyết định.",
+    "cost": "3 vòng",
+    "refs": [
+      "de Bono, Six Thinking Hats 1985"
+    ]
+  },
+  "jury": {
+    "id": "jury",
+    "name": "Bồi thẩm đoàn / Toà án",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Khai mạc: luận điểm mỗi bên",
+        "perDebater": true
+      },
+      {
+        "n": 2,
+        "kind": "cross-exam",
+        "label": "Đối chất",
+        "perDebater": true
+      },
+      {
+        "n": 3,
+        "kind": "judge",
+        "label": "Bồi thẩm/nghị án",
+        "perDebater": false
+      }
+    ],
+    "stanceMode": "pair",
+    "defaultStances": {
+      "D1": "prosecution",
+      "D2": "defence",
+      "D3": "prosecution",
+      "D4": "defence",
+      "D5": "juror"
+    },
+    "resolver": "judge-panel",
+    "visibility": "full-anon",
+    "when": "Có bên ủng hộ và bên phản đối rõ ràng, cần một hội đồng ra phán quyết có lý do.",
+    "cost": "3 vòng",
+    "refs": [
+      "Prosecution/defence stances (MAD survey 2026)"
+    ]
+  },
+  "consensus-conference": {
+    "id": "consensus-conference",
+    "name": "Hội nghị đồng thuận (NIH-style)",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Trình bày bằng chứng",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "cross-exam",
+        "label": "Chất vấn chéo",
+        "perDebater": false
+      },
+      {
+        "n": 3,
+        "kind": "vote",
+        "label": "Tuyên bố đồng thuận + veto",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "uniform",
+    "defaultStances": {
+      "neutral": [
+        "*"
+      ]
+    },
+    "resolver": "supermajority-veto",
+    "visibility": "full-anon",
+    "when": "Cần một tuyên bố đồng thuận mạnh, có quyền veto cá nhân; quyết định ảnh hưởng lớn, khó đảo ngược.",
+    "cost": "3 vòng",
+    "refs": [
+      "NIH Consensus Development Conference"
+    ]
+  },
+  "confidence-weighted": {
+    "id": "confidence-weighted",
+    "name": "Cross-exam + confidence hiệu chỉnh",
+    "kind": "generic",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Đề xuất + confidence",
+        "perDebater": false
+      },
+      {
+        "n": 2,
+        "kind": "cross-exam",
+        "label": "Chất vấn chéo có trọng số confidence",
+        "perDebater": false
+      },
+      {
+        "n": 3,
+        "kind": "vote",
+        "label": "Biểu quyết + confidence",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "uniform",
+    "defaultStances": {
+      "neutral": [
+        "*"
+      ]
+    },
+    "resolver": "confidence-weighted",
+    "visibility": "full-anon",
+    "when": "Câu hỏi reasoning có đáp án đúng/sai tương đối; cần phá thế martingale của majority vote thường.",
+    "cost": "3 vòng",
+    "refs": [
+      "Demystifying MAD: confidence & diversity (ACL Findings 2026)"
+    ]
+  },
+  "tournament": {
+    "id": "tournament",
+    "name": "Đấu loại trực tiếp (bracket)",
+    "kind": "manual",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Vòng bảng: mỗi lane một phương án",
+        "perDebater": true
+      },
+      {
+        "n": 2,
+        "kind": "cross-exam",
+        "label": "Bán kết: đối đầu từng cặp",
+        "perDebater": false
+      },
+      {
+        "n": 3,
+        "kind": "vote",
+        "label": "Chung kết",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "uniform",
+    "defaultStances": {
+      "neutral": [
+        "*"
+      ]
+    },
+    "resolver": "majority-vote",
+    "visibility": "full-anon",
+    "when": "Nhiều phương án (>4) cần sàng lọc dần; trọng tài phải tự ghép cặp.",
+    "cost": "3+ vòng",
+    "refs": [
+      "Bracket/tournament selection"
+    ]
+  },
+  "map-reduce": {
+    "id": "map-reduce",
+    "name": "Map-Reduce (chia nhỏ rồi tổng hợp)",
+    "kind": "manual",
+    "rounds": [
+      {
+        "n": 1,
+        "kind": "independent",
+        "label": "Mỗi lane một phần/câu hỏi con",
+        "perDebater": true
+      },
+      {
+        "n": 2,
+        "kind": "delphi",
+        "label": "Tổng hợp chéo các phần",
+        "perDebater": false
+      },
+      {
+        "n": 3,
+        "kind": "vote",
+        "label": "Biểu quyết chốt",
+        "perDebater": true
+      }
+    ],
+    "stanceMode": "uniform",
+    "defaultStances": {
+      "neutral": [
+        "*"
+      ]
+    },
+    "resolver": "moderator-summary",
+    "visibility": "full-anon",
+    "when": "Bài toán lớn cắt được thành nhiều phần ít phụ thuộc; ưu tiên độ phủ hơn đối chất.",
+    "cost": "3 vòng",
+    "refs": [
+      "Map-reduce debate (MAD survey 2026)"
+    ]
+  }
+}

@@ -74,7 +74,7 @@ Trước khi kích hoạt writer nặng hoặc chạy review:
    ```
 2. **Luật kích hoạt Fallback theo Quota**:
    - **Nếu ATLAS Codex 5h window = 0%**:
-     - Thử route sang node **ORBIT** (Mac M1 qua Tailscale): `ssh mac-m1 'codex exec --model gpt-5.6-sol ...'`.
+     - Thử route sang node **ORBIT** (Mac M1 qua Tailscale): `ssh mac-m1 'codex exec --model gpt-6-sol ...'`.
      - Nếu ORBIT cũng cạn: Chuyển Reviewer L2 sang Direct Claude Code CLI (nếu Weekly $\ge 20\%$) hoặc kích hoạt fallback `opencode-go/deepseek-v4.1-flash`.
    - **Nếu Claude Code Weekly < 20%**:
      - Khóa Direct Claude Code CLI để bảo tồn quota khẩn cấp.
@@ -154,7 +154,7 @@ Mọi lần dispatch review/writer phải lưu receipt kèm thông tin lineage t
 - **Timestamp**: <YYYY-MM-DD HH:mm:ss>
 - **Role**: <orchestrator | writer | reviewer_l1 | reviewer_l2 | auditor>
 - **Dispatched Route**: <codex | agy | opencode | claude-cli>
-- **Exact Model ID**: <vd: opencode-go/deepseek-v4.1-flash | gpt-5.6-sol>
+- **Exact Model ID**: <vd: opencode-go/deepseek-v4.1-flash | gpt-6-sol>
 - **Fallback Triggered**: <None | Quota ATLAS 5h=0% | Lineage swap | Network timeout>
 - **Node**: <ATLAS | ORBIT>
 - **Input Prompt SHA-256**: <hash>

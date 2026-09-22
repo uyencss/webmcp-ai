@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "strategy": "cross-exam",
+  "moderator": {
+    "id": "M0",
+    "label": "Chủ trì",
+    "lane": "coordinator",
+    "route": "coordinator",
+    "model": null,
+    "effort": null,
+    "options": {},
+    "note": "Mặc định: agent đang chạy skill làm trọng tài (coordinator). Đổi route/model/lane để dùng một AI chủ trì."
+  },
+  "debaters": [
+    {
+      "id": "D1",
+      "label": "Phản biện 1",
+      "lane": "agy-claude",
+      "route": "agy",
+      "model": "claude-opus-4-6-thinking",
+      "effort": null,
+      "options": { "agentMode": "plan" },
+      "stance": "neutral"
+    },
+    {
+      "id": "D2",
+      "label": "Phản biện 2",
+      "lane": "claude-cli",
+      "route": "claude-cli",
+      "model": "claude-opus-5-5",
+      "alias": "opus",
+      "effort": "high",
+      "options": { "restricted": true },
+      "stance": "neutral",
+      "note": "Claude Code CLI với model Opus 5.5 mới (claude-opus-5-5 / alias opus)."
+    },
+    {
+      "id": "D3",
+      "label": "Phản biện 3",
+      "lane": "codex",
+      "route": "codex",
+      "model": "gpt-6-sol",
+      "effort": "high",
+      "options": { "sandbox": "read-only", "ephemeral": true, "skipGitRepoCheck": true },
+      "stance": "neutral",
+      "note": "Native Codex Sol với GPT-6-Sol (gpt-6-sol, reasoning effort high)."
+    },
+    {
+      "id": "D4",
+      "label": "Phản biện 4",
+      "lane": "agy-flash",
+      "route": "agy",
+      "model": "gemini-3.8-flash-high",
+      "effort": "high",
+      "options": { "agentMode": "plan" },
+      "stance": "neutral"
+    },
+    {
+      "id": "D5",
+      "label": "Phản biện 5",
+      "lane": "muse",
+      "route": "opencode",
+      "model": "opencode-go/muse-spark-1.3-contributor",
+      "effort": "xhigh",
+      "options": { "agentMode": "plan" },
+      "stance": "neutral"
+    }
+  ]
+}
