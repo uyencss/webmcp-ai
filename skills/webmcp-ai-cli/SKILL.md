@@ -281,14 +281,77 @@ empty MCP/plugins) instead of inheriting the shared background service.
 
 ## Native AI CLI Matrix & Cheatsheet
 
-For direct native CLI invocations (bypassing the wrapper when needed or running raw shell tasks), use the verified 1-shot headless syntax below (full guide at [`docs/references/native-cli-matrix.md`](../../docs/references/native-cli-matrix.md)):
+Bảng tra cứu cú pháp gọi 1-shot headless và quy tắc trích xuất cho các AI CLI trên toàn cụm máy (ATLAS & Mac M1). Mọi Agent có thể sao chép và thực thi ngay mà không cần gọi `--help`:
 
-| Provider | Model | CLI Command (Headless 1-Shot) | Output Extraction | Critical Invariant |
-|---|---|---|---|---|
-| **Codex** | `gpt-6-sol`<br>`gpt-5.6-luna` | `codex exec --model <m> --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never --output-last-message out.md - < prompt.txt` | `out.md` (clean text) | **MUST** have `--skip-git-repo-check` and trailing `-` for stdin. |
-| **Claude** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude -p --model <m> --effort high --output-format json --restricted < prompt.txt > out.json` | JSON `.result` | **MUST** have `-p` to prevent interactive TUI; `--restricted` strips write tools. |
-| **OpenCode** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode run --standalone --format json --agent plan --model <m> < prompt.txt > out.json` | Stdout text or JSON | **DO NOT** override `OPENCODE_DB` to an unsynced file (breaks Go subscription). |
-| **AGY** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | Via wrapper: `webmcp-ai generate --provider agy --model <m> [--effort high] --prompt "..." --json` | JSON `response.text` | Claude Opus 4.6 does **NOT** support `--effort` (exits 1). Flash supports `--effort high`. |
+### 1. Bảng Tổng Hợp Nhanh
+
+| Provider | Model Chủ Lực | CLI Command (Headless 1-Shot) | Input Prompt | Trích Xuất Kết Quả | Lưu Ý Sống Còn |
+|---|---|---|---|---|---|
+| **Codex** | `gpt-6-sol`<br>`gpt-5.6-luna` | `codex exec --model <m> --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never --output-last-message <f.md> - < <prompt>` | Stdin + `-` | File `<f.md>` (văn bản sạch) | **BẮT BUỘC** `--skip-git-repo-check` trên Codex 0.155.0+. Thiếu `-` ở cuối sẽ bị treo prompt. |
+| **Claude** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude -p --model <m> --effort high --output-format json --restricted < <prompt> > out.json` | Stdin `< prompt` | JSON `.result` | **BẮT BUỘC** `-p` để tránh interactive TUI. `--restricted` tắt tools can thiệp shell/code. |
+| **OpenCode** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode run --standalone --format json --agent plan --model <m> < <prompt> > out.json` | Stdin `< prompt` hoặc đối số chuỗi | Stdout text hoặc JSON | **KHÔNG** ép biến `OPENCODE_DB` sang file DB rỗng/chưa sync vì sẽ mất quyền subscription Go models. |
+| **AGY** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | `node "$AI_CLI" generate --provider agy --model <m> [--effort high] --prompt "..." --json` | `--prompt` hoặc stdin | JSON `response.text` | Claude Opus 4.6 **KHÔNG** hỗ trợ `--effort` (exits 1). Flash hỗ trợ `--effort high`. |
+| **WebMCP AI** | Mọi model trên | `node "$AI_CLI" generate --provider <p> --model <m> --prompt-file <f> --json` | `--prompt-file` | JSON `response.text` | Wrapper thống nhất tự động cô lập workspace, auto-sync credentials, chuẩn hóa `error.code`. |
+
+### 2. Mẫu Lệnh Headless 1-Shot Chi Tiết
+
+#### A. Codex CLI (Native)
+```bash
+# Model: gpt-6-sol (primary reviewer/reasoner) hoặc gpt-5.6-luna (orchestrator)
+codex exec \
+  --model gpt-6-sol \
+  --sandbox read-only \
+  --ephemeral \
+  --skip-git-repo-check \
+  -c model_reasoning_effort=high \
+  -c approval_policy=never \
+  --output-last-message "/path/to/response.md" \
+  - < "/path/to/prompt.txt" > /path/to/events.jsonl 2> /path/to/stderr.log
+```
+- Phản hồi hoàn chỉnh được ghi vào `--output-last-message`; stdout chứa stream JSONL.
+
+#### B. Claude Code CLI (Native)
+```bash
+# Model: claude-opus-5-5 (alias opus) hoặc claude-sonnet-4-6
+claude -p \
+  --model claude-opus-5-5 \
+  --effort high \
+  --output-format json \
+  --restricted \
+  < "/path/to/prompt.txt" > "/path/to/out.json" 2> "/path/to/stderr.log"
+```
+- Đọc nội dung phản hồi tại thuộc tính `.result` trong JSON; kiểm tra `.is_error`.
+
+#### C. OpenCode CLI v2 (Native)
+```bash
+# Model: opencode-go/deepseek-v4.1-flash hoặc opencode-go/muse-spark-1.3-contributor
+# Cách 1 (chuỗi prompt):
+opencode run --standalone --model opencode-go/deepseek-v4.1-flash "Nội dung prompt"
+
+# Cách 2 (nhận prompt từ file):
+opencode run --standalone --format json --agent plan --model opencode-go/deepseek-v4.1-flash \
+  < "/path/to/prompt.txt" > "/path/to/out.json" 2> "/path/to/stderr.log"
+```
+- Tránh ghi đè `OPENCODE_DB` thủ công; OpenCode v2 quản lý subscription qua bảng `credential` trong `opencode.db`.
+
+#### D. WebMCP AI CLI Wrapper (Thống Nhất Đa Provider)
+```bash
+# DeepSeek v4.1 Flash:
+node "$AI_CLI" generate --provider opencode --model opencode-go/deepseek-v4.1-flash --prompt-file "/path/prompt.txt" --workspace "$PWD" --agent-mode plan --json
+
+# Codex gpt-6-sol:
+node "$AI_CLI" generate --provider codex --model gpt-6-sol --effort high --prompt-file "/path/prompt.txt" --json
+
+# Gemini 3.8 Flash (AGY):
+node "$AI_CLI" generate --provider agy --model gemini-3.8-flash-high --effort high --prompt-file "/path/prompt.txt" --json
+```
+
+### 3. Preflight & Fallback Rules Cho Agent
+1. **Kiểm tra Quota**: `node /Users/ttcenter/Desktop/VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`
+2. **Fallback khi hết Quota**:
+   - Codex ATLAS 5h = 0% $\rightarrow$ Route sang Mac M1 (`ssh mac-m1 'codex exec ...'`) hoặc đổi Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
+   - Claude Weekly < 20% $\rightarrow$ Ưu tiên AGY Claude / Gemini Flash để bảo vệ quota Claude Code CLI.
+3. **Lineage Honesty**: Ghi đúng provider/model vào ledger; không ngụy tạo tên route.
 
 ## Safety
 
