@@ -1,6 +1,6 @@
 # Native AI CLI Invocation Matrix & Cheatsheet
 
-Tài liệu chuẩn hóa cú pháp gọi **Native AI CLI** và **WebMCP AI CLI Wrapper** trên toàn cụm máy (ATLAS local và ORBIT / Mac M1 remote). 
+Tài liệu chuẩn hóa cú pháp gọi **Native AI CLI** và **WebMCP AI CLI Wrapper** trên toàn cụm máy (ATLAS local và ORBIT / Mac M1 remote).
 Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho mọi AI Agent/Coordinator, loại bỏ hoàn toàn nhu cầu phải chạy `--help` gây tốn token và lượt gọi tool.
 
 ---
