@@ -281,7 +281,14 @@ empty MCP/plugins) instead of inheriting the shared background service.
 
 ## Native AI CLI Matrix & Cheatsheet
 
-For direct native CLI invocations (bypassing the wrapper when needed or running raw shell tasks), refer to the comprehensive cheatsheet at [`docs/native-cli-matrix.md`](../../docs/native-cli-matrix.md). It documents exact 1-shot headless syntax, required non-interactive flags, prompt piping conventions, and output extraction rules for Codex (`gpt-6-sol`, `gpt-5.6-luna`), Claude Code CLI (`claude-opus-5-5`, `opus`), OpenCode v2 (`opencode-go/deepseek-v4.1-flash`), and AGY.
+For direct native CLI invocations (bypassing the wrapper when needed or running raw shell tasks), use the verified 1-shot headless syntax below (full guide at [`docs/references/native-cli-matrix.md`](../../docs/references/native-cli-matrix.md)):
+
+| Provider | Model | CLI Command (Headless 1-Shot) | Output Extraction | Critical Invariant |
+|---|---|---|---|---|
+| **Codex** | `gpt-6-sol`<br>`gpt-5.6-luna` | `codex exec --model <m> --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never --output-last-message out.md - < prompt.txt` | `out.md` (clean text) | **MUST** have `--skip-git-repo-check` and trailing `-` for stdin. |
+| **Claude** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude -p --model <m> --effort high --output-format json --restricted < prompt.txt > out.json` | JSON `.result` | **MUST** have `-p` to prevent interactive TUI; `--restricted` strips write tools. |
+| **OpenCode** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode run --standalone --format json --agent plan --model <m> < prompt.txt > out.json` | Stdout text or JSON | **DO NOT** override `OPENCODE_DB` to an unsynced file (breaks Go subscription). |
+| **AGY** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | Via wrapper: `webmcp-ai generate --provider agy --model <m> [--effort high] --prompt "..." --json` | JSON `response.text` | Claude Opus 4.6 does **NOT** support `--effort` (exits 1). Flash supports `--effort high`. |
 
 ## Safety
 
