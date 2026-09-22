@@ -276,8 +276,12 @@ database file; a missing or empty override fails closed as
 V2 (beta) resolves contention architecturally through a background server that
 serializes all writes. The wrapper still sets `OPENCODE_DB` on v2 and adds
 `--standalone` per spawn, so the private server starts with the invocation
-env/config (isolated DB, wrapper `permissions`, empty MCP/plugins) instead of
-inheriting the shared background service.
+env/config (isolated DB with synchronized credentials, wrapper `permissions`,
+empty MCP/plugins) instead of inheriting the shared background service.
+
+## Native AI CLI Matrix & Cheatsheet
+
+For direct native CLI invocations (bypassing the wrapper when needed or running raw shell tasks), refer to the comprehensive cheatsheet at [`docs/native-cli-matrix.md`](../../docs/native-cli-matrix.md). It documents exact 1-shot headless syntax, required non-interactive flags, prompt piping conventions, and output extraction rules for Codex (`gpt-6-sol`, `gpt-5.6-luna`), Claude Code CLI (`claude-opus-5-5`, `opus`), OpenCode v2 (`opencode-go/deepseek-v4.1-flash`), and AGY.
 
 ## Safety
 

@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 import { buildOpenCodeConfig } from '../capabilities.mjs';
 import { AiCliError } from '../errors.mjs';
@@ -243,6 +244,18 @@ export function resolveUserOpenCodeProviders(env, { homeDir = homedir() } = {}) 
   return null;
 }
 
+export function syncOpencodeCredentials(targetDb) {
+  try {
+    const home = homedir();
+    const mainDb = join(home, '.local', 'share', 'opencode', 'opencode.db');
+    if (!existsSync(mainDb) || !existsSync(targetDb) || targetDb === mainDb) return;
+    execFileSync('sqlite3', [
+      targetDb,
+      `ATTACH DATABASE '${mainDb.replace(/'/g, "''")}' AS src; DELETE FROM credential; INSERT INTO credential SELECT * FROM src.credential;`
+    ], { stdio: 'ignore', timeout: 2000 });
+  } catch {}
+}
+
 /**
  * Allocate the private per-invocation config boundary and roll it back if any
  * setup step throws: callers only receive the cleanup hook after a fully
@@ -273,9 +286,11 @@ function createIsolatedOpencodeRuntime(request, baseConfig) {
     // OPENCODE_CONFIG points at the same content as OPENCODE_CONFIG_CONTENT
     // for defense-in-depth.
     writeFileSync(openCodeConfig, JSON.stringify(effectiveConfig, null, 2), 'utf8');
+    const dbPath = resolveOpencodeCliDb(request.env);
+    syncOpencodeCredentials(dbPath);
     return {
       env: {
-        OPENCODE_DB: resolveOpencodeCliDb(request.env),
+        OPENCODE_DB: dbPath,
         XDG_CONFIG_HOME: xdgConfigHome,
         OPENCODE_CONFIG: openCodeConfig,
         OPENCODE_CONFIG_DIR: openCodeConfigDir,
