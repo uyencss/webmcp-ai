@@ -1,0 +1,309 @@
+{
+  "schema": "webmcp-role-manifest/1",
+  "version": 7,
+  "lastUpdated": "2026-09-22",
+  "description": "Role-based AI model dispatch matrix and fallback rules for WebMCP AI Orchestration",
+  "invariants": {
+    "opencodeExclusivity": {
+      "allowedLineages": [
+        "DeepSeek",
+        "Muse"
+      ],
+      "allowedModels": [
+        "opencode-go/deepseek-v4.1-flash",
+        "9router/deepseek-v4.1-flash",
+        "opencode-go/muse-spark-1.3-contributor"
+      ],
+      "allowedSubagents": [
+        "deepseek-v4.1-flash",
+        "muse-spark-1.3-contributor"
+      ],
+      "bannedInOpenCode": [
+        "Claude",
+        "GPT",
+        "Sol",
+        "Luna",
+        "Gemini"
+      ],
+      "rationale": "Nghiêm cấm spawn các model Claude, GPT, Sol/Luna hay Gemini qua OpenCode. Phải dùng CLI gốc hoặc WebMCP wrapper tương ứng.",
+      "exception9Router": "Custom provider 9router (operator-owned baseURL+apiKey trong opencode.jsonc, billing riêng 9Router/DO pool) ĐƯỢC PHÉP gọi qua opencode binary với lineage trung thực 'opencode → 9router/<model>' trong receipt. Vẫn CẤM alias opencode/* Claude/GPT và opencode-go/* ngoài DeepSeek/Muse. TUYỆT ĐỐI KHÔNG dùng GLM làm fallback.",
+      "exceptionStealth": "REMOVED 2026-09-18 per operator: model opencode-go/union-alpha no longer in provider list (Model unavailable); union-alpha/union-stealth agents retired from writer rotation. Writer = Muse 1.3 primary, AGY fallbacks."
+    },
+    "deepseekCostAlert": {
+      "mandatoryModel": "opencode-go/deepseek-v4.1-flash",
+      "strictlyBannedModels": [
+        "opencode-go/deepseek-v4-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4"
+      ],
+      "rationale": "BẮT BUỘC dùng đúng v4.1 flash (opencode-go/deepseek-v4.1-flash). TUYỆT ĐỐI KHÔNG dùng v4 flash hay v4 pro vì chi phí cực kỳ đắt đỏ."
+    },
+    "deepseekWriterBan": {
+      "bannedRoles": [
+        "writer"
+      ],
+      "strictlyBannedLineages": [
+        "DeepSeek"
+      ],
+      "strictlyBannedModels": [
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/deepseek-v4-flash",
+        "do/deepseek-v4-flash-0731",
+        "9router/deepseek-v4-flash-0731",
+        "deepseek-v4.1-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4"
+      ],
+      "rationale": "TUYỆT ĐỐI CẤM dùng DeepSeek (kể cả DeepSeek v4.1 flash hoặc bất kỳ biến thể DeepSeek nào) làm Writer. Writer chỉ được dùng Muse 1.3 (primary) hoặc AGY Gemini Flash / Claude Sonnet (fallback). TUYỆT ĐỐI KHÔNG dùng GLM làm fallback. DeepSeek CHỈ ĐƯỢC PHÉP dùng làm fallback khẩn cấp cho Orchestrator hoặc Reviewer Lớp 2 (khi Sol/Claude cạn quota)."
+    },
+    "glmFallbackBan": {
+      "strictlyBannedAsFallback": [
+        "9router/glm-5.3-flash",
+        "glm-5.3-flash",
+        "glm"
+      ],
+      "rationale": "TUYỆT ĐỐI KHÔNG dùng GLM (kể cả 9router/glm-5.3-flash) làm fallback cho Writer hoặc các role khác trong ma trận điều phối."
+    },
+    "quotaPreflightEndpoint": "http://127.0.0.1:8421/api/quotas?all=1",
+    "lineageHonesty": "Receipts và logs phải ghi đúng lineage thực tế, không được dán nhãn OpenCode alias là native Sol/Luna."
+  },
+  "roles": {
+    "orchestrator": {
+      "id": "orchestrator",
+      "name": "Orchestrator / Coordinator",
+      "description": "Chủ trì điều phối, quản lý kế hoạch, quản lý write-set, phân rã task, tổng hợp tiến độ và kiểm soát gate.",
+      "permissions": {
+        "canCommit": true,
+        "canPromote": true,
+        "canSelfReview": false
+      },
+      "dispatch": {
+        "primary": {
+          "route": "codex",
+          "model": "gpt-5.6-luna",
+          "reasoningEffort": "max",
+          "node": "ATLAS",
+          "command": "codex exec --model gpt-5.6-luna -c model_reasoning_effort=max"
+        },
+        "fallbacks": [
+          {
+            "priority": 1,
+            "trigger": "Codex local quota exhausted (5h window = 0%)",
+            "route": "opencode",
+            "model": "opencode-go/deepseek-v4.1-flash",
+            "effort": "high",
+            "node": "ATLAS",
+            "command": "OPENCODE_BIN=\"$HOME/.opencode/bin/opencode\" node \"$AI_CLI\" generate --provider opencode --model opencode-go/deepseek-v4.1-flash --effort high"
+          },
+          {
+            "priority": 2,
+            "trigger": "Provider routes offline / Interactive coordination mode",
+            "route": "coordinator",
+            "model": "current-agent",
+            "note": "Agent IDE/CLI đang chủ trì trực tiếp phiên làm việc."
+          }
+        ]
+      }
+    },
+    "writer": {
+      "id": "writer",
+      "name": "Primary Writer",
+      "description": "Thực hiện sinh mã, chỉnh sửa file trong write-set được chỉ định. Mỗi write-set rời rạc có 1 writer duy nhất.",
+      "permissions": {
+        "canCommit": false,
+        "canPromote": false,
+        "canSelfReview": false
+      },
+      "dispatch": {
+        "primary": {
+          "route": "opencode",
+          "model": "opencode-go/muse-spark-1.3-contributor",
+          "effort": "xhigh",
+          "node": "ATLAS",
+          "command": "OPENCODE_BIN=\"$HOME/.opencode/bin/opencode\" node \"$AI_CLI\" generate --provider opencode --model opencode-go/muse-spark-1.3-contributor --effort xhigh",
+          "note": "Writer chính duy nhất (union-alpha retired 2026-09-18)."
+        },
+        "primaryLanes": [
+          {
+            "id": "muse-1.3",
+            "name": "Muse Spark 1.3 Contributor",
+            "route": "opencode",
+            "model": "opencode-go/muse-spark-1.3-contributor",
+            "effort": "xhigh",
+            "node": "ATLAS",
+            "command": "OPENCODE_BIN=\"$HOME/.opencode/bin/opencode\" node \"$AI_CLI\" generate --provider opencode --model opencode-go/muse-spark-1.3-contributor --effort xhigh"
+          }
+        ],
+        "fallbacks": [
+          {
+            "priority": 1,
+            "trigger": "Muse route unavailable or parallel disjoint write-set",
+            "route": "agy",
+            "model": "gemini-3.8-flash-high",
+            "effort": "high",
+            "node": "ATLAS",
+            "command": "AGY_BIN=\"$HOME/.local/bin/agy\" node \"$AI_CLI\" generate --provider agy --model gemini-3.8-flash-high --effort high"
+          },
+          {
+            "priority": 2,
+            "trigger": "Complex architectural writer lane (high reasoning required)",
+            "route": "agy",
+            "model": "claude-sonnet-4-6",
+            "effort": null,
+            "node": "ATLAS",
+            "command": "AGY_BIN=\"$HOME/.local/bin/agy\" node \"$AI_CLI\" generate --provider agy --model claude-sonnet-4-6"
+          }
+        ]
+      }
+    },
+    "reviewer_l1": {
+      "id": "reviewer_l1",
+      "name": "Reviewer Layer 1 (Pre-acceptance / Hygiene / Review phụ / Tests)",
+      "description": "Đánh giá sơ bộ diffs, kiểm tra cú pháp, convention, unit/integration test, schema invariants và lint.",
+      "swapRule": "TUYỆT ĐỐI KHÔNG để model writer tự review chính diff của mình (No self-review). Nếu Writer là Muse -> Reviewer L1 pre-accept / review phụ là AGY Gemini Flash / Claude Sonnet (swap lineage). Nếu Writer là AGY (fallback) -> Reviewer L1 pre-accept / review phụ là Muse 1.3 (tuân swapRule).",
+      "dispatch": {
+        "primary": {
+          "route": "agy",
+          "model": "gemini-3.8-flash-high",
+          "effort": "high",
+          "node": "ATLAS",
+          "condition": "Primary pre-accept & review phụ lane (lineage swap khi Writer là Muse 1.3)",
+          "note": "Reviewer pre-accept / review phụ chính qua AGY Gemini Flash High (tuân swapRule)."
+        },
+        "parallelLanes": [
+          {
+            "id": "muse-co-reviewer",
+            "trigger": "Chạy làm reviewer phụ / pre-accept khi Writer KHÔNG phải Muse (ví dụ Writer là AGY fallback, tuân swapRule)",
+            "route": "opencode",
+            "model": "opencode-go/muse-spark-1.3-contributor",
+            "effort": "xhigh",
+            "node": "ATLAS",
+            "command": "OPENCODE_BIN=\"$HOME/.opencode/bin/opencode\" node \"$AI_CLI\" generate --provider opencode --model opencode-go/muse-spark-1.3-contributor --effort xhigh"
+          }
+        ],
+        "fallbacks": [
+          {
+            "priority": 1,
+            "trigger": "Writer was Muse (lineage swap) or mechanical test closure",
+            "route": "agy",
+            "model": "gemini-3.8-flash-high",
+            "effort": "high",
+            "node": "ATLAS"
+          },
+          {
+            "priority": 2,
+            "trigger": "Deep architectural pre-audit required",
+            "route": "agy",
+            "model": "claude-sonnet-4-6",
+            "effort": null,
+            "node": "ATLAS"
+          },
+          {
+            "priority": 3,
+            "trigger": "Deep pre-acceptance audit via 9Router pool (operator-approved exception, same Opus lineage when AGY route is down)",
+            "route": "opencode",
+            "model": "9router/claude-opus-4-6-thinking",
+            "effort": null,
+            "node": "ATLAS",
+            "command": "OPENCODE_BIN=\"$HOME/.opencode/bin/opencode\" node \"$AI_CLI\" generate --provider opencode --model 9router/claude-opus-4-6-thinking",
+            "note": "Không kèm --effort (model-capabilities: supportsEffort false). Receipt ghi 'opencode → 9router/claude-opus-4-6-thinking'."
+          }
+        ]
+      }
+    },
+    "reviewer_l2": {
+      "id": "reviewer_l2",
+      "name": "Reviewer Layer 2 (Milestone & Final Acceptance Gate)",
+      "description": "Độc lập thẩm định toàn diện logic, an toàn, hồi quy và ranh giới hệ thống trước khi promote/accept.",
+      "dispatch": {
+        "primary": {
+          "route": "codex",
+          "model": "gpt-5.6-sol",
+          "reasoningEffort": "high",
+          "node": "ATLAS",
+          "command": "codex exec --model gpt-5.6-sol --sandbox read-only -c model_reasoning_effort=high -c approval_policy=never"
+        },
+        "fallbacks": [
+          {
+            "priority": 1,
+            "trigger": "ATLAS Codex 5h quota = 0% -> Chuyển sang node ORBIT qua SSH",
+            "route": "codex",
+            "model": "gpt-5.6-sol",
+            "reasoningEffort": "high",
+            "node": "ORBIT (Mac M1 via Tailscale)",
+            "command": "ssh mac-m1 'codex exec --model gpt-5.6-sol --sandbox read-only -c model_reasoning_effort=high -c approval_policy=never'"
+          },
+          {
+            "priority": 2,
+            "trigger": "Direct Claude CLI route on ATLAS (when weekly quota >= 20%)",
+            "route": "claude-cli",
+            "model": "opus",
+            "effort": "high",
+            "node": "ATLAS",
+            "command": "claude -p --model opus --effort high --restricted"
+          },
+          {
+            "priority": 3,
+            "trigger": "Sol & Claude quota cạn kiệt (Emergency Acceptance Fallback)",
+            "route": "opencode",
+            "model": "opencode-go/deepseek-v4.1-flash",
+            "effort": "high",
+            "node": "ATLAS",
+            "command": "OPENCODE_BIN=\"$HOME/.opencode/bin/opencode\" node \"$AI_CLI\" generate --provider opencode --model opencode-go/deepseek-v4.1-flash --effort high",
+            "warning": "BẮT BUỘC dùng đúng v4.1 flash, CẤM v4 flash."
+          }
+        ]
+      }
+    },
+    "auditor": {
+      "id": "auditor",
+      "name": "Auditor / Red Team / Over-Engineering Check",
+      "description": "Phản biện đối kháng, tìm lỗ hổng kiến trúc, bóc tách over-engineering (kết hợp ponytail-review).",
+      "dispatch": {
+        "primary": {
+          "route": "agy",
+          "model": "claude-opus-4-6-thinking",
+          "effort": null,
+          "node": "ATLAS",
+          "options": {
+            "agentMode": "plan"
+          },
+          "note": "AGY Claude không hỗ trợ cờ --effort, dùng agent-mode plan."
+        },
+        "fallbacks": [
+          {
+            "priority": 1,
+            "trigger": "High-complexity reasoning audit via Sol",
+            "route": "codex",
+            "model": "gpt-5.6-sol",
+            "reasoningEffort": "high",
+            "node": "ATLAS",
+            "options": {
+              "sandbox": "read-only",
+              "ephemeral": true
+            }
+          },
+          {
+            "priority": 2,
+            "trigger": "High-throughput token/context scan",
+            "route": "agy",
+            "model": "gemini-3.8-flash-high",
+            "effort": "high",
+            "node": "ATLAS"
+          },
+          {
+            "priority": 3,
+            "trigger": "AGY route unavailable → same Opus audit via 9Router pool",
+            "route": "opencode",
+            "model": "9router/claude-opus-4-6-thinking",
+            "effort": null,
+            "node": "ATLAS",
+            "command": "OPENCODE_BIN=\"$HOME/.opencode/bin/opencode\" node \"$AI_CLI\" generate --provider opencode --model 9router/claude-opus-4-6-thinking"
+          }
+        ]
+      }
+    }
+  }
+}
