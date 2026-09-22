@@ -103,11 +103,16 @@ II. CHỦ ĐỀ TRANH LUẬN
 [Mô tả chủ đề cụ thể: ví dụ kiến trúc mở rộng, modularity, schema contracts, YAGNI vs extensibility...]
 
 III. PHÂN VAI
-phân vai của tôi như sau: host là bạn (deepseek v4.1 flash), các debator bao gồm:
+phân vai chính (dùng khi còn quota):
+- host/trọng tài: bạn — coordinator đang chủ trì phiên
+- debator 1: codex sol (gpt-6-sol)
+- debator 2: claude opus 5.5 (claude -p --model claude-opus-5-5)
+
+dự bị — CHỈ dùng khi đã hết quota cả codex lẫn claude:
 1. agy claude 4.6 thinking high
 2. agy flash 3.8 gemini
-3. codex sol (gpt-6-sol)
-4. muse 1.3 contributor gọi qua opencode go
+3. muse 1.3 contributor gọi qua opencode go
+4. host dự bị: deepseek v4.1 flash gọi qua opencode-go (đúng bản v4.1-flash; cấm bản v4 cũ vì chi phí đắt)
 
 IV. SỐ VÒNG: 2
 
@@ -119,10 +124,14 @@ hãy triển khai thảo luận 2 vòng và báo cáo kết quả cuối cùng c
 1. **Scaffold**:
    ```bash
    node "$SKILL/scripts/debate-init.mjs" <program-slug> --strategy cross-exam \
-     --moderator "opencode:opencode-go/deepseek-v4.1-flash:-:moderator" \
-     --debaters "agy:claude-opus-4-6-thinking:-:agy-claude;agy:gemini-3.8-flash-high:high:agy-flash;codex:gpt-6-sol:high:codex;opencode:opencode-go/muse-spark-1.3-contributor:xhigh:muse"
+     --moderator "coordinator:-:-:moderator" \
+     --debaters "codex:gpt-6-sol:high:codex;claude-cli:claude-opus-5-5:-:claude"
    ```
-   *(Lưu ý: BẮT BUỘC dùng đúng model `opencode-go/deepseek-v4.1-flash` làm Host. TUYỆT ĐỐI CẤM dùng `deepseek-v4-flash` vì chi phí đắt đỏ - v4 tốn tiền. Script sẽ tự động reject nếu phát hiện model v4 cũ).*
+   *(Phân vai chính: Host là coordinator đang chủ trì phiên, hai debator là `codex:gpt-6-sol` và
+   `claude-cli:claude-opus-5-5`. **Chỉ khi đã hết quota cả codex lẫn claude** mới đổi `--debaters`
+   sang tier dự bị: `agy:claude-opus-4-6-thinking:-:agy-claude;agy:gemini-3.8-flash-high:high:agy-flash;opencode:opencode-go/muse-spark-1.3-contributor:xhigh:muse`
+   — và nếu cần host AI thì dùng đúng `opencode-go/deepseek-v4.1-flash`; TUYỆT ĐỐI CẤM bản
+   `deepseek-v4-flash` vì chi phí đắt đỏ, script sẽ tự reject model v4 cũ).*
 2. **Bơm nguyên lý Skill vào `context-brief.md`**:
    - **Ponytail (`.agents/skills/ponytail/SKILL.md`)**: YAGNI, giải pháp lười nhất chạy tốt (simplest working solution), ưu tiên stdlib/native platform, loại bỏ abstraction suy đoán và bloat.
    - **Spec-Kit (`.agents/skills/spec-kit/SKILL.md`)**: Spec-Driven Development, giao ước/contract rõ ràng, chia nhỏ task có thể đo lường và hội tụ (convergence).

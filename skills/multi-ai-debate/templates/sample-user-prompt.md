@@ -18,11 +18,16 @@ II. CHỦ ĐỀ TRANH LUẬN
 [Mô tả chủ đề cụ thể: ví dụ kiến trúc mở rộng, modularity, schema contracts, YAGNI vs extensibility, khả năng tái sử dụng giữa project kit và library...]
 
 III. PHÂN VAI
-phân vai của tôi như sau: host là bạn (deepseek v4.1 flash), các debator bao gồm:
+phân vai chính (dùng khi còn quota):
+- host/trọng tài: bạn — coordinator đang chủ trì phiên
+- debator 1: codex sol (gpt-6-sol)
+- debator 2: claude opus 5.5 (claude -p --model claude-opus-5-5)
+
+dự bị — CHỈ dùng khi đã hết quota cả codex lẫn claude:
 1. agy claude 4.6 thinking high
 2. agy flash 3.8 gemini
-3. deepseek v4.1 flash gọi qua opencode-go
-4. muse 1.3 contributor gọi qua opencode go
+3. muse 1.3 contributor gọi qua opencode go
+4. host dự bị: deepseek v4.1 flash gọi qua opencode-go (đúng bản v4.1-flash; cấm bản v4 cũ vì chi phí đắt)
 
 IV. SỐ VÒNG: 2
 
