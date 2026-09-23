@@ -18,12 +18,14 @@
     "access": "public"
   },
   "bin": {
-    "webmcp-ai": "bin/webmcp-ai.mjs"
+    "webmcp-ai": "bin/webmcp-ai.mjs",
+    "webmcp-jev": "bin/webmcp-jev.mjs"
   },
   "exports": {
     ".": "./src/client.mjs",
     "./bin": "./bin/webmcp-ai.mjs",
     "./errors": "./src/errors.mjs",
+    "./jev": "./src/jev/cli.mjs",
     "./providers": "./src/providers/index.mjs",
     "./protocol": "./src/protocol.mjs",
     "./package.json": "./package.json"

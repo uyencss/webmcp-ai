@@ -20,6 +20,7 @@ test("core package boundary: no orchestration directories or SDK dependencies in
   assert.equal(pkg.exports["."], "./src/client.mjs");
   assert.equal(pkg.exports["./bin"], "./bin/webmcp-ai.mjs");
   assert.equal(pkg.exports["./errors"], "./src/errors.mjs");
+  assert.equal(pkg.exports["./jev"], "./src/jev/cli.mjs");
   assert.equal(pkg.exports["./providers"], "./src/providers/index.mjs");
   assert.equal(pkg.exports["./protocol"], "./src/protocol.mjs");
   assert.equal(pkg.exports["./package.json"], "./package.json");
@@ -72,6 +73,11 @@ test("core package boundary: public exports resolve and expose expected symbols"
   assert.equal(typeof protocolMod.TOOL_PROTOCOL, "string");
   assert.equal(typeof protocolMod.describeTools, "function");
   assert.equal(typeof protocolMod.handleToolCall, "function");
+
+  const jevMod = await import(join(rootDir, "src/jev/cli.mjs"));
+  assert.equal(typeof jevMod.runJevCli, "function");
+  const jevDoctorMod = await import(join(rootDir, "src/jev/doctor.mjs"));
+  assert.equal(typeof jevDoctorMod.jevDoctor, "function");
 });
 
 test("transitional CLI compatibility shim: returns ORCHESTRATION_PACKAGE_REQUIRED when package is absent", () => {

@@ -22,11 +22,14 @@ export function auditShippedPaths(shippedPaths, bundledPackages = []) {
   const violations = [];
   const requiredPaths = [
     "bin/webmcp-ai.mjs",
+    "bin/webmcp-jev.mjs",
     "src/cli.mjs",
     "src/client.mjs",
     "src/capabilities.mjs",
     "src/errors.mjs",
     "src/events.mjs",
+    "src/jev/cli.mjs",
+    "src/jev/doctor.mjs",
     "src/process-runner.mjs",
     "src/protocol.mjs",
     "src/providers/agy.mjs",
@@ -191,10 +194,11 @@ export async function runPackageClosure({
       "const errors = await import('@gyga-browser/webmcp-ai/errors');",
       "const providers = await import('@gyga-browser/webmcp-ai/providers');",
       "const protocol = await import('@gyga-browser/webmcp-ai/protocol');",
+      "const jev = await import('@gyga-browser/webmcp-ai/jev');",
       "let orchMissing = false;",
       "try { await import('@gyga-browser/webmcp-ai/orchestration'); } catch (e) { orchMissing = e.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED'; }",
-      "const ok = typeof core.generate === 'function' && typeof errors.AiCliError === 'function' && typeof providers.getProvider === 'function' && typeof protocol.describeTools === 'function' && orchMissing;",
-      "console.log(JSON.stringify({ ok, imported: ['.', './errors', './providers', './protocol'], orchRemoved: orchMissing }));",
+      "const ok = typeof core.generate === 'function' && typeof errors.AiCliError === 'function' && typeof providers.getProvider === 'function' && typeof protocol.describeTools === 'function' && typeof jev.runJevCli === 'function' && orchMissing;",
+      "console.log(JSON.stringify({ ok, imported: ['.', './errors', './providers', './protocol', './jev'], orchRemoved: orchMissing }));",
     ].join("\n"),
   ], {
     cwd: consumerRoot,
@@ -222,6 +226,21 @@ export async function runPackageClosure({
   let doctorPayload = null;
   try { doctorPayload = JSON.parse(doctorRun.stdout); } catch {}
   requireCondition(doctorRun.status === 0 && doctorPayload?.ok === true, "installed CLI answers doctor");
+
+  // Installed Jev surface answers doctor with the provider group unprobed
+  const jevDoctorRun = spawnSync(process.execPath, [join(installedPkgDir, "bin/webmcp-jev.mjs"), "doctor", "--json"], {
+    cwd: consumerRoot,
+    shell: false,
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+  });
+  let jevDoctorPayload = null;
+  try { jevDoctorPayload = JSON.parse(jevDoctorRun.stdout); } catch {}
+  requireCondition(
+    jevDoctorRun.status === 0 && jevDoctorPayload?.ok === true && jevDoctorPayload?.provider?.authenticated === "not-probed",
+    "installed webmcp-jev answers doctor --json with provider unprobed",
+  );
 
   const shimRun = spawnSync(process.execPath, [join(installedPkgDir, "bin/webmcp-ai.mjs"), "orchestration", "capabilities", "--json"], {
     cwd: consumerRoot,
