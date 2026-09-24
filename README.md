@@ -54,6 +54,7 @@ webmcp-ai doctor --json
 webmcp-ai preflight --json
 webmcp-ai providers list --json
 webmcp-ai providers inspect claude --json
+webmcp-ai providers install --plan --json
 webmcp-ai models list --provider agy --json
 webmcp-ai models inspect --provider agy --model claude-opus-4-6-thinking --json
 webmcp-ai agents list --provider agy --json
@@ -237,9 +238,10 @@ and does not place private keys, credentials, bearer tokens, or machine
 identity into model context, child authority env, or portable receipts.
 What `--full` grants is provider-specific (do not assume unrestricted ambient
 access for non-OpenCode providers): OpenCode (v1 and v2) is the only provider
-that keeps the ambient operator config, tools, and MCP surface (the session
-database stays isolated to `opencode-cli.db` via `OPENCODE_DB`; v2 additionally
-runs its private server via `--standalone`); Codex uses the `workspace-write` sandbox
+that keeps the ambient operator config, tools, and MCP surface (v1 isolates the
+session database to `opencode-cli.db` for compatibility; v2 uses the accepted
+`opencode.db` via `OPENCODE_DB` without fallback, migration, or copy of legacy
+databases; v2 additionally runs its private server via `--standalone`); Codex uses the `workspace-write` sandbox
 instead of `read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`,
 so it does not inherit ambient user config/MCP; Claude drops the
 `--tools '' --safe-mode` text-only deny; AGY drops the forced `--sandbox`.
@@ -315,3 +317,18 @@ generic exits remain distinct failure classes.
 
 Override provider binaries with `AGY_BIN`, `CLAUDE_BIN`, `CODEX_BIN`, or
 `OPENCODE_BIN`.
+
+## Provider install plan/apply
+
+`webmcp-ai providers install` manages provider installation plan and apply workflows:
+
+```bash
+webmcp-ai providers install --plan --json
+webmcp-ai providers install --read-back --json
+webmcp-ai providers install --apply [--execute] [--receipt <path>] --json
+webmcp-ai providers install --host orbit --plan --json
+```
+
+- **Version pins**: pinned to active runtime measurements (Claude `2.1.280`, OpenCode `2.0.15`, Codex `0.155.0-alpha.16`, AGY `1.2.9`). Missing pins fail with `PROVIDER_PIN_MISSING`.
+- **ORBIT host**: host-scoped plan and read-only inspection only (`authorized: false`). Apply requires explicit owner authorization per host and throws `HOST_SCOPE_NOT_AUTHORIZED` (M3 not authorized).
+- **Separation of concerns**: 5 separate layers (binary, model, auth, canary, skill). Installer never performs login, credential extraction, or auth copy. Receipts record package, version, and action; `auth` (`not-assessed`) and `canary` (`not-run`) remain strictly separated from installation receipts.

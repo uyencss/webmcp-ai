@@ -177,9 +177,10 @@ credentials, bearer tokens, or machine identity into model context, child
 authority env, or portable receipts. What it does is provider-specific (do not
 promise unrestricted ambient access for non-OpenCode providers): OpenCode
 (v1 and v2) is the only provider that keeps the ambient operator config, tools,
-and MCP surface (only the session database stays isolated to `opencode-cli.db`
-via `OPENCODE_DB`; v2 additionally runs its private server via `--standalone`);
-Codex uses the `workspace-write` sandbox instead of
+and MCP surface (v1 isolates the session database to `opencode-cli.db` for
+compatibility; v2 uses the accepted `opencode.db` via `OPENCODE_DB` without
+fallback, migration, or copy of legacy databases; v2 additionally runs its
+private server via `--standalone`); Codex uses the `workspace-write` sandbox instead of
 `read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`, so it
 does not inherit ambient user config/MCP (and explicit resume binds
 `-c sandbox_mode="workspace-write"`, never claiming `danger-full-access`);
@@ -258,26 +259,26 @@ OpenCode instance holds the write lock during a concurrent write; contention is
 timing-dependent, so not every concurrent run fails with `SQLITE_BUSY`, but a
 shared database leaves CLI runs exposed to it.
 
-At OpenCode `1.18.21`, the wrapper's isolated-database behavior is a
-version-pinned, source-verified capability: `webmcp-ai` sets `OPENCODE_DB` to
-`opencode-cli.db` inside the effective data directory
-(`$XDG_DATA_HOME/opencode/`, falling back to `~/.local/share/opencode/`),
-separating the CLI namespace from the IDE/default database. Configuration
-(`~/.config/opencode/`) stays shared while session histories stay independent.
+For OpenCode v1, the wrapper's isolated-database behavior is a version-pinned
+compatibility capability: `webmcp-ai` sets `OPENCODE_DB` to `opencode-cli.db`
+inside the effective data directory (`$XDG_DATA_HOME/opencode/`, falling back to
+`~/.local/share/opencode/`), separating the CLI namespace from the IDE/default database.
+Configuration (`~/.config/opencode/`) stays shared while session histories stay independent.
 Sessions created in `opencode.db` do not appear in `opencode-cli.db`, and the
 wrapper never searches or migrates sessions across databases automatically.
 
-An explicit `OPENCODE_DB` value in the calling environment is respected as an
-operator override. Task JSON and model prompts cannot select the database path.
-For OpenCode v2, an explicit override must point to an existing non-empty
-database file; a missing or empty override fails closed as
-`PROVIDER_STATE_UNINITIALIZED` and is never silently replaced.
+For OpenCode v2, WebMCP-managed OpenCode uses the accepted `opencode.db` in the
+effective data directory; fallback, migration, or copying of `opencode-cli.db` is
+strictly prohibited. For OpenCode v2 an explicit `OPENCODE_DB` value is an operator override that must point
+to the accepted `opencode.db`; a missing or empty database fails closed with `PROVIDER_STATE_UNINITIALIZED`
+and is never silently replaced or fallen back to another database. Task JSON and model prompts
+cannot select the database path.
 
 V2 (beta) resolves contention architecturally through a background server that
-serializes all writes. The wrapper still sets `OPENCODE_DB` on v2 and adds
-`--standalone` per spawn, so the private server starts with the invocation
-env/config (isolated DB with synchronized credentials, wrapper `permissions`,
-empty MCP/plugins) instead of inheriting the shared background service.
+serializes all writes. The wrapper sets `OPENCODE_DB` to the accepted `opencode.db`
+on v2 and adds `--standalone` per spawn, so the private server starts with the invocation
+env/config (wrapper `permissions`, empty MCP/plugins, no legacy DB sync) instead of
+inheriting the shared background service.
 
 ## Native AI CLI Matrix & Cheatsheet
 
@@ -353,6 +354,21 @@ node "$AI_CLI" generate --provider agy --model gemini-3.8-flash-high --effort hi
    - Claude Weekly < 20% $\rightarrow$ Ưu tiên AGY Claude / Gemini Flash để bảo vệ quota Claude Code CLI.
 3. **Lineage Honesty**: Ghi đúng provider/model vào ledger; không ngụy tạo tên route.
 
+## Provider install plan/apply
+
+Use `webmcp-ai providers install` to plan, inspect, or apply pinned provider installations:
+
+```bash
+webmcp-ai providers install --plan --json
+webmcp-ai providers install --read-back --json
+webmcp-ai providers install --apply [--execute] [--receipt <path>] --json
+webmcp-ai providers install --host orbit --plan --json
+```
+
+- **Version pins**: pinned to active runtime measurements (Claude `2.1.280`, OpenCode `2.0.15`, Codex `0.155.0-alpha.16`, AGY `1.2.9`). Missing pins fail with `PROVIDER_PIN_MISSING`.
+- **ORBIT host**: host-scoped plan and read-only inspection only (`authorized: false`). Apply requires explicit owner authorization per host and throws `HOST_SCOPE_NOT_AUTHORIZED` (M3 not authorized).
+- **Separation of concerns**: 5 separate layers (binary, model, auth, canary, skill). Installer never performs login, credential extraction, or auth copy. Receipts record package, version, and action; `auth` (`not-assessed`) and `canary` (`not-run`) remain strictly separated from installation receipts.
+
 ## Safety
 
 - Do not use implicit `--continue` or "last session" behavior.
@@ -370,5 +386,6 @@ node "$AI_CLI" generate --provider agy --model gemini-3.8-flash-high --effort hi
 - Use `--json` for automation and branch on stable `error.code` values.
 - Override provider executables only with `AGY_BIN`, `CLAUDE_BIN`, `CODEX_BIN`,
   or `OPENCODE_BIN`.
-- Override the OpenCode database only with `OPENCODE_DB`; the default
-  `opencode-cli.db` isolation is intentional.
+- Override the OpenCode database only with `OPENCODE_DB`; v1 keeps `opencode-cli.db`
+  for compatibility while v2 uses the accepted `opencode.db` (never falling back to
+  or copying `opencode-cli.db`).

@@ -15,6 +15,12 @@ import { describeReviewDryRun, review } from './review.mjs';
 import { validateClaudeReviewSupport } from './providers/claude.mjs';
 import { validateCodexReviewSupport } from './providers/codex.mjs';
 import { opencodeProfileForVersion, validateOpencodeReviewSupport } from './providers/opencode.mjs';
+import {
+  applyProviderInstall,
+  planProviderInstall,
+  readBackProviderInstall,
+  writeProviderInstallReceipt,
+} from './providers/install.mjs';
 
 const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
 
@@ -145,6 +151,7 @@ Usage:
   ${commandName} preflight [--json]
   ${commandName} providers list [--json]
   ${commandName} providers inspect <provider> [--task-intent review|compose|implement|plan] [--json]
+  ${commandName} providers install --plan|--apply|--read-back [--host local|orbit] [--json]
   ${commandName} models list --provider <agy|claude|codex|opencode> [--json]
   ${commandName} models inspect --provider <id> [--model <model>] [--json]
   ${commandName} agents list --provider agy [--json]
@@ -486,6 +493,34 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   if (command === 'providers' && subcommand === 'list') {
     const payload = { ok: true, providers: listProviders() };
     printValue(payload, json, (value) => value.providers.map((provider) => `${provider.id}\t${provider.name}`).join('\n'));
+    return 0;
+  }
+  if (command === 'providers' && subcommand === 'install') {
+    const host = options.host || 'local';
+    let result;
+    if (isTrueFlag(options['read-back'])) {
+      result = await readBackProviderInstall({ host, env });
+    } else if (isTrueFlag(options.apply)) {
+      result = await applyProviderInstall({ host, env, execute: isTrueFlag(options.execute) });
+      if (options.receipt && typeof options.receipt === 'string') {
+        writeProviderInstallReceipt(options.receipt, result);
+      }
+    } else {
+      result = await planProviderInstall({ host, env });
+    }
+    printValue(result, json, (val) => {
+      if (Array.isArray(val.providers)) {
+        return val.providers.map((p) => [
+          p.id,
+          p.version || p.pinnedVersion || '-',
+          p.installedVersion || p.installed || '-',
+          p.state,
+          p.action || '-',
+          p.database || '',
+        ].filter(Boolean).join('\t')).join('\n');
+      }
+      return JSON.stringify(val, null, 2);
+    });
     return 0;
   }
   if (command === 'preflight') {

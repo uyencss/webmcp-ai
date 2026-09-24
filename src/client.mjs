@@ -1,5 +1,5 @@
 import {
-  accessSync, constants, lstatSync, mkdtempSync, rmSync,
+  accessSync, constants, mkdtempSync, rmSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -19,10 +19,11 @@ import {
 } from './events.mjs';
 import { AiCliError } from './errors.mjs';
 import { runProcess } from './process-runner.mjs';
-import { getProvider, listProviders, resolveOpencodeCliDb, resolveProviderBin } from './providers/index.mjs';
+import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 import { validateClaudeReviewSupport } from './providers/claude.mjs';
 import { validateCodexReviewSupport } from './providers/codex.mjs';
 import {
+  assertOpencodeV2DbReady,
   normalizeOpencodeProfile,
   opencodeProfileForVersion,
   validateOpencodeReviewSupport,
@@ -360,26 +361,6 @@ async function detectOpencodeProfile({ command, env }) {
   return profile;
 }
 
-function assertExplicitOpencodeV2DbReady({ env, profile }) {
-  if (profile !== 'v2' || typeof env?.OPENCODE_DB !== 'string' || !env.OPENCODE_DB.trim()) return;
-  const dbPath = resolveOpencodeCliDb(env);
-  try {
-    const stats = lstatSync(dbPath);
-    if (stats.isFile() && stats.size > 0) return;
-  } catch {
-    // Convert missing/inaccessible paths into one stable, path-free contract.
-  }
-  throw new AiCliError(
-    'PROVIDER_STATE_UNINITIALIZED',
-    'OpenCode v2 database override is missing or empty; use an existing opencode-cli.db or omit OPENCODE_DB',
-    {
-      exitCode: 2,
-      retryable: false,
-      details: { provider: 'opencode', profile: 'v2', state: 'missing-or-empty' },
-    },
-  );
-}
-
 // AGY print mode can return only a summary while the full answer is written to
 // its brain directory. When the caller opts in (`resolveArtifacts`), recover
 // the artifact written during this run. A single match longer than stdout
@@ -429,7 +410,7 @@ export async function generate(input) {
     request.opencodeProfile = await detectOpencodeProfile({ command, env });
   }
   if (provider.id === 'opencode') {
-    assertExplicitOpencodeV2DbReady({ env, profile: request.opencodeProfile });
+    assertOpencodeV2DbReady({ env, profile: request.opencodeProfile });
   }
   // Library-only observers are inspected before invocation so provider-native
   // telemetry (Claude stream-json --verbose) can be selected without a second
@@ -840,7 +821,13 @@ export async function listModels(providerId, { env = process.env } = {}) {
     });
   }
   const command = resolveProviderBin(provider, env);
-  const invocationEnv = provider.invocationEnv?.(env) ?? {};
+  let invocationEnv;
+  if (provider.id === 'opencode') {
+    const profile = await detectOpencodeProfile({ command, env });
+    invocationEnv = provider.invocationEnv?.(env, { profile }) ?? {};
+  } else {
+    invocationEnv = provider.invocationEnv?.(env) ?? {};
+  }
   const safeEnv = buildSafeChildEnv(env, invocationEnv);
   const result = await runProcess(command, provider.modelsInvocation.args, {
     stdin: provider.modelsInvocation.stdin,
@@ -859,7 +846,13 @@ export async function listAgents(providerId, { env = process.env } = {}) {
     });
   }
   const command = resolveProviderBin(provider, env);
-  const invocationEnv = provider.invocationEnv?.(env) ?? {};
+  let invocationEnv;
+  if (provider.id === 'opencode') {
+    const profile = await detectOpencodeProfile({ command, env });
+    invocationEnv = provider.invocationEnv?.(env, { profile }) ?? {};
+  } else {
+    invocationEnv = provider.invocationEnv?.(env) ?? {};
+  }
   const safeEnv = buildSafeChildEnv(env, invocationEnv);
   const result = await runProcess(command, provider.agentsInvocation.args, {
     stdin: provider.agentsInvocation.stdin,

@@ -249,6 +249,24 @@ test('opencode resolves the CLI database from the effective environment, never p
     resolveOpencodeCliDb({ OPENCODE_DB: '   ', XDG_DATA_HOME: '  ' }, { homeDir: '/home/tester' }),
     '/home/tester/.local/share/opencode/opencode-cli.db',
   );
+
+  // OpenCode v2 resolves to opencode.db and rejects legacy opencode-cli.db
+  assert.equal(
+    resolveOpencodeCliDb({ XDG_DATA_HOME: '/state/data/' }, { profile: 'v2', homeDir: '/home/tester' }),
+    '/state/data/opencode/opencode.db',
+  );
+  assert.equal(
+    resolveOpencodeCliDb({}, { profile: 'v2', homeDir: '/home/tester' }),
+    '/home/tester/.local/share/opencode/opencode.db',
+  );
+  assert.equal(
+    resolveOpencodeCliDb({ OPENCODE_DB: '/custom/valid.db' }, { profile: 'v2' }),
+    '/custom/valid.db',
+  );
+  assert.throws(
+    () => resolveOpencodeCliDb({ OPENCODE_DB: '/custom/opencode-cli.db' }, { profile: 'v2' }),
+    (e) => e.code === 'PROVIDER_STATE_UNINITIALIZED' && e.details?.state === 'prohibited-db',
+  );
 });
 
 test('opencode buildInvocation honors an explicit OPENCODE_DB operator override', () => {

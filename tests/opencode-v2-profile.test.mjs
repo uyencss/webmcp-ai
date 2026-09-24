@@ -370,12 +370,22 @@ test('dry-run rejects unknown OpenCode profiles with typed errors and cleans pre
 test('generate detects the v2 profile, drops --dir, and folds effort', async (t) => {
   const ws = mkdtempSync(join(tmpdir(), 'v2-profile-ws-'));
   t.after(() => rmSync(ws, { recursive: true, force: true }));
+  const dbPath = join(ws, 'opencode.db');
+  try {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(dbPath);
+    db.exec('CREATE TABLE t (id INTEGER)');
+    db.close();
+  } catch {
+    writeFileSync(dbPath, Buffer.concat([Buffer.from('SQLite format 3\0', 'utf8'), Buffer.alloc(100)]));
+  }
   const baseEnv = {
     ...process.env,
     OPENCODE_BIN: fakeBin,
     FAKE_PROVIDER: 'opencode',
     FAKE_VERSION: '2.0.1',
     FAKE_ECHO_ARGS: '1',
+    OPENCODE_DB: dbPath,
   };
   const ok = await generate({
     provider: 'opencode', prompt: 'hello v2', accessProfile: 'provider-default', agentMode: 'accept-edits',

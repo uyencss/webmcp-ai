@@ -1,8 +1,19 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import {
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 
 import { buildOpenCodeConfig } from '../capabilities.mjs';
 import { AiCliError } from '../errors.mjs';
@@ -160,23 +171,130 @@ function firstNonEmptyString(value) {
  * instances. Precedence:
  *
  *   1. explicit operator OPENCODE_DB (respected verbatim);
- *   2. <effective XDG_DATA_HOME>/opencode/opencode-cli.db;
- *   3. <homedir>/.local/share/opencode/opencode-cli.db.
+ *   2. <effective XDG_DATA_HOME>/opencode/<db>;
+ *   3. <homedir>/.local/share/opencode/<db>.
+ *
+ * For OpenCode v2, the database is accepted as opencode.db and an explicit
+ * override to opencode-cli.db is prohibited. For v1, opencode-cli.db is kept
+ * for backward compatibility.
  *
  * The environment must be passed explicitly: callers hand this resolver the
  * exact effective environment that reaches the child process, so it never
  * reads process.env behind the caller's back. Task JSON and model prompts
  * have no way to influence the result.
  */
-export function resolveOpencodeCliDb(env, { homeDir = homedir() } = {}) {
+export function resolveOpencodeCliDb(env, { profile = 'v1', homeDir = homedir() } = {}) {
   const effectiveEnv = env ?? {};
   const explicit = firstNonEmptyString(effectiveEnv.OPENCODE_DB);
-  if (explicit) return explicit;
-  const xdgDataHome = firstNonEmptyString(effectiveEnv.XDG_DATA_HOME);
-  if (xdgDataHome) {
-    return join(trimTrailingSeparators(xdgDataHome), 'opencode', 'opencode-cli.db');
+  if (explicit) {
+    if (profile === 'v2' && (basename(explicit) === 'opencode-cli.db' || basename(explicit.replace(/\\/g, '/')) === 'opencode-cli.db')) {
+      throw new AiCliError('PROVIDER_STATE_UNINITIALIZED',
+        'OpenCode v2 database override names a prohibited legacy database; use the accepted opencode.db or omit OPENCODE_DB',
+        { exitCode: 2, retryable: false,
+          details: { provider: 'opencode', profile: 'v2', state: 'prohibited-db' } });
+    }
+    return explicit;
   }
-  return join(homeDir, '.local', 'share', 'opencode', 'opencode-cli.db');
+  const xdgDataHome = firstNonEmptyString(effectiveEnv.XDG_DATA_HOME);
+  const dataHome = xdgDataHome ? trimTrailingSeparators(xdgDataHome) : join(homeDir, '.local', 'share');
+  const file = profile === 'v2' ? 'opencode.db' : 'opencode-cli.db';
+  return join(dataHome, 'opencode', file);
+}
+
+/**
+ * Inspect an OpenCode database file for validity. Never throws.
+ * Returns { ok: true, state: 'ready' } or { ok: false, state: <one of> }.
+ * Possible failure states: 'missing' | 'empty' | 'not-a-file' | 'symlink' | 'not-sqlite' | 'unreadable' | 'busy'
+ */
+export function inspectOpencodeDb(dbPath, { lockTimeoutMs = 250 } = {}) {
+  let stats;
+  try {
+    stats = lstatSync(dbPath);
+  } catch {
+    return { ok: false, state: 'missing' };
+  }
+
+  if (stats.isSymbolicLink()) {
+    return { ok: false, state: 'symlink' };
+  }
+  if (!stats.isFile()) {
+    return { ok: false, state: 'not-a-file' };
+  }
+  if (stats.size === 0) {
+    return { ok: false, state: 'empty' };
+  }
+
+  let fd;
+  try {
+    fd = openSync(dbPath, 'r');
+    const buf = Buffer.alloc(16);
+    const bytesRead = readSync(fd, buf, 0, 16, 0);
+    if (bytesRead < 16 || buf.toString('utf8', 0, 16) !== 'SQLite format 3\0') {
+      return { ok: false, state: 'not-sqlite' };
+    }
+  } catch {
+    return { ok: false, state: 'unreadable' };
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+
+  if (lockTimeoutMs > 0) {
+    let db;
+    try {
+      const require = createRequire(import.meta.url);
+      let DatabaseSync;
+      try {
+        ({ DatabaseSync } = require('node:sqlite'));
+      } catch {
+        DatabaseSync = null;
+      }
+      if (DatabaseSync) {
+        try {
+          db = new DatabaseSync(dbPath, { timeout: lockTimeoutMs });
+          db.exec('BEGIN IMMEDIATE');
+          db.exec('ROLLBACK');
+        } catch (err) {
+          const msg = String(err?.message || err || '');
+          if (msg.includes('SQLITE_BUSY') || msg.toLowerCase().includes('database is locked')) {
+            return { ok: false, state: 'busy' };
+          }
+          return { ok: false, state: 'unreadable' };
+        } finally {
+          try { db?.close(); } catch {}
+        }
+      }
+    } catch {
+      // skip lock check if engine cannot load node:sqlite
+    }
+  }
+
+  return { ok: true, state: 'ready' };
+}
+
+/**
+ * Validate that OpenCode v2 database is ready.
+ * If profile !== 'v2', returns null.
+ * Otherwise resolves the database path and inspects it without lock timeout.
+ * Throws PROVIDER_STATE_UNINITIALIZED on invalid state.
+ */
+export function assertOpencodeV2DbReady({ env, profile }) {
+  if (profile !== 'v2') return null;
+  const dbPath = resolveOpencodeCliDb(env, { profile });
+  const inspection = inspectOpencodeDb(dbPath, { lockTimeoutMs: 0 });
+  if (!inspection.ok) {
+    throw new AiCliError(
+      'PROVIDER_STATE_UNINITIALIZED',
+      `OpenCode v2 database is not a usable non-empty SQLite file (state: ${inspection.state}); the wrapper never falls back to another database`,
+      {
+        exitCode: 2,
+        retryable: false,
+        details: { provider: 'opencode', profile: 'v2', state: inspection.state },
+      },
+    );
+  }
+  return dbPath;
 }
 
 function stripJsoncComments(text) {
@@ -264,7 +382,7 @@ export function syncOpencodeCredentials(targetDb) {
  * disposable directory private to this invocation, preventing inheritance of
  * the operator's ~/.config/opencode MCP configuration and project/user config.
  */
-function createIsolatedOpencodeRuntime(request, baseConfig) {
+function createIsolatedOpencodeRuntime(request, baseConfig, profile = 'v1') {
   const privateDir = mkdtempSync(join(tmpdir(), 'webmcp-ai-opencode-'));
   try {
     const xdgConfigHome = join(privateDir, 'xdg-config');
@@ -286,8 +404,10 @@ function createIsolatedOpencodeRuntime(request, baseConfig) {
     // OPENCODE_CONFIG points at the same content as OPENCODE_CONFIG_CONTENT
     // for defense-in-depth.
     writeFileSync(openCodeConfig, JSON.stringify(effectiveConfig, null, 2), 'utf8');
-    const dbPath = resolveOpencodeCliDb(request.env);
-    syncOpencodeCredentials(dbPath);
+    const dbPath = resolveOpencodeCliDb(request.env, { profile });
+    if (profile === 'v1') {
+      syncOpencodeCredentials(dbPath);
+    }
     return {
       env: {
         OPENCODE_DB: dbPath,
@@ -403,7 +523,7 @@ export const opencodeProvider = {
         args: fullArgs,
         stdin: request.prompt,
         env: {
-          OPENCODE_DB: resolveOpencodeCliDb(request.env),
+          OPENCODE_DB: resolveOpencodeCliDb(request.env, { profile }),
         },
         cleanup: () => {},
       };
@@ -502,7 +622,7 @@ export const opencodeProvider = {
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
 
-    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, profile);
     return {
       args,
       stdin: request.prompt,
@@ -532,8 +652,8 @@ export const opencodeProvider = {
   },
   modelsInvocation: { args: ['models'], stdin: null },
   agentsInvocation: { args: ['agent', 'list'], stdin: null },
-  invocationEnv(env) {
-    return { OPENCODE_DB: resolveOpencodeCliDb(env) };
+  invocationEnv(env, { profile = 'v1' } = {}) {
+    return { OPENCODE_DB: resolveOpencodeCliDb(env, { profile }) };
   },
 };
 
@@ -621,7 +741,7 @@ function buildVNextReviewInvocation(request, taskIntent) {
     pushModelEffortArgs(args, request, profile);
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
-    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, profile);
     return {
       args,
       stdin: request.prompt,
@@ -651,7 +771,7 @@ function buildVNextReviewInvocation(request, taskIntent) {
       return {
         args: fullArgs,
         stdin: request.prompt,
-        env: { OPENCODE_DB: resolveOpencodeCliDb(request.env) },
+        env: { OPENCODE_DB: resolveOpencodeCliDb(request.env, { profile }) },
         cleanup: () => {},
       };
     }
@@ -683,7 +803,7 @@ function buildVNextReviewInvocation(request, taskIntent) {
     pushModelEffortArgs(args, request, profile);
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
-    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, profile);
     return {
       args,
       stdin: request.prompt,
@@ -743,7 +863,7 @@ function buildVNextReviewInvocation(request, taskIntent) {
     pushModelEffortArgs(args, request, profile);
     if (request.sessionId) args.push('--session', request.sessionId);
     if (profile === 'v1') args.push('--dir', request.workspace);
-    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig);
+    const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, profile);
     return {
       args,
       stdin: request.prompt,
