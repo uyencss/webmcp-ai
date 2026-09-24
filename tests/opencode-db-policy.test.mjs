@@ -415,3 +415,114 @@ test('listModels and listAgents with fake v2 enforce db policy before provider s
   assert.deepEqual(agents, ['default-agent']);
 });
 
+test('generate validates opencodeProfile override against detected binary version and preserves v1 compat', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-profile-drift-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const markerPath = join(dir, 'marker-profile.log');
+  const fakeBinPath = join(dir, 'fake-opencode.mjs');
+  writeFileSync(fakeBinPath, [
+    '#!/usr/bin/env node',
+    "import { appendFileSync } from 'node:fs';",
+    'const args = process.argv.slice(2);',
+    `appendFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ args, opencodeDb: process.env.OPENCODE_DB }) + '\\n');`,
+    "if (args[0] === '--version') {",
+    "  process.stdout.write(process.env.FAKE_VERSION || 'opencode v2.0.15\\n');",
+    '  process.exit(0);',
+    '}',
+    "if (args[0] === 'run') {",
+    "  process.stdout.write(JSON.stringify({ type: 'text', text: 'response text' }) + '\\n');",
+    '  process.exit(0);',
+    '}',
+    'process.exit(0);',
+  ].join('\n'));
+  chmodSync(fakeBinPath, 0o755);
+
+  const validDb = join(dir, 'opencode.db');
+  createRealSqliteFile(validDb);
+
+  // 1. Explicit opencodeProfile:'v1' + fake binary v2 -> rejects PROVIDER_CAPABILITY_DRIFT, details.detected === 'v2', does not spawn run
+  await assert.rejects(
+    () => generate({
+      provider: 'opencode',
+      prompt: 'hello',
+      workspace: dir,
+      accessProfile: 'provider-default',
+      agentMode: 'accept-edits',
+      opencodeProfile: 'v1',
+      env: {
+        ...process.env,
+        OPENCODE_BIN: fakeBinPath,
+        FAKE_VERSION: 'opencode v2.0.15\n',
+        OPENCODE_DB: validDb,
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, 'PROVIDER_CAPABILITY_DRIFT');
+      assert.equal(err.details?.capability, 'profile');
+      assert.equal(err.details?.profile, 'v1');
+      assert.equal(err.details?.detected, 'v2');
+      assert.equal(JSON.stringify(err).includes(fakeBinPath), false, 'must not leak binary path');
+      return true;
+    },
+  );
+
+  let calls = readFileSync(markerPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ['--version']);
+  assert.equal(calls.some((c) => c.args.includes('run')), false, 'run must not be spawned');
+
+  // 2. Explicit opencodeProfile:'v2' + fake binary v1 -> drift
+  await assert.rejects(
+    () => generate({
+      provider: 'opencode',
+      prompt: 'hello',
+      workspace: dir,
+      accessProfile: 'provider-default',
+      agentMode: 'accept-edits',
+      opencodeProfile: 'v2',
+      env: {
+        ...process.env,
+        OPENCODE_BIN: fakeBinPath,
+        FAKE_VERSION: '1.18.30\n',
+        OPENCODE_DB: validDb,
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, 'PROVIDER_CAPABILITY_DRIFT');
+      assert.equal(err.details?.capability, 'profile');
+      assert.equal(err.details?.profile, 'v2');
+      assert.equal(err.details?.detected, 'v1');
+      return true;
+    },
+  );
+
+  calls = readFileSync(markerPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].args, ['--version']);
+  assert.equal(calls.some((c) => c.args.includes('run')), false, 'run must not be spawned');
+
+  // 3. Explicit opencodeProfile:'v1' + fake binary v1 -> still uses opencode-cli.db (compat preserved)
+  const fakeXdg = join(dir, 'fake-xdg');
+  const res = await generate({
+    provider: 'opencode',
+    prompt: 'hello',
+    workspace: dir,
+    accessProfile: 'provider-default',
+    agentMode: 'accept-edits',
+    opencodeProfile: 'v1',
+    env: {
+      ...process.env,
+      OPENCODE_BIN: fakeBinPath,
+      FAKE_VERSION: '1.18.30\n',
+      XDG_DATA_HOME: fakeXdg,
+    },
+  });
+  assert.equal(res.ok, true);
+
+  calls = readFileSync(markerPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const runCall = calls.find((c) => c.args.includes('run'));
+  assert.ok(runCall, 'run should be spawned for matching v1');
+  assert.equal(runCall.opencodeDb.endsWith(join('opencode', 'opencode-cli.db')), true);
+});
+

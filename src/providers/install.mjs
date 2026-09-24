@@ -89,6 +89,30 @@ export function binaryHash(binPath) {
   }
 }
 
+export function versionMatchesPin(output, pin) {
+  if (!pin || typeof pin !== 'string') return false;
+  const tokens = String(output ?? '').match(/(?:(?<=\bv)|\b)\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/g) ?? [];
+  const cleanPin = pin.startsWith('v') ? pin.slice(1) : pin;
+  return tokens.includes(pin) || tokens.includes(cleanPin);
+}
+
+export function canonicalPinJson(providerDef) {
+  const payload = {
+    id: providerDef?.id,
+    installable: Boolean(providerDef?.installable),
+    source: providerDef?.source,
+    updateArgs: Array.isArray(providerDef?.updateArgs) ? providerDef.updateArgs : [],
+    version: providerDef?.version,
+  };
+  const keys = Object.keys(payload).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${JSON.stringify(payload[k])}`).join(',')}}`;
+}
+
+export function computePinDigest(providerDef) {
+  const canonical = canonicalPinJson(providerDef);
+  return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
+}
+
 function extractVersion(id, output) {
   const text = String(output ?? '');
   if (id === 'opencode') {
@@ -108,6 +132,13 @@ const localClaude = Object.freeze({
   installKind: 'self-update',
   updateArgs: Object.freeze(['update']),
   installable: true,
+  pinDigest: computePinDigest({
+    id: 'claude',
+    version: '2.1.280',
+    source: 'native-installer',
+    updateArgs: ['update'],
+    installable: true,
+  }),
 });
 
 const localOpencode = Object.freeze({
@@ -119,6 +150,13 @@ const localOpencode = Object.freeze({
   installKind: 'self-update',
   updateArgs: Object.freeze(['upgrade']),
   installable: true,
+  pinDigest: computePinDigest({
+    id: 'opencode',
+    version: '2.0.15',
+    source: 'native-installer',
+    updateArgs: ['upgrade'],
+    installable: true,
+  }),
 });
 
 const localCodex = Object.freeze({
@@ -129,6 +167,13 @@ const localCodex = Object.freeze({
   source: 'app-bundled:ChatGPT.app',
   installable: false,
   note: 'read-back only (app provisioned)',
+  pinDigest: computePinDigest({
+    id: 'codex',
+    version: '0.155.0-alpha.16',
+    source: 'app-bundled:ChatGPT.app',
+    updateArgs: [],
+    installable: false,
+  }),
 });
 
 const localAgy = Object.freeze({
@@ -139,6 +184,13 @@ const localAgy = Object.freeze({
   source: 'system',
   installable: false,
   note: 'provider-not-install-target',
+  pinDigest: computePinDigest({
+    id: 'agy',
+    version: '1.2.9',
+    source: 'system',
+    updateArgs: [],
+    installable: false,
+  }),
 });
 
 const orbitCodex = Object.freeze({
@@ -149,6 +201,13 @@ const orbitCodex = Object.freeze({
   hostScoped: true,
   authorized: false,
   installable: false,
+  pinDigest: computePinDigest({
+    id: 'codex',
+    version: '0.149.1',
+    source: 'npm-global',
+    updateArgs: [],
+    installable: false,
+  }),
 });
 
 const localProvidersList = [
@@ -187,6 +246,7 @@ const manifestBase = {
   schema: 'webmcp-ai-provider-install-manifest/1',
   updated: '2026-09-24',
   hashAlgorithm: 'sha256',
+  pinDigestAlgorithm: 'sha256',
   hosts: Object.freeze({
     local: localHost,
     orbit: orbitHost,
@@ -272,6 +332,7 @@ export function planProviderInstall({
         id: p.id,
         version: p.version,
         source: p.source,
+        pinDigest: p.pinDigest || computePinDigest(p),
         action: 'host-authorization-required',
         installed: null,
         state: 'not-probed',
@@ -297,6 +358,7 @@ export function planProviderInstall({
         id: p.id,
         version: p.version,
         source: p.source,
+        pinDigest: p.pinDigest || computePinDigest(p),
         action: 'read-back-only',
         installed: null,
         state: 'not-probed',
@@ -322,7 +384,7 @@ export function planProviderInstall({
       if (!probe.error && (probe.status === 0 || probe.stdout)) {
         const out = `${probe.stdout || ''}\n${probe.stderr || ''}`;
         installed = extractVersion(p.id, out);
-        if (out.includes(p.version)) {
+        if (versionMatchesPin(out, p.version)) {
           state = 'match';
           action = 'none';
         } else {
@@ -338,6 +400,7 @@ export function planProviderInstall({
       id: p.id,
       version: p.version,
       source: p.source,
+      pinDigest: p.pinDigest || computePinDigest(p),
       action,
       installed,
       state,
@@ -397,6 +460,7 @@ export async function applyProviderInstall({
   for (const planned of plan.providers) {
     const pDef = manifestMap.get(planned.id) || {};
     const bin = resolveBin(pDef, env);
+    const pinDigest = planned.pinDigest || pDef.pinDigest || computePinDigest(pDef);
 
     if (!pDef.installable || planned.action === 'read-back-only') {
       const binPath = resolveBinPath(bin, env);
@@ -406,6 +470,7 @@ export async function applyProviderInstall({
         pinnedVersion: planned.version,
         installedVersion: planned.installed,
         source: planned.source,
+        pinDigest,
         state: planned.state,
         action: 'read-back-only',
         hash: hash ?? null,
@@ -424,6 +489,7 @@ export async function applyProviderInstall({
         pinnedVersion: planned.version,
         installedVersion: planned.installed ?? planned.version,
         source: planned.source,
+        pinDigest,
         state: planned.state,
         action: 'none',
         hash: hash ?? null,
@@ -445,6 +511,7 @@ export async function applyProviderInstall({
         pinnedVersion: planned.version,
         installedVersion: planned.installed,
         source: planned.source,
+        pinDigest,
         state: planned.state,
         action: 'operator-required',
         command: cmdStr,
@@ -483,7 +550,7 @@ export async function applyProviderInstall({
         }
       } catch {}
 
-      const versionMatches = Boolean(versionOutput && versionOutput.includes(planned.version));
+      const versionMatches = versionMatchesPin(versionOutput, planned.version);
       const state = versionMatches ? 'match' : 'drift';
       const action = (updateExitCode === 0 && versionMatches) ? 'updated' : 'update-failed';
 
@@ -495,6 +562,7 @@ export async function applyProviderInstall({
         pinnedVersion: planned.version,
         installedVersion: afterVersion,
         source: planned.source,
+        pinDigest,
         state,
         action,
         hash: hash ?? null,
@@ -557,7 +625,7 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
       });
       versionOutput = `${res.stdout || ''}\n${res.stderr || ''}`;
       installedVersion = extractVersion(p.id, versionOutput);
-      if (versionOutput.includes(p.version)) {
+      if (versionMatchesPin(versionOutput, p.version)) {
         state = 'match';
       } else {
         state = 'drift';
@@ -576,6 +644,7 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
       installedVersion,
       state,
       source: p.source,
+      pinDigest: p.pinDigest || computePinDigest(p),
       hash: hash ?? null,
       ...(hash ? { hashSource: 'binary-sha256' } : {}),
       auth: 'not-assessed',

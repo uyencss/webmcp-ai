@@ -12,6 +12,7 @@ import {
   applyProviderInstall,
   planProviderInstall,
   readBackProviderInstall,
+  versionMatchesPin,
 } from '../src/providers/install.mjs';
 
 import { createRequire } from 'node:module';
@@ -419,5 +420,162 @@ process.exit(0);
   const claudePlan = plan.providers.find((p) => p.id === 'claude');
   assert.equal(claudePlan.hash, expectedHash);
   assert.equal(claudePlan.hashSource, 'binary-sha256');
+});
+
+test('11. versionMatchesPin matches exact semver tokens and rejects substring matches', () => {
+  assert.equal(versionMatchesPin('24.19.0', '4.19.0'), false);
+  assert.equal(versionMatchesPin('4.19.01', '4.19.0'), false);
+  assert.equal(versionMatchesPin('2.1.280 (Claude Code)', '2.1.280'), true);
+  assert.equal(versionMatchesPin('Claude Code 2.1.280', '2.1.280'), true);
+  assert.equal(versionMatchesPin('0.155.0-alpha.16', '0.155.0-alpha.16'), true);
+  assert.equal(versionMatchesPin('opencode v2.0.15', '2.0.15'), true);
+  assert.equal(versionMatchesPin(null, '1.0.0'), false);
+  assert.equal(versionMatchesPin('1.0.0', null), false);
+  assert.equal(versionMatchesPin('', '1.0.0'), false);
+});
+
+test('12. Sol counterexample #2: manifest override pin 4.19.0 with binary printing 24.19.0 drifts, never matches via substring', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'sol-counterexample-2-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const fakeClaude = join(tmp, 'fake-claude-24.mjs');
+  writeExecutable(fakeClaude, `#!/usr/bin/env node
+if (process.argv.includes('--version')) {
+  process.stdout.write('24.19.0\\n');
+  process.exit(0);
+}
+process.exit(0);
+`);
+
+  const customManifest = {
+    ...PROVIDER_INSTALL_MANIFEST,
+    hosts: {
+      ...PROVIDER_INSTALL_MANIFEST.hosts,
+      local: {
+        authorized: true,
+        providers: [
+          {
+            id: 'claude',
+            bin: 'claude',
+            env: 'CLAUDE_BIN',
+            version: '4.19.0',
+            source: 'native-installer',
+            installKind: 'self-update',
+            updateArgs: ['update'],
+            installable: true,
+          },
+        ],
+      },
+    },
+  };
+
+  const env = {
+    ...process.env,
+    CLAUDE_BIN: fakeClaude,
+  };
+
+  const plan = planProviderInstall({ host: 'local', env, manifest: customManifest });
+  assert.equal(plan.ok, true);
+  const plannedClaude = plan.providers.find((p) => p.id === 'claude');
+  assert.equal(plannedClaude.state, 'drift');
+  assert.notEqual(plannedClaude.state, 'match');
+  assert.equal(plannedClaude.action, 'upgrade');
+
+  const receipt = await applyProviderInstall({
+    host: 'local',
+    env,
+    execute: true,
+    manifest: customManifest,
+  });
+  assert.equal(receipt.ok, true);
+  const claudeReceipt = receipt.providers.find((p) => p.id === 'claude');
+  assert.equal(claudeReceipt.state, 'drift');
+  assert.notEqual(claudeReceipt.state, 'match');
+  assert.equal(claudeReceipt.action, 'update-failed');
+});
+
+test('13. pinDigest: shape sha256 hex, independent canonical JSON computation matches manifest, override changes digest, plan/receipt/read-back match', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pin-digest-test-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  assert.equal(PROVIDER_INSTALL_MANIFEST.pinDigestAlgorithm, 'sha256');
+
+  // Independent canonical JSON recomputation helper in test
+  function independentPinDigest(p) {
+    const payload = {
+      id: p.id,
+      installable: Boolean(p.installable),
+      source: p.source,
+      updateArgs: Array.isArray(p.updateArgs) ? p.updateArgs : [],
+      version: p.version,
+    };
+    const keys = Object.keys(payload).sort();
+    const canonical = `{${keys.map((k) => `${JSON.stringify(k)}:${JSON.stringify(payload[k])}`).join(',')}}`;
+    return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
+  }
+
+  // 1. Check all providers in local and orbit hosts
+  const allProviders = [
+    ...PROVIDER_INSTALL_MANIFEST.hosts.local.providers,
+    ...PROVIDER_INSTALL_MANIFEST.hosts.orbit.providers,
+  ];
+
+  for (const p of allProviders) {
+    assert.match(p.pinDigest, /^sha256:[0-9a-f]{64}$/, `provider ${p.id} pinDigest must match sha256 hex pattern`);
+    const expected = independentPinDigest(p);
+    assert.equal(p.pinDigest, expected, `independent canonical recompute for ${p.id} must equal manifest pinDigest`);
+  }
+
+  // 2. Changing version in manifest override changes digest
+  const originalClaude = PROVIDER_INSTALL_MANIFEST.hosts.local.providers.claude;
+  const overriddenClaude = {
+    ...originalClaude,
+    version: '2.1.999',
+  };
+  const overriddenDigest = independentPinDigest(overriddenClaude);
+  assert.notEqual(overriddenDigest, originalClaude.pinDigest);
+
+  // 3. Plan, receipt, and read-back entries match provider def pinDigest
+  const fakeClaude = join(tmp, 'fake-claude.mjs');
+  writeExecutable(fakeClaude, `#!/usr/bin/env node
+if (process.argv.includes('--version')) {
+  process.stdout.write('2.1.280\\n');
+  process.exit(0);
+}
+process.exit(0);
+`);
+  const env = { ...process.env, CLAUDE_BIN: fakeClaude };
+
+  // Plan local
+  const plan = planProviderInstall({ host: 'local', env });
+  for (const entry of plan.providers) {
+    const def = PROVIDER_INSTALL_MANIFEST.hosts.local.providers.find((p) => p.id === entry.id);
+    assert.ok(def, `manifest provider def found for ${entry.id}`);
+    assert.equal(entry.pinDigest, def.pinDigest, `plan entry pinDigest must match provider def for ${entry.id}`);
+  }
+
+  // Plan orbit
+  const orbitPlan = planProviderInstall({ host: 'orbit', env });
+  for (const entry of orbitPlan.providers) {
+    const def = PROVIDER_INSTALL_MANIFEST.hosts.orbit.providers.find((p) => p.id === entry.id);
+    assert.ok(def, `manifest provider def found for orbit ${entry.id}`);
+    assert.equal(entry.pinDigest, def.pinDigest, `orbit plan entry pinDigest must match provider def for ${entry.id}`);
+  }
+
+  // Receipt
+  const receipt = await applyProviderInstall({ host: 'local', env, execute: false });
+  for (const entry of receipt.providers) {
+    const def = PROVIDER_INSTALL_MANIFEST.hosts.local.providers.find((p) => p.id === entry.id);
+    assert.ok(def);
+    assert.equal(entry.pinDigest, def.pinDigest, `receipt entry pinDigest must match provider def for ${entry.id}`);
+  }
+
+  // Read-back
+  const rb = await readBackProviderInstall({ host: 'local', env });
+  for (const entry of rb.providers) {
+    const def = PROVIDER_INSTALL_MANIFEST.hosts.local.providers.find((p) => p.id === entry.id);
+    assert.ok(def);
+    assert.equal(entry.pinDigest, def.pinDigest, `read-back entry pinDigest must match provider def for ${entry.id}`);
+  }
 });
 

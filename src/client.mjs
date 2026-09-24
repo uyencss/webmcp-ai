@@ -403,14 +403,23 @@ export async function generate(input) {
   const env = input.env || process.env;
   const command = resolveProviderBin(provider, env);
   // OpenCode dual-profile detection: one bounded `<bin> --version` probe per
-  // spawn (no model). An explicit request.opencodeProfile (tests/advanced
-  // callers) skips the probe. Unknown/unparseable versions fail closed with
-  // typed drift before any temp artifact or argv is created.
-  if (provider.id === 'opencode' && (request.opencodeProfile === null || request.opencodeProfile === undefined)) {
-    request.opencodeProfile = await detectOpencodeProfile({ command, env });
-  }
+  // spawn (no model). The installed binary profile is always detected. An
+  // explicit request.opencodeProfile (if provided) must match the detected
+  // binary profile or fail closed with typed drift. Unknown/unparseable versions
+  // fail closed with typed drift before any temp artifact or argv is created.
   if (provider.id === 'opencode') {
-    assertOpencodeV2DbReady({ env, profile: request.opencodeProfile });
+    const detected = await detectOpencodeProfile({ command, env });
+    const overrideRaw = request.opencodeProfile;
+    if (overrideRaw !== null && overrideRaw !== undefined && overrideRaw !== '') {
+      const override = normalizeOpencodeProfile(overrideRaw);
+      if (override !== detected) {
+        throw new AiCliError('PROVIDER_CAPABILITY_DRIFT',
+          `OpenCode profile override ${override} contradicts the installed binary profile ${detected}`,
+          { exitCode: 2, details: { capability: 'profile', profile: override, detected } });
+      }
+    }
+    request.opencodeProfile = detected;
+    assertOpencodeV2DbReady({ env, profile: detected });
   }
   // Library-only observers are inspected before invocation so provider-native
   // telemetry (Claude stream-json --verbose) can be selected without a second

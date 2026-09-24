@@ -457,16 +457,26 @@ test('generate keeps v1 argv on the v1 profile and honors an explicit override',
   assert.ok(v1Args.includes('--variant xhigh'), v1Args);
   assert.equal(v1Args.includes('--standalone'), false);
 
-  // Explicit profile skips the version probe: v2 version + explicit v1 keeps v1 argv.
-  const forced = await generate({
-    provider: 'opencode', prompt: 'forced', accessProfile: 'provider-default', agentMode: 'accept-edits',
+  // Explicit profile does not bypass the binary probe: an unknown/contradictory version must reject PROVIDER_CAPABILITY_DRIFT.
+  await assert.rejects(
+    generate({
+      provider: 'opencode', prompt: 'forced', accessProfile: 'provider-default', agentMode: 'accept-edits',
+      workspace: ws, model: 'muse', effort: 'high', opencodeProfile: 'v1',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '9.9.9', FAKE_ECHO_ARGS: '1' },
+    }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && !JSON.stringify(e).includes(fakeBin),
+  );
+
+  // Matching explicit v1 with detected v1 (1.18.30) honors the profile and keeps v1 argv.
+  const explicitV1 = await generate({
+    provider: 'opencode', prompt: 'explicit v1', accessProfile: 'provider-default', agentMode: 'accept-edits',
     workspace: ws, model: 'muse', effort: 'high', opencodeProfile: 'v1',
-    env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '9.9.9', FAKE_ECHO_ARGS: '1' },
+    env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '1.18.30', FAKE_ECHO_ARGS: '1' },
   });
-  const forcedArgs = forced.response.text.split('|args:')[1];
-  assert.ok(forcedArgs.includes('--dir'), forcedArgs);
-  assert.ok(forcedArgs.includes('--variant high'), forcedArgs);
-  // NB: explicit profile skips the version probe entirely (FAKE_VERSION=9.9.9 would drift).
+  const explicitV1Args = explicitV1.response.text.split('|args:')[1];
+  assert.ok(explicitV1Args.includes('--dir'), explicitV1Args);
+  assert.ok(explicitV1Args.includes('--variant high'), explicitV1Args);
+  assert.equal(explicitV1Args.includes('--standalone'), false);
 });
 
 // ---- providers inspect: version-aware mapping ----
