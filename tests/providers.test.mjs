@@ -87,6 +87,7 @@ test('opencode uses stdin, JSON NDJSON output, and a read-only plan agent by def
     prompt: 'opencode prompt',
     timeoutMs: 1234,
     workspace: '/ws',
+    opencodeProfile: 'v1',
   });
 
   assert.equal(invocation.stdin, 'opencode prompt');
@@ -109,6 +110,7 @@ test('opencode accept-edits opts into supervised writes with --auto and the buil
     timeoutMs: 1234,
     agentMode: 'accept-edits',
     workspace: '/ws',
+    opencodeProfile: 'v1',
   });
   assert.ok(invocation.args.includes('--auto'));
   assert.equal(invocation.args[invocation.args.indexOf('--agent') + 1], 'build');
@@ -144,6 +146,7 @@ test('opencode compose-only denies every tool and never auto-approves', () => {
     timeoutMs: 1000,
     toolPolicy: 'compose-only',
     workspace: '/ws',
+    opencodeProfile: 'v1',
   });
   assert.equal(invocation.args.includes('--auto'), false);
   assert.deepEqual(JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT).permission, { '*': 'deny' });
@@ -284,8 +287,10 @@ test('opencode buildInvocation honors an explicit OPENCODE_DB operator override'
     workspace: '/ws',
     env: { XDG_DATA_HOME: '/state/data/' },
   });
-  assert.ok(defaulted.env.OPENCODE_DB.endsWith('opencode-cli.db'));
+  assert.ok(defaulted.env.OPENCODE_DB.endsWith('opencode.db'));
   assert.match(defaulted.env.OPENCODE_DB, /^\/state\/data\//);
+  defaulted.cleanup?.();
+  overridden.cleanup?.();
 });
 
 test('Codex resume requests workspace-write for --full via sandbox_mode and stays read-only otherwise', () => {

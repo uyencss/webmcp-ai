@@ -150,10 +150,11 @@ test('F4 RED: opencode review uses known build agent with read-only config', asy
     const agent = invocation.args[invocation.args.indexOf('--agent') + 1];
     assert.equal(agent, 'build', 'review uses known built-in build agent, not unproven review');
     const cfg = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT);
-    assert.equal(cfg.permission.read, 'allow');
-    assert.equal(cfg.permission.edit, 'deny');
-    assert.equal(cfg.permission.write, 'deny');
-    assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode-cli.db'));
+    assert.ok(Array.isArray(cfg.permissions));
+    assert.equal(cfg.permission, undefined);
+    assert.ok(cfg.permissions.some((r) => r.action === 'read' && r.effect === 'allow'));
+    assert.ok(!cfg.permissions.some((r) => r.action === 'edit' && r.effect === 'allow'));
+    assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode.db'));
     invocation.cleanup?.();
     // explicit agent for review must fail typed
     assert.throws(

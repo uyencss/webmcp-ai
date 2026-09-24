@@ -26,6 +26,8 @@ import {
   assertOpencodeV2DbReady,
   normalizeOpencodeProfile,
   opencodeProfileForVersion,
+  resolveOpencodeCliDb,
+  syncOpencodeCredentials,
   validateOpencodeReviewSupport,
 } from './providers/opencode.mjs';
 import { parseReviewOutput } from './review-result.mjs';
@@ -451,6 +453,10 @@ export async function generate(input) {
   } catch (error) {
     if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
     throw error;
+  }
+
+  if (provider.id === 'opencode' && request.opencodeProfile === 'v1') {
+    try { syncOpencodeCredentials(resolveOpencodeCliDb(env, { profile: 'v1' })); } catch {}
   }
 
   // Reviewer spawn-lane probes: before any model spawn, validate the

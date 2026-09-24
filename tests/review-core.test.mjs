@@ -301,11 +301,11 @@ test('RED: opencode vNext review does not default to native plan; preserves isol
     const agent = invocation.args[invocation.args.indexOf('--agent') + 1];
     assert.equal(agent, 'build', 'vNext review uses known built-in build agent, never native plan');
     const cfg = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT);
-    assert.equal(cfg.permission.read, 'allow');
-    assert.equal(cfg.permission.edit, 'deny');
-    assert.equal(cfg.permission.write, 'deny');
-    assert.deepEqual(cfg.mcp, {});
-    assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode-cli.db'));
+    assert.ok(Array.isArray(cfg.permissions));
+    assert.equal(cfg.permission, undefined);
+    assert.ok(cfg.permissions.some((r) => r.action === 'read' && r.effect === 'allow'));
+    assert.ok(!cfg.permissions.some((r) => r.action === 'edit' && r.effect === 'allow'));
+    assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode.db'));
     invocation.cleanup?.();
     // legacy v1 plan/build compatibility
     const legacyPlan = getProvider('opencode').buildInvocation({
@@ -351,7 +351,9 @@ test('F4: no vNext intent implicitly selects native Plan mode', async () => {
     assert.equal(compose.args[compose.args.indexOf('--agent') + 1], 'build');
     assert.equal(compose.args.includes('--auto'), false);
     const cfg = JSON.parse(compose.env.OPENCODE_CONFIG_CONTENT);
-    assert.deepEqual(cfg.permission, { '*': 'deny' });
+    assert.deepEqual(cfg.permissions, [{ action: '*', resource: '*', effect: 'deny' }]);
+    assert.equal(cfg.permission, undefined);
+    assert.ok(compose.env.OPENCODE_DB.endsWith('opencode.db'));
     compose.cleanup?.();
     // OpenCode plan uniformly rejected.
     assert.throws(

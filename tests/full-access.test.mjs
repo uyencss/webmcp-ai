@@ -86,6 +86,7 @@ test('opencode full is passthrough: no generated config, ambient tools kept', ()
       accessProfile: 'full',
       agentMode: 'accept-edits',
       env: {},
+      opencodeProfile: 'v1',
     });
     assert.equal(invocation.stdin, 'full prompt');
     assert.ok(invocation.args.includes('--dir'));

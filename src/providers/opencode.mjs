@@ -82,9 +82,13 @@ export function opencodeProfileForVersion(versionOutput) {
 }
 
 /**
- * Resolve the effective adapter profile for a request. An absent profile
- * preserves legacy v1 behavior byte-for-byte; an unrecognized profile is a
- * typed capability drift (fail-closed), never a silent v1 fallback.
+ * Resolve the effective adapter profile for a request. Direct callers passing
+ * an absent or empty profile still receive 'v1' for compatibility, but
+ * provider builders (buildInvocation / buildVNextReviewInvocation) only
+ * invoke this helper when request.opencodeProfile is truthy and default an
+ * absent profile to 'v2' (accepted); v1 is used only when explicitly
+ * requested or detected by generate(). An unrecognized profile is a typed
+ * capability drift (fail-closed), never a silent v1 fallback.
  */
 export function normalizeOpencodeProfile(profile) {
   if (profile === null || profile === undefined || profile === '') return 'v1';
@@ -405,9 +409,6 @@ function createIsolatedOpencodeRuntime(request, baseConfig, profile = 'v1') {
     // for defense-in-depth.
     writeFileSync(openCodeConfig, JSON.stringify(effectiveConfig, null, 2), 'utf8');
     const dbPath = resolveOpencodeCliDb(request.env, { profile });
-    if (profile === 'v1') {
-      syncOpencodeCredentials(dbPath);
-    }
     return {
       env: {
         OPENCODE_DB: dbPath,
@@ -470,9 +471,11 @@ export const opencodeProvider = {
         { exitCode: 2 },
       );
     }
-    // Resolved once per invocation: v1 (legacy, default) or v2 (installed
-    // 2.x CLI). Unknown profiles fail closed before any argv is built.
-    const profile = normalizeOpencodeProfile(request.opencodeProfile);
+    // Resolved once per invocation: an explicit profile is honored; an
+    // absent one defaults to the accepted v2 (a v2 host must never select the
+    // legacy database in previews); v1 only when explicitly requested or
+    // detected. Unknown profiles fail closed before any argv is built.
+    const profile = request.opencodeProfile ? normalizeOpencodeProfile(request.opencodeProfile) : 'v2';
     // Portable vNext reviewer lane (taskIntent present). Legacy v1
     // plan/build behavior below is preserved verbatim when taskIntent is
     // absent (compatibility). vNext review uses the known installed
@@ -660,7 +663,7 @@ export const opencodeProvider = {
 function buildVNextReviewInvocation(request, taskIntent) {
   const agentMode = request.agentMode ?? null;
   const accessProfile = request.accessProfile || (request.toolPolicy === 'compose-only' ? 'compose-only' : null);
-  const profile = normalizeOpencodeProfile(request.opencodeProfile);
+  const profile = request.opencodeProfile ? normalizeOpencodeProfile(request.opencodeProfile) : 'v2';
   if (typeof taskIntent === 'string' && !['review', 'compose', 'implement', 'plan'].includes(taskIntent)) {
     throw new AiCliError('TASK_INTENT_INVALID', `Unknown taskIntent: ${taskIntent}`, {
       exitCode: 2,

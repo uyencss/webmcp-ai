@@ -157,6 +157,7 @@ test('opencode legacy and review argv follow the resolved profile', async () => 
   const v1 = provider.buildInvocation({
     prompt: 'x', workspace: ws, accessProfile: 'provider-default', agentMode: 'accept-edits',
     model: 'opencode-go/muse-spark-1.3-contributor', effort: 'xhigh', env: {},
+    opencodeProfile: 'v1',
   });
   try {
     assert.ok(v1.args.includes('--variant'));
@@ -327,8 +328,7 @@ test('generate and review dry-runs preserve explicit profiles and mark absent pr
   assert.equal(unresolved.opencodeProfile, null);
   assert.equal(unresolved.opencodeProfileSource, 'unresolved');
   assert.deepEqual(unresolved.args, [
-    'run', '--format', 'json', '--agent', 'plan', '--model', model,
-    '--variant', 'xhigh', '--dir', '<workspace>',
+    'run', '--standalone', '--format', 'json', '--agent', 'plan', '--model', `${model}#xhigh`,
   ]);
 
   const serialized = JSON.stringify({ generateV2, reviewV2, unresolved });

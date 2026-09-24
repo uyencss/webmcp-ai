@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -11,7 +11,8 @@ import {
   resolveOpencodeCliDb,
 } from '../src/providers/opencode.mjs';
 import { getProvider } from '../src/providers/index.mjs';
-import { generate, listAgents, listModels } from '../src/client.mjs';
+import { describeGenerateDryRun, generate, listAgents, listModels } from '../src/client.mjs';
+import { describeReviewDryRun, review } from '../src/review.mjs';
 
 function createRealSqliteFile(filePath) {
   try {
@@ -293,8 +294,8 @@ test('buildInvocation for v1 lanes preserves opencode-cli.db (regression guard)'
 
   const lanes = [
     {
-      name: 'provider-default (default profile)',
-      request: { prompt: 't', workspace: dir, env },
+      name: 'provider-default (v1 profile)',
+      request: { prompt: 't', workspace: dir, opencodeProfile: 'v1', env },
     },
     {
       name: 'provider-default + accept-edits',
@@ -525,4 +526,126 @@ test('generate validates opencodeProfile override against detected binary versio
   assert.ok(runCall, 'run should be spawned for matching v1');
   assert.equal(runCall.opencodeDb.endsWith(join('opencode', 'opencode-cli.db')), true);
 });
+
+test('review and both dry-runs on a v2 host never select or write the legacy database', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-v2-legacy-protect-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const workspace = join(dir, 'workspace');
+  mkdirSync(workspace, { recursive: true });
+
+  const xdgDataHome = join(dir, 'xdg');
+  const opencodeDataDir = join(xdgDataHome, 'opencode');
+  mkdirSync(opencodeDataDir, { recursive: true });
+
+  const legacyDb = join(opencodeDataDir, 'opencode-cli.db');
+  const v2Db = join(opencodeDataDir, 'opencode.db');
+
+  const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+  const dbLegacy = new DatabaseSync(legacyDb);
+  dbLegacy.exec("CREATE TABLE legacy_sample (id INT, note TEXT); INSERT INTO legacy_sample VALUES (1, 'legacy-data-marker');");
+  dbLegacy.close();
+
+  const dbV2 = new DatabaseSync(v2Db);
+  dbV2.exec("CREATE TABLE v2_sample (id INT, note TEXT); INSERT INTO v2_sample VALUES (2, 'v2-data-marker');");
+  dbV2.close();
+
+  const legacyBytesBefore = readFileSync(legacyDb);
+  const legacyMtimeBefore = statSync(legacyDb).mtimeMs;
+
+  const markerPath = join(dir, 'marker-v2-host.log');
+  const fakeBinPath = join(dir, 'fake-opencode-v2.mjs');
+  const reviewPayload = JSON.stringify({
+    schema: 'webmcp-ai-review-result/1',
+    verdict: 'approve',
+    summary: 'review completed cleanly',
+  });
+  const v2HelpText = 'opencode run --standalone --format json --agent build --model sonnet#effort\n';
+
+  writeFileSync(fakeBinPath, [
+    '#!/usr/bin/env node',
+    "import { appendFileSync } from 'node:fs';",
+    'const args = process.argv.slice(2);',
+    `appendFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ argv: args, db: process.env.OPENCODE_DB }) + '\\n');`,
+    "if (args.includes('--version')) {",
+    "  process.stdout.write('opencode v2.0.1\\n');",
+    '  process.exit(0);',
+    '}',
+    "if (args.includes('--help')) {",
+    `  process.stdout.write(${JSON.stringify(v2HelpText)});`,
+    '  process.exit(0);',
+    '}',
+    "if (args.includes('run')) {",
+    `  const line = JSON.stringify({ type: 'text', sessionID: 'ses_v2_protect', part: { type: 'text', text: ${JSON.stringify(reviewPayload)} } });`,
+    "  process.stdout.write(line + '\\n');",
+    '  process.exit(0);',
+    '}',
+    'process.exit(0);',
+  ].join('\n'));
+  chmodSync(fakeBinPath, 0o755);
+
+  const env = {
+    ...process.env,
+    OPENCODE_BIN: fakeBinPath,
+    XDG_DATA_HOME: xdgDataHome,
+  };
+  delete env.OPENCODE_DB;
+
+  const genDryRun = describeGenerateDryRun({
+    provider: 'opencode',
+    prompt: 'x',
+    workspace,
+    accessProfile: 'provider-default',
+    agentMode: 'plan',
+    env,
+  });
+  assert.equal(genDryRun.ok, true);
+
+  const revDryRun = describeReviewDryRun({
+    provider: 'opencode',
+    prompt: 'x',
+    taskIntent: 'review',
+    workspace,
+    env,
+  });
+  assert.equal(revDryRun.ok, true);
+
+  const revResult = await review({
+    provider: 'opencode',
+    prompt: 'x',
+    taskIntent: 'review',
+    workspace,
+    env,
+  });
+  assert.equal(revResult.ok, true);
+  assert.equal(revResult.review?.verdict, 'approve');
+
+  // getProvider('opencode').buildInvocation({prompt:'x', workspace, env}) (unresolved)
+  const unresolvedInvocation = getProvider('opencode').buildInvocation({
+    prompt: 'x',
+    workspace,
+    env,
+  });
+  assert.ok(unresolvedInvocation.env.OPENCODE_DB.endsWith('opencode.db'), `expected opencode.db, got: ${unresolvedInvocation.env.OPENCODE_DB}`);
+  unresolvedInvocation.cleanup?.();
+
+  // Legacy bytes/mtime must not change
+  const legacyBytesAfter = readFileSync(legacyDb);
+  const legacyMtimeAfter = statSync(legacyDb).mtimeMs;
+  assert.deepEqual(legacyBytesAfter, legacyBytesBefore, 'legacy database bytes must not change');
+  assert.equal(legacyMtimeAfter, legacyMtimeBefore, 'legacy database mtime must not change');
+
+  // Check marker: no models/agent marker, run invocations use db ending with opencode.db
+  const calls = existsSync(markerPath)
+    ? readFileSync(markerPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    : [];
+
+  assert.equal(calls.some((c) => c.argv.includes('models') || c.argv.includes('agent')), false, 'must not invoke models or agent');
+  const runCalls = calls.filter((c) => c.argv.includes('run') && !c.argv.includes('--help'));
+  assert.ok(runCalls.length > 0, 'review() must spawn run');
+  for (const call of runCalls) {
+    assert.ok(call.db && call.db.endsWith('opencode.db'), `run DB must end with opencode.db, got: ${call.db}`);
+  }
+});
+
 

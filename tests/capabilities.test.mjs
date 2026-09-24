@@ -185,6 +185,7 @@ test('OpenCode config contains scoped external_directory and never global /** or
     protectedPaths: [],
     timeoutMs: 1000,
     env: process.env,
+    opencodeProfile: 'v1',
   });
   const parsedCfg = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT);
   assert.ok(parsedCfg.external_directory.includes(ws2));
