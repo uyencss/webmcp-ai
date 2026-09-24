@@ -76,6 +76,25 @@ test('unknown subcommand exits non-zero and never claims another route', () => {
   assert.doesNotMatch(result.stdout, /Browser/);
 });
 
+// Round 14 item 2: the canary stays blocked by default — bare exits 2,
+// --live without attestation exits 1, and neither can reach the network
+// (both return before any key file is read).
+test('canary stays blocked without attestation', () => {
+  const bare = run(['canary']);
+  assert.equal(bare.status, 2, bare.stderr);
+  assert.match(bare.stderr, /opt-in only/);
+  const live = run(['canary', '--live']);
+  assert.equal(live.status, 1, live.stderr);
+  assert.match(live.stderr, /BLOCKED_BY_GATE0/);
+});
+
+test('canary help documents the attestation flag', () => {
+  const result = run(['canary', '--help']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /--attest-gate0/);
+  assert.match(result.stdout, /--key-file/);
+});
+
 test('bin entry and ./jev export resolve to the jev runtime', async () => {
   assert.equal(pkg.bin['webmcp-jev'], 'bin/webmcp-jev.mjs');
   assert.equal(pkg.exports['./jev'], './src/jev/cli.mjs');
