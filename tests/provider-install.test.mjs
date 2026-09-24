@@ -601,4 +601,22 @@ test('14. a mutated pin can never carry a stale pinDigest', async (t) => {
   assert.notEqual(applied.pinDigest, staleDigest);
 });
 
+test('15. readBackProviderInstall accepts a manifest override and recomputes the mutated pin digest', async (t) => {
+  const manifest = structuredClone(PROVIDER_INSTALL_MANIFEST);
+  const oldClaude = manifest.hosts.local.providers.find((p) => p.id === 'claude');
+  const staleDigest = oldClaude.pinDigest;
+  manifest.hosts.local.providers = manifest.hosts.local.providers.map((p) =>
+    p.id === 'claude' ? { ...p, version: '4.19.0' } : p);
+  const mutated = manifest.hosts.local.providers.find((p) => p.id === 'claude');
+  assert.equal(mutated.pinDigest, staleDigest, 'carried digest is stale by construction');
+  const expected = computePinDigest({ ...mutated });
+  assert.notEqual(expected, staleDigest);
+  const rb = await readBackProviderInstall({
+    host: 'local', env: { ...process.env, CLAUDE_BIN: '/usr/bin/true' }, manifest,
+  });
+  const entry = rb.providers.find((p) => p.id === 'claude');
+  assert.equal(entry.pinDigest, expected, 'read-back must confirm the overridden pin');
+  assert.notEqual(entry.pinDigest, staleDigest);
+});
+
 

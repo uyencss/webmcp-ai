@@ -584,7 +584,7 @@ export async function applyProviderInstall({
   };
 }
 
-export async function readBackProviderInstall({ host = 'local', env = process.env } = {}) {
+export async function readBackProviderInstall({ host = 'local', env = process.env, manifest = PROVIDER_INSTALL_MANIFEST } = {}) {
   const normHost = String(host || '').trim().toLowerCase();
   if (normHost === 'orbit') {
     return {
@@ -607,11 +607,18 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
     });
   }
 
-  const localList = PROVIDER_INSTALL_MANIFEST.hosts.local.providers;
+  const hostConfig = manifest?.hosts?.local || manifest?.local;
+  const localProviders = Array.isArray(hostConfig?.providers)
+    ? hostConfig.providers
+    : Object.entries(hostConfig?.providers || {}).map(([id, p]) => ({ id, ...p }));
+  if (!localProviders.length) {
+    throw new AiCliError('PROVIDER_INSTALL_HOST_UNKNOWN', 'Provider install host has no providers: local', { exitCode: 2, retryable: false, details: { host: 'local' } });
+  }
+
   const safeEnv = buildSafeChildEnv(env, {});
   const providers = [];
 
-  for (const p of localList) {
+  for (const p of localProviders) {
     const bin = resolveBin(p, env);
     let installedVersion = null;
     let state = 'missing';
