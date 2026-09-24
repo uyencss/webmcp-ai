@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -147,7 +148,7 @@ test('4. applyProviderInstall orbit throws HOST_SCOPE_NOT_AUTHORIZED without loc
   assert.equal(existsSync(marker), false);
 });
 
-test('5. applyProviderInstall local: execute:false -> operator-required, execute:true -> updated with allowlisted argv', async (t) => {
+test('5. applyProviderInstall local: execute:false -> operator-required, execute:true -> pin verification governs match/updated', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'apply-local-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -176,18 +177,51 @@ process.exit(0);
   assert.equal(claudeNoExec.command, 'claude update');
   assert.equal(existsSync(marker), false);
 
-  // execute: true -> spawns allowlisted argv
+  // execute: true with version staying 2.1.279 -> state: drift, action: update-failed
   const receiptExec = await applyProviderInstall({ host: 'local', env, execute: true });
   assert.equal(receiptExec.ok, true);
   const claudeExec = receiptExec.providers.find((p) => p.id === 'claude');
-  assert.equal(claudeExec.action, 'updated');
+  assert.equal(claudeExec.state, 'drift');
+  assert.equal(claudeExec.action, 'update-failed');
   assert.equal(existsSync(marker), true);
 
   const runs = readFileSync(marker, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.deepEqual(runs[0], ['update']);
+
+  // Successful update case: fake writes state file during update, then --version returns 2.1.280
+  const stateFile = join(tmp, 'claude-updated.state');
+  const fakeClaudeSuccess = join(tmp, 'fake-claude-success.mjs');
+  writeExecutable(fakeClaudeSuccess, `#!/usr/bin/env node
+import { existsSync, writeFileSync } from 'node:fs';
+if (process.argv.includes('--version')) {
+  if (existsSync(${JSON.stringify(stateFile)})) {
+    process.stdout.write('2.1.280 (Claude Code)\\n');
+  } else {
+    process.stdout.write('2.1.279 (Claude Code)\\n');
+  }
+  process.exit(0);
+}
+if (process.argv.includes('update')) {
+  writeFileSync(${JSON.stringify(stateFile)}, 'done');
+  process.exit(0);
+}
+process.exit(0);
+`);
+
+  const envSuccess = {
+    ...process.env,
+    CLAUDE_BIN: fakeClaudeSuccess,
+  };
+
+  const receiptSuccess = await applyProviderInstall({ host: 'local', env: envSuccess, execute: true });
+  assert.equal(receiptSuccess.ok, true);
+  const claudeSuccess = receiptSuccess.providers.find((p) => p.id === 'claude');
+  assert.equal(claudeSuccess.state, 'match');
+  assert.equal(claudeSuccess.action, 'updated');
+  assert.equal(claudeSuccess.installedVersion, '2.1.280');
 });
 
-test('6. receipt security hygiene: no auth:true, auth:not-assessed, canary:not-run, no tmpdir path', async (t) => {
+test('6. receipt security hygiene: no auth:true, auth:not-assessed, canary:not-run per-provider, no tmpdir path', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'hygiene-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -208,12 +242,46 @@ process.exit(0);
   const receipt = await applyProviderInstall({ host: 'local', env, execute: false });
   assert.equal(receipt.auth, 'not-assessed');
   assert.equal(receipt.canary, 'not-run');
+  for (const p of receipt.providers) {
+    assert.equal(p.auth, 'not-assessed');
+    assert.equal(p.canary, 'not-run');
+  }
 
   const text = JSON.stringify(receipt);
   assert.equal(/"auth":\s*true/.test(text), false);
   assert.equal(/"authenticated":\s*true/.test(text), false);
   assert.equal(text.includes(tmp), false);
   assert.equal(text.includes(process.env.HOME), false);
+
+  const plan = planProviderInstall({ host: 'local', env });
+  for (const p of plan.providers) {
+    assert.equal(p.auth, 'not-assessed');
+    assert.equal(p.canary, 'not-run');
+  }
+  const planText = JSON.stringify(plan);
+  assert.equal(/"auth":\s*true/.test(planText), false);
+  assert.equal(/"authenticated":\s*true/.test(planText), false);
+
+  const orbitPlan = planProviderInstall({ host: 'orbit', env });
+  for (const p of orbitPlan.providers) {
+    assert.equal(p.auth, 'not-assessed');
+    assert.equal(p.canary, 'not-run');
+  }
+
+  const rb = await readBackProviderInstall({ host: 'local', env });
+  assert.equal(rb.auth, 'not-assessed');
+  assert.equal(rb.canary, 'not-run');
+  for (const p of rb.providers) {
+    assert.equal(p.auth, 'not-assessed');
+    assert.equal(p.canary, 'not-run');
+  }
+  const rbText = JSON.stringify(rb);
+  assert.equal(/"auth":\s*true/.test(rbText), false);
+  assert.equal(/"authenticated":\s*true/.test(rbText), false);
+
+  const orbitRb = await readBackProviderInstall({ host: 'orbit', env });
+  assert.equal(orbitRb.auth, 'not-assessed');
+  assert.equal(orbitRb.canary, 'not-run');
 });
 
 test('7. readBackProviderInstall local: v2 ready when sqlite valid, missing when absent (never throws)', async (t) => {
@@ -270,3 +338,86 @@ test('8. CLI smoke: providers install --plan --json and --host orbit --apply --j
   assert.equal(orbitJson.ok, false);
   assert.equal(orbitJson.error?.code, 'HOST_SCOPE_NOT_AUTHORIZED');
 });
+
+test('9. Sol counterexample: manifest override pin 9.9.9 with /usr/bin/true execute:true never matches', async () => {
+  const customManifest = {
+    ...PROVIDER_INSTALL_MANIFEST,
+    hosts: {
+      ...PROVIDER_INSTALL_MANIFEST.hosts,
+      local: {
+        authorized: true,
+        providers: [
+          {
+            id: 'claude',
+            bin: 'claude',
+            env: 'CLAUDE_BIN',
+            version: '9.9.9',
+            source: 'native-installer',
+            installKind: 'self-update',
+            updateArgs: ['update'],
+            installable: true,
+          },
+        ],
+      },
+    },
+  };
+
+  const env = {
+    ...process.env,
+    CLAUDE_BIN: '/usr/bin/true',
+  };
+
+  const receipt = await applyProviderInstall({
+    host: 'local',
+    env,
+    execute: true,
+    manifest: customManifest,
+  });
+
+  assert.equal(receipt.ok, true);
+  const claude = receipt.providers.find((p) => p.id === 'claude');
+  assert.notEqual(claude.state, 'match');
+  assert.equal(claude.state, 'drift');
+  assert.equal(claude.action, 'update-failed');
+});
+
+test('10. binary hash: small fake bin receipt + read-back has real sha256, hashSource binary-sha256, manifest algorithm', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'hash-test-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  assert.equal(PROVIDER_INSTALL_MANIFEST.hashAlgorithm, 'sha256');
+
+  const fakeClaude = join(tmp, 'fake-claude.mjs');
+  writeExecutable(fakeClaude, `#!/usr/bin/env node
+if (process.argv.includes('--version')) {
+  process.stdout.write('2.1.280\\n');
+  process.exit(0);
+}
+process.exit(0);
+`);
+
+  const fileBytes = readFileSync(fakeClaude);
+  const expectedHash = `sha256:${createHash('sha256').update(fileBytes).digest('hex')}`;
+  assert.match(expectedHash, /^sha256:[0-9a-f]{64}$/);
+
+  const env = {
+    ...process.env,
+    CLAUDE_BIN: fakeClaude,
+  };
+
+  const receipt = await applyProviderInstall({ host: 'local', env, execute: false });
+  const claudeReceipt = receipt.providers.find((p) => p.id === 'claude');
+  assert.equal(claudeReceipt.hash, expectedHash);
+  assert.equal(claudeReceipt.hashSource, 'binary-sha256');
+
+  const rb = await readBackProviderInstall({ host: 'local', env });
+  const claudeRb = rb.providers.find((p) => p.id === 'claude');
+  assert.equal(claudeRb.hash, expectedHash);
+  assert.equal(claudeRb.hashSource, 'binary-sha256');
+
+  const plan = planProviderInstall({ host: 'local', env });
+  const claudePlan = plan.providers.find((p) => p.id === 'claude');
+  assert.equal(claudePlan.hash, expectedHash);
+  assert.equal(claudePlan.hashSource, 'binary-sha256');
+});
+

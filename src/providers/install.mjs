@@ -1,6 +1,18 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { buildSafeChildEnv } from '../capabilities.mjs';
 import { AiCliError } from '../errors.mjs';
@@ -12,6 +24,70 @@ import {
   parseOpencodeVersion,
   resolveOpencodeCliDb,
 } from './opencode.mjs';
+
+export function resolveBinPath(bin, env = process.env) {
+  if (!bin || typeof bin !== 'string') return null;
+  if (isAbsolute(bin)) {
+    return bin;
+  }
+  if (bin.includes('/')) {
+    try {
+      return realpathSync(bin);
+    } catch {
+      return resolve(bin);
+    }
+  }
+  const rawPath = env?.PATH ?? env?.Path ?? process.env?.PATH ?? '';
+  const separator = process.platform === 'win32' ? ';' : ':';
+  for (const dir of String(rawPath).split(separator)) {
+    if (!dir) continue;
+    const candidate = join(dir, bin);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+const MAX_BINARY_HASH_BYTES = 128 * 1024 * 1024;
+const HASH_CHUNK_SIZE = 64 * 1024;
+
+export function binaryHash(binPath) {
+  if (!binPath || typeof binPath !== 'string') return null;
+  let targetPath = binPath;
+  try {
+    const lstat = lstatSync(binPath);
+    if (lstat.isSymbolicLink()) {
+      targetPath = realpathSync(binPath);
+    }
+    const stat = statSync(targetPath);
+    if (!stat.isFile()) return null;
+    if (stat.size > MAX_BINARY_HASH_BYTES) return null;
+
+    const hash = createHash('sha256');
+    const fd = openSync(targetPath, 'r');
+    const buffer = Buffer.alloc(HASH_CHUNK_SIZE);
+    let bytesRead = 0;
+    let totalRead = 0;
+    try {
+      while ((bytesRead = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+        totalRead += bytesRead;
+        if (totalRead > MAX_BINARY_HASH_BYTES) {
+          return null;
+        }
+        hash.update(buffer.subarray(0, bytesRead));
+      }
+    } finally {
+      closeSync(fd);
+    }
+    return `sha256:${hash.digest('hex')}`;
+  } catch {
+    return null;
+  }
+}
 
 function extractVersion(id, output) {
   const text = String(output ?? '');
@@ -110,6 +186,7 @@ const orbitHost = Object.freeze({
 const manifestBase = {
   schema: 'webmcp-ai-provider-install-manifest/1',
   updated: '2026-09-24',
+  hashAlgorithm: 'sha256',
   hosts: Object.freeze({
     local: localHost,
     orbit: orbitHost,
@@ -198,6 +275,9 @@ export function planProviderInstall({
         action: 'host-authorization-required',
         installed: null,
         state: 'not-probed',
+        hash: null,
+        auth: 'not-assessed',
+        canary: 'not-run',
       })),
       auth: 'separate',
       canary: 'separate',
@@ -208,6 +288,10 @@ export function planProviderInstall({
   const safeEnv = buildSafeChildEnv(env, {});
 
   for (const p of providers) {
+    const bin = resolveBin(p, env);
+    const binPath = resolveBinPath(bin, env);
+    const hash = binPath ? binaryHash(binPath) : null;
+
     if (!p.installable) {
       plannedProviders.push({
         id: p.id,
@@ -216,11 +300,14 @@ export function planProviderInstall({
         action: 'read-back-only',
         installed: null,
         state: 'not-probed',
+        hash: hash ?? null,
+        ...(hash ? { hashSource: 'binary-sha256' } : {}),
+        auth: 'not-assessed',
+        canary: 'not-run',
       });
       continue;
     }
 
-    const bin = resolveBin(p, env);
     let state = 'missing';
     let installed = null;
     let action = 'install-required';
@@ -254,6 +341,10 @@ export function planProviderInstall({
       action,
       installed,
       state,
+      hash: hash ?? null,
+      ...(hash ? { hashSource: 'binary-sha256' } : {}),
+      auth: 'not-assessed',
+      canary: 'not-run',
     });
   }
 
@@ -305,7 +396,11 @@ export async function applyProviderInstall({
 
   for (const planned of plan.providers) {
     const pDef = manifestMap.get(planned.id) || {};
+    const bin = resolveBin(pDef, env);
+
     if (!pDef.installable || planned.action === 'read-back-only') {
+      const binPath = resolveBinPath(bin, env);
+      const hash = binPath ? binaryHash(binPath) : null;
       receiptProviders.push({
         id: planned.id,
         pinnedVersion: planned.version,
@@ -313,11 +408,17 @@ export async function applyProviderInstall({
         source: planned.source,
         state: planned.state,
         action: 'read-back-only',
+        hash: hash ?? null,
+        ...(hash ? { hashSource: 'binary-sha256' } : {}),
+        auth: 'not-assessed',
+        canary: 'not-run',
       });
       continue;
     }
 
     if (planned.action === 'none') {
+      const binPath = resolveBinPath(bin, env);
+      const hash = binPath ? binaryHash(binPath) : null;
       receiptProviders.push({
         id: planned.id,
         pinnedVersion: planned.version,
@@ -325,12 +426,18 @@ export async function applyProviderInstall({
         source: planned.source,
         state: planned.state,
         action: 'none',
+        hash: hash ?? null,
+        ...(hash ? { hashSource: 'binary-sha256' } : {}),
+        auth: 'not-assessed',
+        canary: 'not-run',
       });
       continue;
     }
 
     // action is 'upgrade' or 'install-required'
     if (!execute) {
+      const binPath = resolveBinPath(bin, env);
+      const hash = binPath ? binaryHash(binPath) : null;
       const updateArgs = pDef.updateArgs || [];
       const cmdStr = `${pDef.bin || planned.id} ${updateArgs.join(' ')}`.trim();
       receiptProviders.push({
@@ -341,11 +448,14 @@ export async function applyProviderInstall({
         state: planned.state,
         action: 'operator-required',
         command: cmdStr,
+        hash: hash ?? null,
+        ...(hash ? { hashSource: 'binary-sha256' } : {}),
+        auth: 'not-assessed',
+        canary: 'not-run',
       });
     } else {
-      const bin = resolveBin(pDef, env);
       const updateArgs = pDef.updateArgs || [];
-      let finalAction = 'update-failed';
+      let updateExitCode = -1;
 
       try {
         const runRes = await runProcess(bin, updateArgs, {
@@ -353,14 +463,13 @@ export async function applyProviderInstall({
           timeoutMs: 300_000,
           maxOutputBytes: 16 * 1024 * 1024,
         });
-        if (runRes.exitCode === 0) {
-          finalAction = 'updated';
-        }
+        updateExitCode = runRes.exitCode;
       } catch {
-        finalAction = 'update-failed';
+        updateExitCode = -1;
       }
 
-      let afterVersion = planned.installed;
+      let versionOutput = '';
+      let afterVersion = null;
       try {
         const checkProbe = spawnSync(bin, ['--version'], {
           env: safeEnv,
@@ -369,17 +478,29 @@ export async function applyProviderInstall({
           encoding: 'utf8',
         });
         if (!checkProbe.error && (checkProbe.status === 0 || checkProbe.stdout)) {
-          afterVersion = extractVersion(planned.id, `${checkProbe.stdout || ''}\n${checkProbe.stderr || ''}`);
+          versionOutput = `${checkProbe.stdout || ''}\n${checkProbe.stderr || ''}`;
+          afterVersion = extractVersion(planned.id, versionOutput);
         }
       } catch {}
+
+      const versionMatches = Boolean(versionOutput && versionOutput.includes(planned.version));
+      const state = versionMatches ? 'match' : 'drift';
+      const action = (updateExitCode === 0 && versionMatches) ? 'updated' : 'update-failed';
+
+      const binPath = resolveBinPath(bin, env);
+      const hash = binPath ? binaryHash(binPath) : null;
 
       receiptProviders.push({
         id: planned.id,
         pinnedVersion: planned.version,
         installedVersion: afterVersion,
         source: planned.source,
-        state: finalAction === 'updated' ? 'match' : planned.state,
-        action: finalAction,
+        state,
+        action,
+        hash: hash ?? null,
+        ...(hash ? { hashSource: 'binary-sha256' } : {}),
+        auth: 'not-assessed',
+        canary: 'not-run',
       });
     }
   }
@@ -405,6 +526,8 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
       authorized: false,
       providers: [],
       state: 'host-authorization-required',
+      auth: 'not-assessed',
+      canary: 'not-run',
     };
   }
 
@@ -444,12 +567,19 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
       state = 'missing';
     }
 
+    const binPath = resolveBinPath(bin, env);
+    const hash = binPath ? binaryHash(binPath) : null;
+
     const entry = {
       id: p.id,
       pinnedVersion: p.version,
       installedVersion,
       state,
       source: p.source,
+      hash: hash ?? null,
+      ...(hash ? { hashSource: 'binary-sha256' } : {}),
+      auth: 'not-assessed',
+      canary: 'not-run',
     };
 
     if (p.id === 'opencode') {
@@ -484,6 +614,8 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
     host: 'local',
     authorized: true,
     providers,
+    auth: 'not-assessed',
+    canary: 'not-run',
   };
 }
 

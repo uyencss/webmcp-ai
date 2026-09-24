@@ -824,6 +824,7 @@ export async function listModels(providerId, { env = process.env } = {}) {
   let invocationEnv;
   if (provider.id === 'opencode') {
     const profile = await detectOpencodeProfile({ command, env });
+    assertOpencodeV2DbReady({ env, profile });
     invocationEnv = provider.invocationEnv?.(env, { profile }) ?? {};
   } else {
     invocationEnv = provider.invocationEnv?.(env) ?? {};
@@ -849,6 +850,7 @@ export async function listAgents(providerId, { env = process.env } = {}) {
   let invocationEnv;
   if (provider.id === 'opencode') {
     const profile = await detectOpencodeProfile({ command, env });
+    assertOpencodeV2DbReady({ env, profile });
     invocationEnv = provider.invocationEnv?.(env, { profile }) ?? {};
   } else {
     invocationEnv = provider.invocationEnv?.(env) ?? {};
