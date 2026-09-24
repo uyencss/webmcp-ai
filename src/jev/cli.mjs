@@ -9,8 +9,9 @@ import { jevDoctor } from './doctor.mjs';
 import { validateRequest } from './schemas.mjs';
 import { createJevClient } from './client.mjs';
 import { readKeyFile } from './transport.mjs';
-import { asAiCliError } from '../errors.mjs';
-import { decideFallback } from './policy/policy.mjs';
+import { asAiCliError, AiCliError } from '../errors.mjs';
+import { decideFallback, guardAction, CONTROL_OPERATIONS } from './policy/policy.mjs';
+import { resolveRolloutConfig } from './policy/rollout.mjs';
 
 export const JEV_COMMAND_NAME = 'webmcp-jev';
 
@@ -93,11 +94,20 @@ export function wireFallbackPolicy({ request, error, circuit = 'closed', env = p
   const typed = asAiCliError(error);
   const failureCode = typed.code;
   const circuitState = typed.details?.fallback?.circuit ?? circuit ?? 'closed';
-  const killSwitch = env?.JEV_FAST_PATH_DISABLED === '1' ||
-    env?.JEV_FAST_PATH_DISABLED === 'true' ||
-    (Boolean(env?.JEV_FAST_PATH_DISABLED) && env?.JEV_FAST_PATH_DISABLED !== '0' && env?.JEV_FAST_PATH_DISABLED !== 'false');
-  const enabled = !(env?.JEV_ENABLED === 'false' || env?.JEV_ENABLED === '0');
-  const flags = { enabled, killSwitch };
+
+  let flags;
+  let cohort;
+  try {
+    const rollout = resolveRolloutConfig({ env });
+    flags = rollout.flags;
+    cohort = rollout.cohort;
+  } catch {
+    const killSwitch = env?.JEV_FAST_PATH_DISABLED === '1' ||
+      env?.JEV_FAST_PATH_DISABLED === 'true' ||
+      (Boolean(env?.JEV_FAST_PATH_DISABLED) && env?.JEV_FAST_PATH_DISABLED !== '0' && env?.JEV_FAST_PATH_DISABLED !== 'false');
+    const enabled = !(env?.JEV_ENABLED === 'false' || env?.JEV_ENABLED === '0');
+    flags = { enabled, killSwitch };
+  }
 
   let policyEvaluation = null;
   try {
@@ -109,6 +119,8 @@ export function wireFallbackPolicy({ request, error, circuit = 'closed', env = p
       attempts: 2,
       maxAttempts: 2,
       flags,
+      cohort: cohort ?? undefined,
+      urlOrigin: request?.state?.urlOrigin,
     });
   } catch {
     // Fail-safe: if decideFallback throws for any reason, do not crash error reporting
@@ -128,6 +140,102 @@ export function wireFallbackPolicy({ request, error, circuit = 'closed', env = p
   }
 
   return { typed, policyEvaluation };
+}
+
+export function wireSuccessPolicy({ request, result, circuit = 'closed', env = process.env, permit = null, snapshot = null } = {}) {
+  let rollout = { flags: { enabled: true, killSwitch: false }, cohort: null };
+  try {
+    rollout = resolveRolloutConfig({ env });
+  } catch (error) {
+    const typed = asAiCliError(error);
+    return { allowed: false, typed, policyEvaluation: null };
+  }
+  const { flags, cohort } = rollout;
+
+  let decision = null;
+  try {
+    decision = decideFallback({
+      kind: request?.kind ?? 'query',
+      fallbackPolicy: request?.fallbackPolicy ?? 'normal-agent',
+      failure: null,
+      circuit,
+      attempts: result?.timing?.attempts ?? 1,
+      maxAttempts: 2,
+      flags,
+      cohort: cohort ?? undefined,
+      urlOrigin: request?.state?.urlOrigin,
+    });
+  } catch (err) {
+    const typed = asAiCliError(err);
+    return { allowed: false, typed, policyEvaluation: null };
+  }
+
+  let operation = null;
+  if (result?.answers?.operation?.choice) {
+    operation = result.answers.operation.choice;
+  } else if (typeof result?.answers?.operation === 'string') {
+    operation = result.answers.operation;
+  }
+
+  const isCompletionClaim = operation === 'DONE' ||
+    Object.values(result?.answers ?? {}).some((a) => a?.choice === 'DONE');
+
+  const effectiveSnapshot = snapshot ?? (request?.state?.snapshotDigest ? {
+    expectedDigest: request.state.snapshotDigest,
+    observedDigest: request.state.snapshotDigest,
+  } : null);
+
+  const effectivePermit = permit ?? (request?.caller?.permitId ? {
+    allowed: true,
+    permitId: request.caller.permitId,
+  } : null);
+
+  let guard = null;
+  try {
+    guard = guardAction({
+      decision,
+      operation,
+      snapshot: effectiveSnapshot,
+      permit: effectivePermit,
+    });
+  } catch (err) {
+    const typed = asAiCliError(err);
+    return { allowed: false, typed, policyEvaluation: null };
+  }
+
+  const wouldDriveExecution = (operation != null && !CONTROL_OPERATIONS.includes(operation)) ||
+    (request?.kind === 'browser-step' && operation !== 'DONE' && operation !== 'WAIT' && operation !== 'BLOCKED');
+
+  const guardRefuses = guard && (guard.allowed === false || guard.action === 'blocked' || guard.action === 'human');
+  const decisionRefuses = decision && (decision.engine === 'blocked' || decision.engine === 'human' || decision.engine !== 'jev');
+
+  const shouldBlock = (wouldDriveExecution && guardRefuses) || decisionRefuses;
+
+  const effectiveEngine = shouldBlock
+    ? (guard?.action === 'blocked' || decision?.engine === 'blocked' ? 'blocked' : (guard?.action === 'human' || decision?.engine === 'human' ? 'human' : decision?.engine))
+    : decision.engine;
+
+  const effectiveReason = shouldBlock
+    ? (guard?.reason ?? decision?.reason ?? (effectiveEngine === 'blocked' ? 'BLOCKED' : 'HUMAN_REQUIRED'))
+    : null;
+
+  const policyEvaluation = {
+    ...decision,
+    decision,
+    guard,
+    completionClaim: isCompletionClaim,
+    engine: effectiveEngine,
+    reason: effectiveReason,
+  };
+
+  if (shouldBlock) {
+    const refusalCode = effectiveReason ?? (effectiveEngine === 'blocked' ? 'BLOCKED' : 'HUMAN_REQUIRED');
+    const message = `policy evaluation refused execution: ${effectiveEngine} (${refusalCode})`;
+    const typed = new AiCliError(refusalCode, message, { details: { policyEvaluation } });
+    return { allowed: false, typed, result, policyEvaluation };
+  }
+
+  return { allowed: true, result, policyEvaluation };
 }
 
 function readRequestFile(path) {
@@ -192,7 +300,17 @@ export async function runQuery(rest, { env = process.env, ...deps } = {}) {
   try {
     client = createJevClient({ baseUrl, apiKey, model, skillDigest, ...deps });
     const { result } = await client.query(request);
+    const circuitState = client?.getCircuitState?.() ?? 'closed';
+    const { allowed, typed, policyEvaluation } = wireSuccessPolicy({ request, result, circuit: circuitState, env });
+
+    if (!allowed) {
+      return writeErrorAndCode(typed, policyEvaluation);
+    }
+
     process.stdout.write(`${JSON.stringify(result)}\n`);
+    if (policyEvaluation) {
+      process.stderr.write(`${JSON.stringify({ policyEvaluation })}\n`);
+    }
     return 0;
   } catch (error) {
     const circuitState = client?.getCircuitState?.() ?? 'closed';
