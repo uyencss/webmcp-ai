@@ -10,6 +10,7 @@ import test from 'node:test';
 import {
   PROVIDER_INSTALL_MANIFEST,
   applyProviderInstall,
+  computePinDigest,
   planProviderInstall,
   readBackProviderInstall,
   versionMatchesPin,
@@ -578,4 +579,26 @@ process.exit(0);
     assert.equal(entry.pinDigest, def.pinDigest, `read-back entry pinDigest must match provider def for ${entry.id}`);
   }
 });
+
+test('14. a mutated pin can never carry a stale pinDigest', async (t) => {
+  const manifest = structuredClone(PROVIDER_INSTALL_MANIFEST);
+  const oldClaude = manifest.hosts.local.providers.find((p) => p.id === 'claude');
+  const staleDigest = oldClaude.pinDigest;               // digest của fields CŨ
+  manifest.hosts.local.providers = manifest.hosts.local.providers.map((p) =>
+    p.id === 'claude' ? { ...p, version: '4.19.0' } : { ...p, installable: false }); // spread giữ pinDigest cũ
+  const newClaude = manifest.hosts.local.providers.find((p) => p.id === 'claude');
+  assert.equal(newClaude.pinDigest, staleDigest, 'carried digest is stale by construction');
+  const expected = computePinDigest({ ...newClaude });    // recompute từ fields MỚI
+  assert.notEqual(expected, staleDigest);
+  const env = { ...process.env, CLAUDE_BIN: '/usr/bin/true' };
+  const plan = planProviderInstall({ host: 'local', env, manifest });
+  const planned = plan.providers.find((p) => p.id === 'claude');
+  assert.equal(planned.pinDigest, expected);
+  assert.notEqual(planned.pinDigest, staleDigest);
+  const receipt = await applyProviderInstall({ host: 'local', env, manifest });
+  const applied = receipt.providers.find((p) => p.id === 'claude');
+  assert.equal(applied.pinDigest, expected);
+  assert.notEqual(applied.pinDigest, staleDigest);
+});
+
 

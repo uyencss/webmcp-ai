@@ -332,7 +332,7 @@ export function planProviderInstall({
         id: p.id,
         version: p.version,
         source: p.source,
-        pinDigest: p.pinDigest || computePinDigest(p),
+        pinDigest: computePinDigest(p),
         action: 'host-authorization-required',
         installed: null,
         state: 'not-probed',
@@ -358,7 +358,7 @@ export function planProviderInstall({
         id: p.id,
         version: p.version,
         source: p.source,
-        pinDigest: p.pinDigest || computePinDigest(p),
+        pinDigest: computePinDigest(p),
         action: 'read-back-only',
         installed: null,
         state: 'not-probed',
@@ -400,7 +400,7 @@ export function planProviderInstall({
       id: p.id,
       version: p.version,
       source: p.source,
-      pinDigest: p.pinDigest || computePinDigest(p),
+      pinDigest: computePinDigest(p),
       action,
       installed,
       state,
@@ -460,7 +460,7 @@ export async function applyProviderInstall({
   for (const planned of plan.providers) {
     const pDef = manifestMap.get(planned.id) || {};
     const bin = resolveBin(pDef, env);
-    const pinDigest = planned.pinDigest || pDef.pinDigest || computePinDigest(pDef);
+    const pinDigest = computePinDigest(pDef && pDef.id ? pDef : planned);
 
     if (!pDef.installable || planned.action === 'read-back-only') {
       const binPath = resolveBinPath(bin, env);
@@ -644,7 +644,7 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
       installedVersion,
       state,
       source: p.source,
-      pinDigest: p.pinDigest || computePinDigest(p),
+      pinDigest: computePinDigest(p),
       hash: hash ?? null,
       ...(hash ? { hashSource: 'binary-sha256' } : {}),
       auth: 'not-assessed',
