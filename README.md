@@ -98,18 +98,19 @@ A concurrent `--provider opencode` run can hit the shared SQLite database with
 `PROVIDER_DB_LOCKED` and retries with backoff (`--retry-lock <n>`, default 3);
 serialize or limit concurrent opencode lanes if it persists.
 
-### OpenCode profiles (v1/v2)
+### OpenCode v2-only policy
 
-The adapter supports both installed OpenCode majors. Each spawn detects the
-profile with one bounded `<bin> --version` probe (no model):
+OpenCode invocations are strictly v2-only. Every opencode spawn detects the
+installed binary version with one bounded `<bin> --version` probe (no model):
 
-- **v1 (1.x)** — legacy argv (`--dir`, `--variant`) and the v1
-  `permission`/`external_directory` config schema; behavior is unchanged.
-- **v2 (2.x)** — `--standalone` private server (so the invocation env/config
+- **v2 (2.x)** is required — `--standalone` private server (so the invocation env/config
   apply instead of the shared background service), workspace taken from the
   spawn `cwd` (no `--dir`), variant folded as `--model provider/model#variant`,
   and the v2 ordered `permissions` config schema (`mcp.servers`/`plugins`
   emptied, updates disabled).
+- Legacy **v1 (1.x)** binaries and explicit `'v1'` overrides are refused before spawn
+  with typed `PROVIDER_CAPABILITY_DRIFT` (`OpenCode v1 is not supported; v2 is required`).
+  There is no credential sync and no legacy `opencode-cli.db` path.
 
 An unrecognized major or unparseable version fails closed with typed
 `PROVIDER_CAPABILITY_DRIFT` before any argv or temp artifact exists;
@@ -117,9 +118,8 @@ An unrecognized major or unparseable version fails closed with typed
 opencode --task-intent review` reports the detected profile in
 `mapping.profile`. Dry-run deliberately never spawns a provider binary, so it
 cannot auto-detect the installed profile: absent `--opencode-profile` is
-reported as `opencodeProfileSource: "unresolved"` while retaining the legacy
-preview shape. Pass `--opencode-profile v1|v2` when an exact sanitized preview
-is required; real dispatch still auto-detects the profile before model spawn.
+reported as `opencodeProfileSource: "unresolved"` and previews with v2 args.
+An explicit `--opencode-profile v1` dry-run is refused with typed drift.
 
 ## Capability discovery (agentModes / taskIntents)
 
@@ -193,11 +193,10 @@ reviewer flags, Codex requires `exec`/`--sandbox`/`read-only`/`--ephemeral`/
 `--ignore-user-config`/`--ignore-rules`/`--skip-git-repo-check`/
 `--output-last-message`/`--color` plus resume
 (`resume`/`-c`); the resume sandbox mapping uses config key `sandbox_mode`
-and is tested separately, opencode requires `run`/`--format`/`--agent`/
-`--model` plus the installed profile syntax (v1 1.x: `--dir` and
-`--variant`; v2 2.x: `--standalone`, no `--dir`, variant folded into
+and is tested separately, opencode requires `run`/`--standalone`/`--format`/`--agent`/
+`--model` (v2-only: no `--dir`, variant folded into
 `--model provider/model#variant`) with the wrapper read-only config mapping
-(`mapping.profile` reports the detected profile) —
+(`mapping.profile` reports the detected profile; v1 is refused) —
 and reports `installed`/`authenticated`/`policy-supported`/`canary-proven`/
 `task-ready` separately without leaking paths/secrets. Here `task-ready` means
 the wrapper's provider mapping is installed and help-proven; it does not claim
@@ -237,11 +236,10 @@ fail-closed. `--full` is an explicit provider workspace/tool access profile
 and does not place private keys, credentials, bearer tokens, or machine
 identity into model context, child authority env, or portable receipts.
 What `--full` grants is provider-specific (do not assume unrestricted ambient
-access for non-OpenCode providers): OpenCode (v1 and v2) is the only provider
-that keeps the ambient operator config, tools, and MCP surface (v1 isolates the
-session database to `opencode-cli.db` for compatibility; v2 uses the accepted
-`opencode.db` via `OPENCODE_DB` without fallback, migration, or copy of legacy
-databases; v2 additionally runs its private server via `--standalone`); Codex uses the `workspace-write` sandbox
+access for non-OpenCode providers): OpenCode (v2-only) is the only provider
+that keeps the ambient operator config, tools, and MCP surface (all invocations select
+the accepted `opencode.db` via `OPENCODE_DB` without fallback, migration, or copy of legacy
+databases; OpenCode additionally runs its private server via `--standalone`); Codex uses the `workspace-write` sandbox
 instead of `read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`,
 so it does not inherit ambient user config/MCP; Claude drops the
 `--tools '' --safe-mode` text-only deny; AGY drops the forced `--sandbox`.
@@ -308,9 +306,8 @@ generic exits remain distinct failure classes.
   default.
 - opencode: read-only `plan` agent with an injected deny-by-default permission
   sandbox; `accept-edits` is opt-in supervised writes with a bash deny-list.
-  Both installed profiles are supported (v1 1.x legacy argv/config; v2 2.x
-  `--standalone`, `model#variant`, v2 `permissions` schema); an unrecognized
-  profile fails closed with `PROVIDER_CAPABILITY_DRIFT`.
+  OpenCode is v2-only (`--standalone`, `model#variant`, v2 `permissions` schema);
+  v1 binaries and explicit v1 overrides are refused with `PROVIDER_CAPABILITY_DRIFT`.
 - `compose-only`: empty temporary workspace; no task MCP/browser bridge or
   writable project data.
 - Resume requires an explicit session ID. There is no implicit “last session”.

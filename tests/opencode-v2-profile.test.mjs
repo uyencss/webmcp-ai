@@ -53,11 +53,15 @@ test('opencode version parsing maps only major 1/2 to a profile', () => {
   assert.equal(opencodeProfileForVersion('no version here'), null);
 });
 
-test('normalizeOpencodeProfile keeps legacy default and fails closed on unknown', () => {
-  assert.equal(normalizeOpencodeProfile(undefined), 'v1');
-  assert.equal(normalizeOpencodeProfile(null), 'v1');
-  assert.equal(normalizeOpencodeProfile('v1'), 'v1');
+test('normalizeOpencodeProfile defaults to v2, refuses v1, and fails closed on unknown', () => {
+  assert.equal(normalizeOpencodeProfile(undefined), 'v2');
+  assert.equal(normalizeOpencodeProfile(null), 'v2');
+  assert.equal(normalizeOpencodeProfile(''), 'v2');
   assert.equal(normalizeOpencodeProfile('v2'), 'v2');
+  assert.throws(
+    () => normalizeOpencodeProfile('v1'),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.profile === 'v1' && e.details?.required === 'v2',
+  );
   assert.throws(
     () => normalizeOpencodeProfile('v3'),
     (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.profile === 'v3' && !JSON.stringify(e).includes('v3.1'),
@@ -67,17 +71,17 @@ test('normalizeOpencodeProfile keeps legacy default and fails closed on unknown'
 // ---- validators: profile-specific required flags ----
 
 test('opencode review validator uses profile-specific flags and typed drift', () => {
-  assert.ok(validateOpencodeReviewSupport(V1_HELP));
-  assert.ok(validateOpencodeReviewSupport(V1_HELP, { profile: 'v1' }));
+  assert.ok(validateOpencodeReviewSupport(V2_HELP));
   assert.ok(validateOpencodeReviewSupport(V2_HELP, { profile: 'v2' }));
 
-  // v2 help lacks the v1-only flags: v1 profile must fail closed.
+  // v1 profile is refused with typed drift
+  assert.throws(
+    () => validateOpencodeReviewSupport(V1_HELP, { profile: 'v1' }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+  );
   assert.throws(
     () => validateOpencodeReviewSupport(V2_HELP, { profile: 'v1' }),
-    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT'
-      && e.details?.profile === 'v1'
-      && e.details?.missing?.includes('--dir')
-      && e.details?.missing?.includes('--variant'),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
   );
   // drifted/v2 help without the portable reviewer flags must fail.
   assert.throws(
@@ -154,18 +158,27 @@ test('opencode legacy and review argv follow the resolved profile', async () => 
   const provider = getProvider('opencode');
   const ws = '/workspace/project';
 
-  const v1 = provider.buildInvocation({
-    prompt: 'x', workspace: ws, accessProfile: 'provider-default', agentMode: 'accept-edits',
-    model: 'opencode-go/muse-spark-1.3-contributor', effort: 'xhigh', env: {},
-    opencodeProfile: 'v1',
-  });
+  assert.throws(
+    () => provider.buildInvocation({
+      prompt: 'x', workspace: ws, accessProfile: 'provider-default', agentMode: 'accept-edits',
+      model: 'opencode-go/muse-spark-1.3-contributor', effort: 'xhigh', env: {},
+      opencodeProfile: 'v1',
+    }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+  );
+
+  const realWs = mkdtempSync(join(tmpdir(), 'opencode-argv-ws-'));
   try {
-    assert.ok(v1.args.includes('--variant'));
-    assert.equal(v1.args[v1.args.indexOf('--variant') + 1], 'xhigh');
-    assert.ok(v1.args.includes('--dir'));
-    assert.equal(v1.args[v1.args.indexOf('--dir') + 1], ws);
-    assert.equal(v1.args.includes('--standalone'), false);
-  } finally { v1.cleanup?.(); }
+    await assert.rejects(
+      generate({
+        provider: 'opencode', prompt: 'x', workspace: realWs, accessProfile: 'provider-default',
+        env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '1.18.30' },
+      }),
+      (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+    );
+  } finally {
+    rmSync(realWs, { recursive: true, force: true });
+  }
 
   const v2 = provider.buildInvocation({
     prompt: 'x', workspace: ws, accessProfile: 'provider-default', agentMode: 'accept-edits',
@@ -275,17 +288,14 @@ test('generate and review dry-runs preserve explicit profiles and mark absent pr
   const model = 'opencode-go/muse-spark-1.3-contributor';
   const env = { ...process.env, OPENCODE_BIN: noSpawnFake };
 
-  const generateV1 = describeGenerateDryRun({
-    provider: 'opencode', prompt: 'secret generate prompt', accessProfile: 'provider-default',
-    agentMode: 'accept-edits', workspace: ws, model, effort: 'xhigh',
-    opencodeProfile: 'v1', env,
-  });
-  assert.deepEqual(generateV1.args, [
-    'run', '--format', 'json', '--agent', 'build', '--auto', '--model', model,
-    '--variant', 'xhigh', '--dir', '<workspace>',
-  ]);
-  assert.equal(generateV1.opencodeProfile, 'v1');
-  assert.equal(generateV1.opencodeProfileSource, 'explicit');
+  assert.throws(
+    () => describeGenerateDryRun({
+      provider: 'opencode', prompt: 'secret generate prompt', accessProfile: 'provider-default',
+      agentMode: 'accept-edits', workspace: ws, model, effort: 'xhigh',
+      opencodeProfile: 'v1', env,
+    }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+  );
 
   const generateV2 = describeGenerateDryRun({
     provider: 'opencode', prompt: 'secret generate prompt', accessProfile: 'provider-default',
@@ -299,16 +309,13 @@ test('generate and review dry-runs preserve explicit profiles and mark absent pr
   assert.equal(generateV2.opencodeProfile, 'v2');
   assert.equal(generateV2.opencodeProfileSource, 'explicit');
 
-  const reviewV1 = describeReviewDryRun({
-    provider: 'opencode', prompt: 'secret review prompt', taskIntent: 'review',
-    workspace: ws, model, effort: 'xhigh', opencodeProfile: 'v1', env,
-  });
-  assert.deepEqual(reviewV1.args, [
-    'run', '--format', 'json', '--agent', 'build', '--model', model,
-    '--variant', 'xhigh', '--dir', '<workspace>',
-  ]);
-  assert.equal(reviewV1.opencodeProfile, 'v1');
-  assert.equal(reviewV1.opencodeProfileSource, 'explicit');
+  assert.throws(
+    () => describeReviewDryRun({
+      provider: 'opencode', prompt: 'secret review prompt', taskIntent: 'review',
+      workspace: ws, model, effort: 'xhigh', opencodeProfile: 'v1', env,
+    }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+  );
 
   const reviewV2 = describeReviewDryRun({
     provider: 'opencode', prompt: 'secret review prompt', taskIntent: 'review',
@@ -444,18 +451,17 @@ test('generate fails closed on an unrecognized opencode version', async (t) => {
   );
 });
 
-test('generate keeps v1 argv on the v1 profile and honors an explicit override', async (t) => {
+test('generate refuses v1 binary before spawn with typed drift', async (t) => {
   const ws = mkdtempSync(join(tmpdir(), 'v1-profile-ws-'));
   t.after(() => rmSync(ws, { recursive: true, force: true }));
-  const v1 = await generate({
-    provider: 'opencode', prompt: 'hello v1', accessProfile: 'provider-default', agentMode: 'accept-edits',
-    workspace: ws, model: 'muse', effort: 'xhigh',
-    env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '1.18.30', FAKE_ECHO_ARGS: '1' },
-  });
-  const v1Args = v1.response.text.split('|args:')[1];
-  assert.ok(v1Args.includes('--dir'), v1Args);
-  assert.ok(v1Args.includes('--variant xhigh'), v1Args);
-  assert.equal(v1Args.includes('--standalone'), false);
+  await assert.rejects(
+    generate({
+      provider: 'opencode', prompt: 'hello v1', accessProfile: 'provider-default', agentMode: 'accept-edits',
+      workspace: ws, model: 'muse', effort: 'xhigh',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '1.18.30', FAKE_ECHO_ARGS: '1' },
+    }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.detected === 'v1' && e.details?.required === 'v2',
+  );
 
   // Explicit profile does not bypass the binary probe: an unknown/contradictory version must reject PROVIDER_CAPABILITY_DRIFT.
   await assert.rejects(
@@ -467,16 +473,15 @@ test('generate keeps v1 argv on the v1 profile and honors an explicit override',
     (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && !JSON.stringify(e).includes(fakeBin),
   );
 
-  // Matching explicit v1 with detected v1 (1.18.30) honors the profile and keeps v1 argv.
-  const explicitV1 = await generate({
-    provider: 'opencode', prompt: 'explicit v1', accessProfile: 'provider-default', agentMode: 'accept-edits',
-    workspace: ws, model: 'muse', effort: 'high', opencodeProfile: 'v1',
-    env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '1.18.30', FAKE_ECHO_ARGS: '1' },
-  });
-  const explicitV1Args = explicitV1.response.text.split('|args:')[1];
-  assert.ok(explicitV1Args.includes('--dir'), explicitV1Args);
-  assert.ok(explicitV1Args.includes('--variant high'), explicitV1Args);
-  assert.equal(explicitV1Args.includes('--standalone'), false);
+  // Explicit v1 profile also fails closed before spawn with required: 'v2'.
+  await assert.rejects(
+    generate({
+      provider: 'opencode', prompt: 'explicit v1', accessProfile: 'provider-default', agentMode: 'accept-edits',
+      workspace: ws, model: 'muse', effort: 'high', opencodeProfile: 'v1',
+      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_VERSION: '1.18.30', FAKE_ECHO_ARGS: '1' },
+    }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+  );
 });
 
 // ---- providers inspect: version-aware mapping ----

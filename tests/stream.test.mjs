@@ -8,6 +8,7 @@ import test from 'node:test';
 
 import { generate } from '../src/client.mjs';
 import { runProcess } from '../src/process-runner.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
@@ -47,7 +48,7 @@ test('generate onStream receives provider bytes before the result resolves', asy
       prompt: 'stream me',
       workspace: ws,
       accessProfile: 'full',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       onStream: ({ stream, chunk }) => {
         seen.push([stream, String(chunk)]);
         sawBeforeResolve = true;
@@ -66,7 +67,7 @@ test('CLI --stream sends provider output to stderr and keeps stdout JSON', () =>
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'live bytes', '--workspace', ws, '--full', '--stream', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0);
     const payload = JSON.parse(result.stdout);
@@ -82,7 +83,7 @@ test('CLI --stream --stream-to stdout puts live bytes and compact envelope on st
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'stdout bytes', '--workspace', ws, '--full', '--stream', '--stream-to', 'stdout', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0);
     assert.match(result.stdout, /reply:opencode:stdout bytes/);
@@ -103,7 +104,7 @@ test('CLI text mode --stream --stream-to stdout separates live bytes and final t
     // would concatenate on one line.
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'no-newline-text', '--workspace', ws, '--full', '--stream', '--stream-to', 'stdout'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /reply:opencode:no-newline-text/);
@@ -122,7 +123,7 @@ test('CLI text mode --stream keeps default stderr target with stdout final-only'
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'text stderr target', '--workspace', ws, '--full', '--stream'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), 'reply:opencode:text stderr target');
@@ -137,7 +138,7 @@ test('CLI --events --stream-to stdout keeps marker JSONL plus final envelope on 
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'stdout events', '--workspace', ws, '--full', '--events', '--stream-to', 'stdout', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0);
     const eventLines = result.stdout.split('\n').filter((line) => line.includes('webmcp-ai-event'));
@@ -154,7 +155,7 @@ test('CLI rejects an unknown --stream-to channel', () => {
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'x', '--workspace', ws, '--stream', '--stream-to', 'socket', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /USAGE_ERROR/);
@@ -168,7 +169,7 @@ test('CLI without --stream keeps provider output out of stderr', () => {
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'quiet bytes', '--workspace', ws, '--full', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0);
     JSON.parse(result.stdout);
@@ -183,7 +184,7 @@ test('CLI --stream --events keeps one JSON envelope on stdout and telemetry only
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'combined check', '--workspace', ws, '--full', '--stream', '--events', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0, result.stderr);
     // Stdout keeps exactly one machine-readable JSON envelope.
@@ -218,7 +219,7 @@ test('generate supports combined onStream and onEvent observers', async () => {
       prompt: 'combined observers',
       workspace: ws,
       accessProfile: 'full',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       onStream: ({ stream, chunk }) => streamed.push([stream, String(chunk)]),
       onEvent: (event) => events.push(event),
     });

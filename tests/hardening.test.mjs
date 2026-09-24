@@ -9,6 +9,7 @@ import test from 'node:test';
 import { resolveAgyArtifacts } from '../src/artifacts.mjs';
 import { describeGenerateDryRun } from '../src/client.mjs';
 import { describeModel, effortRejection } from '../src/model-capabilities.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
@@ -18,14 +19,14 @@ function run(args, { env = {}, cwd = '/tmp' } = {}) {
   return spawnSync(process.execPath, [bin, ...args], {
     encoding: 'utf8',
     cwd,
-    env: {
+    env: withV2Db({
       ...process.env,
       AGY_BIN: fakeBin,
       CLAUDE_BIN: fakeBin,
       CODEX_BIN: fakeBin,
       OPENCODE_BIN: fakeBin,
       ...env,
-    },
+    }),
   });
 }
 
@@ -262,7 +263,7 @@ function writeAlwaysLockedOpencode() {
     '#!/usr/bin/env node',
     "import { appendFileSync } from 'node:fs';",
     "const args = process.argv.slice(2);",
-    "if (args.includes('--version')) { process.stdout.write('locked-opencode 1.18.30\\n'); process.exit(0); }",
+    "if (args.includes('--version')) { process.stdout.write('locked-opencode 2.0.3\\n'); process.exit(0); }",
     `appendFileSync(${JSON.stringify(counter)}, 'x');`,
     "process.stderr.write('Error: database is locked\\n');",
     'process.exit(1);',
@@ -279,7 +280,7 @@ test('opencode lock is retried with backoff and then reported retryably', async 
     const result = run([
       'generate', '--provider', 'opencode', '--prompt', 'hi', '--workspace', workspace,
       '--retry-lock', '2', '--json',
-    ], { env: { OPENCODE_BIN: locked.script } });
+    ], { env: withV2Db({ OPENCODE_BIN: locked.script }) });
     assert.notEqual(result.status, 0);
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.ok, false);
@@ -299,7 +300,7 @@ test('opencode lock retry can be disabled', () => {
     const result = run([
       'generate', '--provider', 'opencode', '--prompt', 'hi', '--workspace', workspace,
       '--retry-lock', '0', '--json',
-    ], { env: { OPENCODE_BIN: locked.script } });
+    ], { env: withV2Db({ OPENCODE_BIN: locked.script }) });
     assert.notEqual(result.status, 0);
     assert.equal(JSON.parse(result.stdout).error.code, 'PROVIDER_DB_LOCKED');
     assert.equal(readFileSync(locked.counter, 'utf8').length, 1);

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { runCli } from '../src/cli.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
@@ -17,14 +18,14 @@ function run(args, { input, env = {} } = {}) {
     input,
     encoding: 'utf8',
     cwd: '/tmp',
-    env: {
+    env: withV2Db({
       ...process.env,
       AGY_BIN: fakeBin,
       CLAUDE_BIN: fakeBin,
       CODEX_BIN: fakeBin,
       OPENCODE_BIN: fakeBin,
       ...env,
-    },
+    }),
   });
 }
 
@@ -324,14 +325,14 @@ test('CLI repeatable roots accept values and tolerate a bare flag', () => {
 
 test('CLI clogged stderr does not fail --stream and --events', async () => {
   const ws = mkdtempSync(join(tmpdir(), 'cli-clogged-'));
-  const env = {
+  const env = withV2Db({
     ...process.env,
     AGY_BIN: fakeBin,
     CLAUDE_BIN: fakeBin,
     CODEX_BIN: fakeBin,
     OPENCODE_BIN: fakeBin,
     FAKE_PROVIDER: 'opencode',
-  };
+  });
   const originalStderrWrite = process.stderr.write.bind(process.stderr);
   let throwsRemaining = 2;
   process.stderr.write = () => {

@@ -14,6 +14,7 @@ import {
   terminalStateForError,
 } from '../src/events.mjs';
 import { AiCliError } from '../src/errors.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
@@ -88,7 +89,7 @@ test('generate emits queued, activity, and completed terminal events', async () 
       prompt: 'event check',
       workspace: ws,
       accessProfile: 'full',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       onEvent: (event) => events.push(event),
     });
     assert.equal(result.ok, true);
@@ -111,7 +112,7 @@ test('generate emits a failed terminal event before rethrowing', async () => {
         prompt: 'event check',
         workspace: ws,
         accessProfile: 'full',
-        env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_EXIT_CODE: '3' },
+        env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_EXIT_CODE: '3' }),
         onEvent: (event) => events.push(event),
       }),
       (e) => e.code === 'PROVIDER_EXIT_ERROR',
@@ -128,7 +129,7 @@ test('CLI --events emits marker JSONL on stderr and keeps stdout JSON', () => {
   try {
     const result = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'live events', '--workspace', ws, '--full', '--events', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.status, 0);
     assert.equal(JSON.parse(result.stdout).ok, true);
@@ -271,7 +272,7 @@ test('generate tolerates a throwing onEvent observer', async () => {
       prompt: 'observer check',
       workspace: ws,
       accessProfile: 'full',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       onEvent: () => {
         calls += 1;
         throw new Error('observer blew up');

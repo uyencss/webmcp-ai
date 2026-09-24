@@ -27,7 +27,6 @@ import {
   normalizeOpencodeProfile,
   opencodeProfileForVersion,
   resolveOpencodeCliDb,
-  syncOpencodeCredentials,
   validateOpencodeReviewSupport,
 } from './providers/opencode.mjs';
 import { parseReviewOutput } from './review-result.mjs';
@@ -411,6 +410,12 @@ export async function generate(input) {
   // fail closed with typed drift before any temp artifact or argv is created.
   if (provider.id === 'opencode') {
     const detected = await detectOpencodeProfile({ command, env });
+    if (detected !== 'v2') {
+      throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'OpenCode v1 is not supported; v2 is required', {
+        exitCode: 2,
+        details: { capability: 'profile', detected, required: 'v2' },
+      });
+    }
     const overrideRaw = request.opencodeProfile;
     if (overrideRaw !== null && overrideRaw !== undefined && overrideRaw !== '') {
       const override = normalizeOpencodeProfile(overrideRaw);
@@ -420,8 +425,8 @@ export async function generate(input) {
           { exitCode: 2, details: { capability: 'profile', profile: override, detected } });
       }
     }
-    request.opencodeProfile = detected;
-    assertOpencodeV2DbReady({ env, profile: detected });
+    request.opencodeProfile = 'v2';
+    assertOpencodeV2DbReady({ env });
   }
   // Library-only observers are inspected before invocation so provider-native
   // telemetry (Claude stream-json --verbose) can be selected without a second
@@ -453,10 +458,6 @@ export async function generate(input) {
   } catch (error) {
     if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
     throw error;
-  }
-
-  if (provider.id === 'opencode' && request.opencodeProfile === 'v1') {
-    try { syncOpencodeCredentials(resolveOpencodeCliDb(env, { profile: 'v1' })); } catch {}
   }
 
   // Reviewer spawn-lane probes: before any model spawn, validate the
@@ -839,8 +840,14 @@ export async function listModels(providerId, { env = process.env } = {}) {
   let invocationEnv;
   if (provider.id === 'opencode') {
     const profile = await detectOpencodeProfile({ command, env });
-    assertOpencodeV2DbReady({ env, profile });
-    invocationEnv = provider.invocationEnv?.(env, { profile }) ?? {};
+    if (profile !== 'v2') {
+      throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'OpenCode v1 is not supported; v2 is required', {
+        exitCode: 2,
+        details: { capability: 'profile', detected: profile, required: 'v2' },
+      });
+    }
+    assertOpencodeV2DbReady({ env });
+    invocationEnv = provider.invocationEnv?.(env, { profile: 'v2' }) ?? {};
   } else {
     invocationEnv = provider.invocationEnv?.(env) ?? {};
   }
@@ -865,8 +872,14 @@ export async function listAgents(providerId, { env = process.env } = {}) {
   let invocationEnv;
   if (provider.id === 'opencode') {
     const profile = await detectOpencodeProfile({ command, env });
-    assertOpencodeV2DbReady({ env, profile });
-    invocationEnv = provider.invocationEnv?.(env, { profile }) ?? {};
+    if (profile !== 'v2') {
+      throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'OpenCode v1 is not supported; v2 is required', {
+        exitCode: 2,
+        details: { capability: 'profile', detected: profile, required: 'v2' },
+      });
+    }
+    assertOpencodeV2DbReady({ env });
+    invocationEnv = provider.invocationEnv?.(env, { profile: 'v2' }) ?? {};
   } else {
     invocationEnv = provider.invocationEnv?.(env) ?? {};
   }

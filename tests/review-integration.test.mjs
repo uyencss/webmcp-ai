@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -9,6 +9,7 @@ import test from 'node:test';
 import { describeTools, handleToolCall, TOOL_PROTOCOL } from '../src/protocol.mjs';
 import { describeReviewDryRun, review } from '../src/review.mjs';
 import { validateReviewResult } from '../src/review-result.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
@@ -51,11 +52,15 @@ function makeReviewFake(t, verdict = 'approve') {
     "import { readFileSync, writeFileSync } from 'node:fs';",
     `const payload = ${JSON.stringify(payload)};`,
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
+    'if (args.includes("--version")) {',
+    '  const p = process.env.FAKE_PROVIDER || "opencode";',
+    '  if (p === "opencode") { process.stdout.write("fake-cli 2.0.3\\n"); process.exit(0); }',
+    '  process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0);',
+    '}',
     'if (args.includes("--help")) {',
     '  const p = process.env.FAKE_PROVIDER || "opencode";',
     '  if (p === "codex") { process.stdout.write("codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode\\n"); process.exit(0); }',
-    '  if (p === "opencode") { process.stdout.write("opencode run --format json --agent build --dir /ws --model sonnet --variant effort\\n"); process.exit(0); }',
+    '  if (p === "opencode") { process.stdout.write("opencode run --standalone --format json --agent build --model sonnet#effort\\n"); process.exit(0); }',
     '  process.stdout.write("-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort\\n"); process.exit(0);',
     '}',
     'const outIdx = args.indexOf("--output-last-message");',
@@ -87,7 +92,7 @@ test('review() with plain-text provider output is typed REVIEW_RESULT_INCOMPLETE
         accessProfile: 'review-readonly',
         workspace: ws,
         allowedReadRoots: [ws],
-        env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+        env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       }),
       (e) => e.code === 'REVIEW_RESULT_INCOMPLETE',
     );
@@ -107,7 +112,7 @@ test('generate and ai.generate cannot bypass the review result contract', async 
         taskIntent: 'review',
         accessProfile: 'review-readonly',
         workspace: ws,
-        env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+        env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       }),
       (error) => error.code === 'REVIEW_RESULT_INCOMPLETE',
     );
@@ -126,7 +131,7 @@ test('review() with valid review-result JSON returns the verdict', async (t) => 
       taskIntent: 'review',
       workspace: ws,
       allowedReadRoots: [ws],
-      env: { ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(result.ok, true);
     assert.equal(result.review.verdict, 'approve');
@@ -143,8 +148,8 @@ test('review() plan-only fixture is typed REVIEW_RESULT_INCOMPLETE', async (t) =
   writeFileSync(fake, [
     '#!/usr/bin/env node',
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
-    'if (args.includes("--help")) { process.stdout.write("opencode run --format json --agent build --dir /ws --model sonnet --variant effort\\n"); process.exit(0); }',
+    'if (args.includes("--version")) { process.stdout.write("fake-cli 2.0.3\\n"); process.exit(0); }',
+    'if (args.includes("--help")) { process.stdout.write("opencode run --standalone --format json --agent build --model sonnet#effort\\n"); process.exit(0); }',
     'const line = JSON.stringify({ type: "text", sessionID: "ses_test", part: { type: "text", text: JSON.stringify({ plan: "do things" }) } });',
     'process.stdout.write(line + "\\n");',
     '',
@@ -159,7 +164,7 @@ test('review() plan-only fixture is typed REVIEW_RESULT_INCOMPLETE', async (t) =
         prompt: 'review this',
         taskIntent: 'review',
         workspace: ws,
-        env: { ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' },
+        env: withV2Db({ ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' }),
       }),
       (e) => e.code === 'REVIEW_RESULT_INCOMPLETE',
     );
@@ -177,7 +182,7 @@ test('ai.review tool-call succeeds with verdict and stays protocol-shaped on fai
       requestId: 'rev-1',
       tool: 'ai.review',
       input: { provider: 'opencode', prompt: 'review me', workspace: ws, taskIntent: 'review' },
-    }, { env: { ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' } });
+    }, { env: withV2Db({ ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' }) });
     assert.equal(ok.ok, true);
     assert.equal(ok.protocol, 'webmcp-tool-v1');
     assert.equal(ok.output.verdict, 'request-changes');
@@ -187,7 +192,7 @@ test('ai.review tool-call succeeds with verdict and stays protocol-shaped on fai
       handleToolCall({
         protocol: TOOL_PROTOCOL, requestId: 'rev-2', tool: 'ai.review',
         input: { provider: 'opencode', prompt: 'x', workspace: ws, agentMode: 'plan' },
-      }, { env: { ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' } }),
+      }, { env: withV2Db({ ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' }) }),
       (e) => e.code === 'INVALID_INPUT',
     );
     // contradiction fails before spawn (missing binary would be CLI_NOT_INSTALLED if spawned)
@@ -203,7 +208,7 @@ test('ai.review tool-call succeeds with verdict and stays protocol-shaped on fai
       handleToolCall({
         protocol: TOOL_PROTOCOL, requestId: 'rev-4', tool: 'ai.review',
         input: { provider: 'opencode', prompt: 'x', workspace: ws, taskIntent: 'review' },
-      }, { env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' } }),
+      }, { env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }) }),
       (e) => e.code === 'REVIEW_RESULT_INCOMPLETE',
     );
   } finally {
@@ -286,28 +291,47 @@ test('review dry-run redacts resumable session identifiers while preserving resu
   }
 });
 
-test('review real runs keep v1/v2 auto-detected mapping while dry-run accepts explicit v2', async (t) => {
-  for (const version of ['1.18.30', '2.0.3']) {
-    const ws = mkdtempSync(join(tmpdir(), `review-profile-${version}-`));
+test('review real runs refuse v1 and auto-detect v2 mapping while dry-run accepts explicit v2', async (t) => {
+  // v1 is refused with typed capability drift before run spawn
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'review-profile-1.18.30-'));
     const marker = join(ws, 'real-argv.txt');
-    const fake = makeProfileReviewFake(t, { version, markerPath: marker });
+    const fake = makeProfileReviewFake(t, { version: '1.18.30', markerPath: marker });
+    try {
+      await assert.rejects(
+        review({
+          provider: 'opencode', prompt: 'profile review', taskIntent: 'review', workspace: ws,
+          model: 'opencode-go/muse-spark-1.3-contributor', effort: 'xhigh',
+          env: { ...process.env, OPENCODE_BIN: fake },
+        }),
+        (e) => {
+          assert.equal(e.code, 'PROVIDER_CAPABILITY_DRIFT');
+          assert.equal(e.details?.required, 'v2');
+          return true;
+        },
+      );
+      assert.equal(existsSync(marker), false, 'refused v1 review must not spawn run');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  }
+
+  // v2 succeeds with auto-detected v2 argv mapping
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'review-profile-2.0.3-'));
+    const marker = join(ws, 'real-argv.txt');
+    const fake = makeProfileReviewFake(t, { version: '2.0.3', markerPath: marker });
     try {
       const result = await review({
         provider: 'opencode', prompt: 'profile review', taskIntent: 'review', workspace: ws,
         model: 'opencode-go/muse-spark-1.3-contributor', effort: 'xhigh',
-        env: { ...process.env, OPENCODE_BIN: fake },
+        env: withV2Db({ ...process.env, OPENCODE_BIN: fake }),
       });
       assert.equal(result.ok, true);
       const args = readFileSync(marker, 'utf8');
-      if (version.startsWith('2.')) {
-        assert.match(args, /--standalone/);
-        assert.match(args, /--model opencode-go\/muse-spark-1\.3-contributor#xhigh/);
-        assert.doesNotMatch(args, /--dir|--variant/);
-      } else {
-        assert.doesNotMatch(args, /--standalone/);
-        assert.match(args, /--model opencode-go\/muse-spark-1\.3-contributor --variant xhigh/);
-        assert.match(args, /--dir /);
-      }
+      assert.match(args, /--standalone/);
+      assert.match(args, /--model opencode-go\/muse-spark-1\.3-contributor#xhigh/);
+      assert.doesNotMatch(args, /--dir|--variant/);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -368,13 +392,13 @@ test('CLI review real run with fixture verdict and incomplete typing', async (t)
   try {
     const ok = spawnSync(process.execPath, [bin, 'review', '--provider', 'opencode', '--prompt', 'review me', '--workspace', ws, '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(ok.status, 0, ok.stderr);
     assert.equal(JSON.parse(ok.stdout).review.verdict, 'blocked');
     const incomplete = spawnSync(process.execPath, [bin, 'review', '--provider', 'opencode', '--prompt', 'review me', '--workspace', ws, '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(incomplete.status, 1);
     assert.equal(JSON.parse(incomplete.stdout).error.code, 'REVIEW_RESULT_INCOMPLETE');

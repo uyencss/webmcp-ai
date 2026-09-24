@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -26,7 +27,7 @@ function createRealSqliteFile(filePath) {
   }
 }
 
-test('resolveOpencodeCliDb resolves opencode.db for v2 and opencode-cli.db for v1', () => {
+test('resolveOpencodeCliDb resolves opencode.db for v2 and refuses v1', () => {
   const xdg = '/custom/xdg/data';
   const home = '/home/testuser';
 
@@ -39,22 +40,24 @@ test('resolveOpencodeCliDb resolves opencode.db for v2 and opencode-cli.db for v
   const v2Default = resolveOpencodeCliDb({}, { profile: 'v2', homeDir: home });
   assert.equal(v2Default, join(home, '.local', 'share', 'opencode', 'opencode.db'));
 
-  // v1 with XDG_DATA_HOME -> opencode-cli.db
-  const v1Resolved = resolveOpencodeCliDb({ XDG_DATA_HOME: xdg }, { profile: 'v1', homeDir: home });
-  assert.equal(v1Resolved, join('/custom/xdg/data', 'opencode', 'opencode-cli.db'));
-
-  // v1 default -> <home>/.local/share/opencode/opencode-cli.db
-  const v1Default = resolveOpencodeCliDb({}, { profile: 'v1', homeDir: home });
-  assert.equal(v1Default, join(home, '.local', 'share', 'opencode', 'opencode-cli.db'));
-
-  // v1 explicit override verbatim
-  assert.equal(
-    resolveOpencodeCliDb({ OPENCODE_DB: '/custom/path/opencode-cli.db' }, { profile: 'v1' }),
-    '/custom/path/opencode-cli.db',
+  // v1 is refused with typed PROVIDER_CAPABILITY_DRIFT (v2 required)
+  assert.throws(
+    () => resolveOpencodeCliDb({ XDG_DATA_HOME: xdg }, { profile: 'v1', homeDir: home }),
+    (err) => err.code === 'PROVIDER_CAPABILITY_DRIFT' && err.details?.profile === 'v1' && err.details?.required === 'v2',
   );
-  assert.equal(
-    resolveOpencodeCliDb({ OPENCODE_DB: '/custom/path/my-custom.db' }, { profile: 'v1' }),
-    '/custom/path/my-custom.db',
+
+  assert.throws(
+    () => resolveOpencodeCliDb({}, { profile: 'v1', homeDir: home }),
+    (err) => err.code === 'PROVIDER_CAPABILITY_DRIFT' && err.details?.profile === 'v1' && err.details?.required === 'v2',
+  );
+
+  assert.throws(
+    () => resolveOpencodeCliDb({ OPENCODE_DB: '/custom/path/opencode-cli.db' }, { profile: 'v1' }),
+    (err) => err.code === 'PROVIDER_CAPABILITY_DRIFT' && err.details?.profile === 'v1' && err.details?.required === 'v2',
+  );
+  assert.throws(
+    () => resolveOpencodeCliDb({ OPENCODE_DB: '/custom/path/my-custom.db' }, { profile: 'v1' }),
+    (err) => err.code === 'PROVIDER_CAPABILITY_DRIFT' && err.details?.profile === 'v1' && err.details?.required === 'v2',
   );
 
   // v2 explicit override valid path verbatim
@@ -242,6 +245,10 @@ test('buildInvocation for all v2 lanes sets OPENCODE_DB to opencode.db and never
 
   const lanes = [
     {
+      name: 'unresolved (default v2)',
+      request: { prompt: 't', workspace: dir, env },
+    },
+    {
       name: 'provider-default + accept-edits',
       request: { prompt: 't', workspace: dir, agentMode: 'accept-edits', accessProfile: 'provider-default', opencodeProfile: 'v2', env },
     },
@@ -285,8 +292,8 @@ test('buildInvocation for all v2 lanes sets OPENCODE_DB to opencode.db and never
   }
 });
 
-test('buildInvocation for v1 lanes preserves opencode-cli.db (regression guard)', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'opencode-v1-lanes-'));
+test('buildInvocation for v1 profiles is refused with typed drift', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-v1-refusal-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const env = { XDG_DATA_HOME: dir };
@@ -324,15 +331,15 @@ test('buildInvocation for v1 lanes preserves opencode-cli.db (regression guard)'
   ];
 
   for (const lane of lanes) {
-    const inv = provider.buildInvocation(lane.request);
-    try {
-      assert.ok(
-        inv.env.OPENCODE_DB.endsWith(join('opencode', 'opencode-cli.db')),
-        `${lane.name}: OPENCODE_DB (${inv.env.OPENCODE_DB}) must end with opencode/opencode-cli.db`,
-      );
-    } finally {
-      inv.cleanup?.();
-    }
+    assert.throws(
+      () => provider.buildInvocation(lane.request),
+      (err) => {
+        assert.equal(err.code, 'PROVIDER_CAPABILITY_DRIFT', `${lane.name} must throw PROVIDER_CAPABILITY_DRIFT`);
+        assert.equal(err.details?.profile, 'v1');
+        assert.equal(err.details?.required, 'v2');
+        return true;
+      },
+    );
   }
 });
 
@@ -416,7 +423,7 @@ test('listModels and listAgents with fake v2 enforce db policy before provider s
   assert.deepEqual(agents, ['default-agent']);
 });
 
-test('generate validates opencodeProfile override against detected binary version and preserves v1 compat', async (t) => {
+test('generate validates opencodeProfile and refuses v1 binary before spawn', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'opencode-profile-drift-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -442,7 +449,7 @@ test('generate validates opencodeProfile override against detected binary versio
   const validDb = join(dir, 'opencode.db');
   createRealSqliteFile(validDb);
 
-  // 1. Explicit opencodeProfile:'v1' + fake binary v2 -> rejects PROVIDER_CAPABILITY_DRIFT, details.detected === 'v2', does not spawn run
+  // 1. Explicit opencodeProfile:'v1' + fake binary v2 -> rejects PROVIDER_CAPABILITY_DRIFT, details.required === 'v2', does not spawn run
   await assert.rejects(
     () => generate({
       provider: 'opencode',
@@ -462,7 +469,7 @@ test('generate validates opencodeProfile override against detected binary versio
       assert.equal(err.code, 'PROVIDER_CAPABILITY_DRIFT');
       assert.equal(err.details?.capability, 'profile');
       assert.equal(err.details?.profile, 'v1');
-      assert.equal(err.details?.detected, 'v2');
+      assert.equal(err.details?.required, 'v2');
       assert.equal(JSON.stringify(err).includes(fakeBinPath), false, 'must not leak binary path');
       return true;
     },
@@ -473,7 +480,7 @@ test('generate validates opencodeProfile override against detected binary versio
   assert.deepEqual(calls[0].args, ['--version']);
   assert.equal(calls.some((c) => c.args.includes('run')), false, 'run must not be spawned');
 
-  // 2. Explicit opencodeProfile:'v2' + fake binary v1 -> drift
+  // 2. Explicit opencodeProfile:'v2' + fake binary v1 -> drift (detected v1 rejected)
   await assert.rejects(
     () => generate({
       provider: 'opencode',
@@ -492,8 +499,8 @@ test('generate validates opencodeProfile override against detected binary versio
     (err) => {
       assert.equal(err.code, 'PROVIDER_CAPABILITY_DRIFT');
       assert.equal(err.details?.capability, 'profile');
-      assert.equal(err.details?.profile, 'v2');
       assert.equal(err.details?.detected, 'v1');
+      assert.equal(err.details?.required, 'v2');
       return true;
     },
   );
@@ -503,28 +510,85 @@ test('generate validates opencodeProfile override against detected binary versio
   assert.deepEqual(calls[1].args, ['--version']);
   assert.equal(calls.some((c) => c.args.includes('run')), false, 'run must not be spawned');
 
-  // 3. Explicit opencodeProfile:'v1' + fake binary v1 -> still uses opencode-cli.db (compat preserved)
+  // 3. Fake binary v1 (even with explicit opencodeProfile:'v1') -> refused before spawn, run not spawned
   const fakeXdg = join(dir, 'fake-xdg');
-  const res = await generate({
-    provider: 'opencode',
-    prompt: 'hello',
-    workspace: dir,
-    accessProfile: 'provider-default',
-    agentMode: 'accept-edits',
-    opencodeProfile: 'v1',
-    env: {
-      ...process.env,
-      OPENCODE_BIN: fakeBinPath,
-      FAKE_VERSION: '1.18.30\n',
-      XDG_DATA_HOME: fakeXdg,
+  await assert.rejects(
+    () => generate({
+      provider: 'opencode',
+      prompt: 'hello',
+      workspace: dir,
+      accessProfile: 'provider-default',
+      agentMode: 'accept-edits',
+      opencodeProfile: 'v1',
+      env: {
+        ...process.env,
+        OPENCODE_BIN: fakeBinPath,
+        FAKE_VERSION: '1.18.30\n',
+        XDG_DATA_HOME: fakeXdg,
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, 'PROVIDER_CAPABILITY_DRIFT');
+      assert.equal(err.details?.required, 'v2');
+      return true;
     },
-  });
-  assert.equal(res.ok, true);
+  );
 
   calls = readFileSync(markerPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  const runCall = calls.find((c) => c.args.includes('run'));
-  assert.ok(runCall, 'run should be spawned for matching v1');
-  assert.equal(runCall.opencodeDb.endsWith(join('opencode', 'opencode-cli.db')), true);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2].args, ['--version']);
+  assert.equal(calls.some((c) => c.args.includes('run')), false, 'run must not be spawned for v1 binary');
+});
+
+test('src does not contain syncOpencodeCredentials and explicit v1 never invokes sqlite3', async (t) => {
+  const srcDir = fileURLToPath(new URL('../src', import.meta.url));
+  const readAllJs = (dir) => {
+    let result = '';
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) result += readAllJs(full);
+      else if (entry.name.endsWith('.mjs') || entry.name.endsWith('.js')) {
+        result += readFileSync(full, 'utf8') + '\n';
+      }
+    }
+    return result;
+  };
+  const srcContent = readAllJs(srcDir);
+  assert.equal(
+    srcContent.includes('syncOpencodeCredentials'),
+    false,
+    'src/ must never contain syncOpencodeCredentials',
+  );
+
+  // Explicit v1 does not call sqlite3
+  const dir = mkdtempSync(join(tmpdir(), 'opencode-v1-no-sqlite-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const sqliteMarker = join(dir, 'sqlite-called.log');
+  const fakeSqlite = join(dir, 'sqlite3');
+  writeFileSync(fakeSqlite, `#!/usr/bin/env node\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(sqliteMarker)}, 'called');\nprocess.exit(0);\n`);
+  chmodSync(fakeSqlite, 0o755);
+
+  const fakeBinPath = join(dir, 'fake-opencode.mjs');
+  writeFileSync(fakeBinPath, `#!/usr/bin/env node\nif (process.argv.includes('--version')) { process.stdout.write('1.18.30\\n'); process.exit(0); }\nprocess.exit(0);\n`);
+  chmodSync(fakeBinPath, 0o755);
+
+  await assert.rejects(
+    () => generate({
+      provider: 'opencode',
+      prompt: 'hello',
+      workspace: dir,
+      opencodeProfile: 'v1',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        OPENCODE_BIN: fakeBinPath,
+      },
+    }),
+    (err) => err.code === 'PROVIDER_CAPABILITY_DRIFT' && err.details?.required === 'v2',
+  );
+
+  assert.equal(existsSync(sqliteMarker), false, 'sqlite3 must never be invoked on v1 refusal');
 });
 
 test('review and both dry-runs on a v2 host never select or write the legacy database', async (t) => {

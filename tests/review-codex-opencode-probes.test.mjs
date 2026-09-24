@@ -8,13 +8,14 @@ import test from 'node:test';
 
 import { describeReviewDryRun, review } from '../src/review.mjs';
 import { handleToolCall, TOOL_PROTOCOL } from '../src/protocol.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 
 const CODEX_GOOD_HELP = 'codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode model_reasoning_effort';
-const OPENCODE_GOOD_HELP = 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort';
+const OPENCODE_GOOD_HELP = 'opencode run --standalone --format json --agent build --model sonnet#effort';
 
-function makeHelpFake(t, { provider, helpText, versionText = 'fake-cli 1.18.30' }) {
+function makeHelpFake(t, { provider, helpText, versionText = (provider === 'opencode' ? 'fake-cli 2.0.3' : 'fake-cli 1.18.30') }) {
   const dir = mkdtempSync(join(tmpdir(), `probe-help-${provider}-`));
   const fake = join(dir, `fake-${provider}.mjs`);
   writeFileSync(fake, [
@@ -67,7 +68,7 @@ function makeOpencodeSpawnFake(t, { helpText, markerPath, verdict }) {
     `const verdict = ${JSON.stringify(verdictText)};`,
     `const marker = ${JSON.stringify(markerPath)};`,
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("opencode-cli 1.18.30\\n"); process.exit(0); }',
+    'if (args.includes("--version")) { process.stdout.write("opencode-cli 2.0.3\\n"); process.exit(0); }',
     'if (args.includes("--help")) { process.stdout.write(help + "\\n"); process.exit(0); }',
     'try { appendFileSync(marker, "model-invoked\\n"); } catch {}',
     'const line = JSON.stringify({ type: "text", sessionID: "ses_probe", part: { type: "text", text: verdict } });',
@@ -321,7 +322,7 @@ test('RED: opencode review with drifted help fails before model; good help reach
     const driftMarker = join(ws, 'opencode-drift.log');
     const driftedFake = makeOpencodeSpawnFake(t, { helpText: 'opencode --help run only', markerPath: driftMarker, verdict });
     await assert.rejects(
-      review({ provider: 'opencode', prompt: 'review me', taskIntent: 'review', workspace: ws, env: { ...process.env, OPENCODE_BIN: driftedFake } }),
+      review({ provider: 'opencode', prompt: 'review me', taskIntent: 'review', workspace: ws, env: withV2Db({ ...process.env, OPENCODE_BIN: driftedFake }) }),
       (e) => {
         assert.equal(e.code, 'PROVIDER_CAPABILITY_DRIFT');
         const str = JSON.stringify({ message: e.message, details: e.details });
@@ -336,7 +337,7 @@ test('RED: opencode review with drifted help fails before model; good help reach
     const goodFake = makeOpencodeSpawnFake(t, { helpText: OPENCODE_GOOD_HELP, markerPath: goodMarker, verdict });
     const good = await review({
       provider: 'opencode', prompt: 'review me', taskIntent: 'review', workspace: ws,
-      env: { ...process.env, OPENCODE_BIN: goodFake },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: goodFake }),
     });
     assert.equal(good.ok, true);
     assert.equal(good.review.verdict, 'approve');

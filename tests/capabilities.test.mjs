@@ -9,6 +9,7 @@ import test from 'node:test';
 import { generate } from '../src/client.mjs';
 import { describeTools, handleToolCall, TOOL_PROTOCOL } from '../src/protocol.mjs';
 import { getProvider } from '../src/providers/index.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 import {
   buildOpenCodeConfig,
   buildSafeChildEnv,
@@ -185,14 +186,13 @@ test('OpenCode config contains scoped external_directory and never global /** or
     protectedPaths: [],
     timeoutMs: 1000,
     env: process.env,
-    opencodeProfile: 'v1',
   });
   const parsedCfg = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT);
-  assert.ok(parsedCfg.external_directory.includes(ws2));
-  assert.equal(parsedCfg.external_directory.includes('/**'), false);
-  assert.equal(parsedCfg.permission.webfetch, 'deny');
-  assert.deepEqual(parsedCfg.mcp, {});
-  assert.deepEqual(parsedCfg.plugin, []);
+  assert.ok(Array.isArray(parsedCfg.permissions));
+  assert.ok(parsedCfg.permissions.some((r) => r.action === 'external_directory' && r.resource === ws2));
+  assert.equal(parsedCfg.permissions.some((r) => r.resource === '/**' || r.resource === '**'), false);
+  assert.deepEqual(parsedCfg.mcp, { servers: {} });
+  assert.deepEqual(parsedCfg.plugins, []);
   // isolated env controls must be present
   assert.ok(invocation.env.OPENCODE_CONFIG, 'private OPENCODE_CONFIG must be set');
   assert.ok(invocation.env.OPENCODE_CONFIG_DIR, 'private OPENCODE_CONFIG_DIR must be set');
@@ -207,6 +207,17 @@ test('OpenCode config contains scoped external_directory and never global /** or
   assert.equal(JSON.stringify(parsedCfg).includes('secret'), false);
   invocation.cleanup?.();
   rmSync(ws2, { recursive: true, force: true });
+
+  // case P7 explicit opencodeProfile:'v1' is refused
+  assert.throws(
+    () => getProvider('opencode').buildInvocation({
+      prompt: 'x',
+      workspace: tmpdir(),
+      accessProfile: 'review-readonly',
+      opencodeProfile: 'v1',
+    }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+  );
 });
 
 test('gateway-tool fails closed without a validated broker', async () => {
@@ -296,7 +307,7 @@ test('CLI help/JSON carries the new fields', () => {
   const result = spawnSync(process.execPath, [bin, 'generate', '--input-json', '-', '--json'], {
     input: JSON.stringify({ provider: 'opencode', prompt: 'hello', accessProfile: 'review-readonly', workspace: ws, allowedReadRoots: [ws] }),
     encoding: 'utf8',
-    env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
   });
   // opencode fake will return db=... ; we just check it succeeds and help path works
   // The generate may succeed or fail due to opencode fake not supporting new fields via CLI – but it should at least not drop them before spawn
@@ -333,7 +344,7 @@ test('metadata contains digests but not absolute paths, secrets, or prompt text'
       projectId: 'proj-123',
       storeRevisions: { automation: 'sha256:abc', site: 'sha256:def' },
     },
-  }, { env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', GITHUB_TOKEN: 'should-not-leak', WEBMCP_GATEWAY_TOKEN: 'also-secret' } });
+  }, { env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', GITHUB_TOKEN: 'should-not-leak', WEBMCP_GATEWAY_TOKEN: 'also-secret' }) });
 
   assert.equal(result.ok, true);
   assert.equal(result.metadata.capability.accessProfile, 'bounded-edit');
@@ -363,7 +374,7 @@ test('metadata contains digests but not absolute paths, secrets, or prompt text'
     workspace: ws,
     allowedReadRoots: [readRoot],
     projectId: 'p1',
-    env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', SECRET: 'top' },
+    env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', SECRET: 'top' }),
   });
   assert.ok(gen.capability.workspaceDigest);
   assert.equal(JSON.stringify(gen.capability).includes(ws), false);
@@ -374,8 +385,8 @@ test('metadata contains digests but not absolute paths, secrets, or prompt text'
 
 test('timeoutMs validation and 600000ms default', async () => {
   const ws = mkdtempSync(join(tmpdir(), 'cap-timeout-'));
-  await assert.rejects(generate({ provider: 'opencode', prompt: 'x', workspace: ws, timeoutMs: 0, env: { ...process.env, OPENCODE_BIN: fakeBin } }), (e) => e.code === 'INVALID_INPUT');
-  await assert.rejects(generate({ provider: 'opencode', prompt: 'x', workspace: ws, timeoutMs: -5, env: { ...process.env, OPENCODE_BIN: fakeBin } }), (e) => e.code === 'INVALID_INPUT');
+  await assert.rejects(generate({ provider: 'opencode', prompt: 'x', workspace: ws, timeoutMs: 0, env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin }) }), (e) => e.code === 'INVALID_INPUT');
+  await assert.rejects(generate({ provider: 'opencode', prompt: 'x', workspace: ws, timeoutMs: -5, env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin }) }), (e) => e.code === 'INVALID_INPUT');
   // default timeout is 600000
   const req = validateCapabilityRequest({ workspace: ws, accessProfile: 'provider-default' });
   assert.ok(req);
@@ -385,10 +396,10 @@ test('timeoutMs validation and 600000ms default', async () => {
 test('compose-only uses disposable empty workspace and rejects explicit workspace', async () => {
   const ws = mkdtempSync(join(tmpdir(), 'cap-compose-'));
   // explicit workspace with compose-only must be rejected, not treated as implicit capability
-  await assert.rejects(generate({ provider: 'opencode', prompt: 'x', accessProfile: 'compose-only', workspace: ws, env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' } }), (e) => e.code === 'INVALID_INPUT');
+  await assert.rejects(generate({ provider: 'opencode', prompt: 'x', accessProfile: 'compose-only', workspace: ws, env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }) }), (e) => e.code === 'INVALID_INPUT');
   assert.throws(() => validateCapabilityRequest({ workspace: ws, accessProfile: 'compose-only' }), (e) => e.code === 'INVALID_INPUT');
   // compose-only without workspace should use disposable empty workspace (via generate it creates temp dir, cleans up)
-  const result = await generate({ provider: 'opencode', prompt: 'hello compose', accessProfile: 'compose-only', env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_REPLY_CWD: '1' } });
+  const result = await generate({ provider: 'opencode', prompt: 'hello compose', accessProfile: 'compose-only', env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode', FAKE_REPLY_CWD: '1' }) });
   const cwd = result.response.text.match(/cwd=(.*)$/)?.[1] ?? result.response.text;
   // The compose workspace is a disposable temp dir, not the caller's cwd or supplied ws
   assert.equal(cwd.includes(ws), false, 'compose-only must not expose caller workspace');
@@ -503,7 +514,7 @@ test('invocation plumbing carries workspace/roots/project metadata and returns o
     protectedPaths: [protectedP],
     projectId: 'proj-xyz',
     storeRevisions: { automation: 'sha256:aaa' },
-    env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+    env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
   });
   // capability digests must be present, no absolute paths
   assert.equal(result.capability.accessProfile, 'bounded-edit');

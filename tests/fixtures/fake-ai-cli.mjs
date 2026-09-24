@@ -5,9 +5,9 @@ import { basename } from 'node:path';
 
 const args = process.argv.slice(2);
 const provider = process.env.FAKE_PROVIDER || basename(process.argv[1]).split('-')[0];
-// Test-controlled CLI version. OpenCode defaults to a v1 profile so legacy
-// argv assertions stay valid; set FAKE_VERSION=2.x for v2 profile tests.
-const version = process.env.FAKE_VERSION || (provider === 'opencode' ? '1.18.30' : '9.9.9');
+// Test-controlled CLI version. OpenCode defaults to a v2 profile;
+// set FAKE_VERSION=1.x for legacy refusal tests.
+const version = process.env.FAKE_VERSION || (provider === 'opencode' ? '2.0.3' : '9.9.9');
 
 if (args.includes('--version') || args.includes('-V') || args.includes('-v')) {
   process.stdout.write(`${provider}-cli ${version}\n`);

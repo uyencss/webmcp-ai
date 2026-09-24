@@ -115,9 +115,8 @@ Codex `exec`/`--sandbox`/`read-only`/`--ephemeral`/`--ignore-user-config`/
 `--ignore-rules`/`--skip-git-repo-check`/`--output-last-message`/`--color`
 plus resume (`resume`/`-c`); its
 resume sandbox mapping uses config key `sandbox_mode` and is tested separately,
-opencode `run`/`--format`/`--agent`/`--model` plus the detected profile
-syntax (v1 1.x: `--dir`, `--variant`; v2 2.x: `--standalone`, variant folded
-as `model#variant`, no `--dir`; `mapping.profile` reports it) with the wrapper
+opencode `run`/`--standalone`/`--format`/`--agent`/`--model` (v2-only: variant folded
+as `model#variant`, no `--dir`; `mapping.profile` reports it; v1 is refused) with the wrapper
 read-only config mapping — and reports
 installed/authenticated/policy-supported/canary-proven/
 task-ready without leaking paths/secrets. `task-ready` means only that the
@@ -142,19 +141,18 @@ When the caller depends on a constrained AGY custom agent, pass its discovered
 name as `agent` in JSON input or via `--agent`. The AI CLI selects the agent but
 does not install it or change machine-level permissions.
 
-## OpenCode profiles (v1/v2)
+## OpenCode v2-only policy
 
 Every opencode spawn detects the installed profile with one bounded
-`<bin> --version` probe (no model). v1 (1.x) keeps the legacy argv
-(`--dir`/`--variant`) and v1 `permission`/`external_directory` config. v2
-(2.x) runs `--standalone` (private server so the invocation env/config apply
-instead of the shared background service), uses the spawn `cwd` as workspace
-(no `--dir`), folds effort as `--model provider/model#variant`, and receives
-the v2 ordered `permissions` config (`mcp.servers`/`plugins` emptied, updates
-disabled). An unrecognized major or unparseable version fails closed with
-typed `PROVIDER_CAPABILITY_DRIFT` before any argv or temp artifact exists;
-`--effort` without a model on v2 is `INVALID_INPUT`. No profile is guessed
-from help text.
+`<bin> --version` probe (no model). OpenCode is strictly v2-only: v2 (2.x) runs
+`--standalone` (private server so the invocation env/config apply instead of the
+shared background service), uses the spawn `cwd` as workspace (no `--dir`),
+folds effort as `--model provider/model#variant`, and receives the v2 ordered
+`permissions` config (`mcp.servers`/`plugins` emptied, updates disabled).
+Legacy v1 (1.x) binaries and explicit `'v1'` overrides fail closed with typed
+`PROVIDER_CAPABILITY_DRIFT` (`OpenCode v1 is not supported; v2 is required`)
+before any argv or temp artifact exists. There is no credential sync or legacy DB path.
+`--effort` without a model on v2 is `INVALID_INPUT`. No profile is guessed from help text.
 
 ## Full access (opt-in passthrough)
 
@@ -176,10 +174,9 @@ provider workspace/tool access profile and does not place private keys,
 credentials, bearer tokens, or machine identity into model context, child
 authority env, or portable receipts. What it does is provider-specific (do not
 promise unrestricted ambient access for non-OpenCode providers): OpenCode
-(v1 and v2) is the only provider that keeps the ambient operator config, tools,
-and MCP surface (v1 isolates the session database to `opencode-cli.db` for
-compatibility; v2 uses the accepted `opencode.db` via `OPENCODE_DB` without
-fallback, migration, or copy of legacy databases; v2 additionally runs its
+(v2-only) is the only provider that keeps the ambient operator config, tools,
+and MCP surface (all invocations select the accepted `opencode.db` via `OPENCODE_DB` without
+fallback, migration, or copy of legacy databases; OpenCode additionally runs its
 private server via `--standalone`); Codex uses the `workspace-write` sandbox instead of
 `read-only` but keeps `--ephemeral --ignore-user-config --ignore-rules`, so it
 does not inherit ambient user config/MCP (and explicit resume binds
@@ -251,30 +248,21 @@ printf '%s' '{"protocol":"webmcp-tool-v1","requestId":"run-1@compose","tool":"ai
 
 Treat stdout as machine-readable output and stderr as diagnostics.
 
-## SQLite database isolation and selection
+## SQLite database isolation and selection (OpenCode v2-only)
 
-OpenCode v1 keeps sessions in a single SQLite database (`opencode.db`) that
-enforces single-writer access. A shared database can contend when another
-OpenCode instance holds the write lock during a concurrent write; contention is
-timing-dependent, so not every concurrent run fails with `SQLITE_BUSY`, but a
-shared database leaves CLI runs exposed to it.
+OpenCode invocations are strictly v2-only. Every WebMCP-managed OpenCode invocation
+selects the accepted `opencode.db` in the effective data directory (`$XDG_DATA_HOME/opencode/`,
+falling back to `~/.local/share/opencode/`); selection, fallback, migration, or copying of
+legacy databases (including `opencode-cli.db`) is strictly prohibited. Legacy v1 binaries and
+explicit `'v1'` overrides are refused before spawn with typed `PROVIDER_CAPABILITY_DRIFT`
+(`OpenCode v1 is not supported; v2 is required`). There is no credential sync and no legacy DB path.
 
-For OpenCode v1, the wrapper's isolated-database behavior is a version-pinned
-compatibility capability: `webmcp-ai` sets `OPENCODE_DB` to `opencode-cli.db`
-inside the effective data directory (`$XDG_DATA_HOME/opencode/`, falling back to
-`~/.local/share/opencode/`), separating the CLI namespace from the IDE/default database.
-Configuration (`~/.config/opencode/`) stays shared while session histories stay independent.
-Sessions created in `opencode.db` do not appear in `opencode-cli.db`, and the
-wrapper never searches or migrates sessions across databases automatically.
-
-For OpenCode v2, WebMCP-managed OpenCode uses the accepted `opencode.db` in the
-effective data directory; fallback, migration, or copying of `opencode-cli.db` is
-strictly prohibited. For OpenCode v2 an explicit `OPENCODE_DB` value is an operator override that must point
+For OpenCode v2 an explicit `OPENCODE_DB` value is an operator override that must point
 to the accepted `opencode.db`; a missing or empty database fails closed with `PROVIDER_STATE_UNINITIALIZED`
 and is never silently replaced or fallen back to another database. Task JSON and model prompts
 cannot select the database path.
 
-V2 (beta) resolves contention architecturally through a background server that
+V2 resolves contention architecturally through a background server that
 serializes all writes. The wrapper sets `OPENCODE_DB` to the accepted `opencode.db`
 on v2 and adds `--standalone` per spawn, so the private server starts with the invocation
 env/config (wrapper `permissions`, empty MCP/plugins, no legacy DB sync) instead of
@@ -386,6 +374,6 @@ webmcp-ai providers install --host orbit --plan --json
 - Use `--json` for automation and branch on stable `error.code` values.
 - Override provider executables only with `AGY_BIN`, `CLAUDE_BIN`, `CODEX_BIN`,
   or `OPENCODE_BIN`.
-- Override the OpenCode database only with `OPENCODE_DB`; v1 keeps `opencode-cli.db`
-  for compatibility while v2 uses the accepted `opencode.db` (never falling back to
-  or copying `opencode-cli.db`).
+- Override the OpenCode database only with `OPENCODE_DB`; all invocations use
+  the accepted `opencode.db` (never falling back to or copying `opencode-cli.db`;
+  v1 is refused).

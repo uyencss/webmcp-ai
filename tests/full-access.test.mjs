@@ -20,6 +20,7 @@ import {
 import { generate } from '../src/client.mjs';
 import { describeTools, handleToolCall, TOOL_PROTOCOL } from '../src/protocol.mjs';
 import { getProvider } from '../src/providers/index.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
@@ -86,11 +87,10 @@ test('opencode full is passthrough: no generated config, ambient tools kept', ()
       accessProfile: 'full',
       agentMode: 'accept-edits',
       env: {},
-      opencodeProfile: 'v1',
     });
     assert.equal(invocation.stdin, 'full prompt');
-    assert.ok(invocation.args.includes('--dir'));
-    assert.equal(invocation.args[invocation.args.indexOf('--dir') + 1], ws);
+    assert.equal(invocation.args.includes('--dir'), false);
+    assert.ok(invocation.args.includes('--standalone'));
     assert.ok(invocation.args.includes('--auto'));
     // No restrictive generated config: ambient operator config is kept (opencode only).
     assert.equal(invocation.env.OPENCODE_CONFIG_CONTENT, undefined);
@@ -98,8 +98,23 @@ test('opencode full is passthrough: no generated config, ambient tools kept', ()
     assert.equal(invocation.env.OPENCODE_PURE, undefined);
     // Session DB isolation is kept (harmless, avoids SQLITE_BUSY).
     assert.ok(typeof invocation.env.OPENCODE_DB === 'string');
+    assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode.db'));
     assert.equal(typeof invocation.cleanup, 'function');
     invocation.cleanup();
+
+    // explicit opencodeProfile:'v1' is refused
+    assert.throws(
+      () => getProvider('opencode').buildInvocation({
+        prompt: 'full prompt',
+        timeoutMs: 1234,
+        workspace: ws,
+        accessProfile: 'full',
+        agentMode: 'accept-edits',
+        env: {},
+        opencodeProfile: 'v1',
+      }),
+      (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
+    );
   } finally {
     rmSync(ws, { recursive: true, force: true });
   }
@@ -264,7 +279,7 @@ test('full generate strips WebMCP/server/Vault authority end to end', async () =
       prompt: 'env check',
       workspace: ws,
       accessProfile: 'full',
-      env: {
+      env: withV2Db({
         ...process.env,
         OPENCODE_BIN: fakeBin,
         FAKE_PROVIDER: 'opencode',
@@ -275,7 +290,7 @@ test('full generate strips WebMCP/server/Vault authority end to end', async () =
         OPENCODE_SERVER_PASSWORD: 'deny-fixture',
         VAULT_TOKEN: 'deny-fixture',
         VAULT_ADDR: 'deny-fixture',
-      },
+      }),
     });
     assert.equal(result.ok, true);
     // Non-WebMCP provider fixture passes; authority material is stripped (empty echo).
@@ -298,13 +313,13 @@ test('bounded profiles still strip ambient env', async () => {
       prompt: 'env check',
       workspace: ws,
       accessProfile: 'review-readonly',
-      env: {
+      env: withV2Db({
         ...process.env,
         OPENCODE_BIN: fakeBin,
         FAKE_PROVIDER: 'opencode',
         FAKE_ECHO_ENV: 'WEBMCP_AI_BOUNDED_PROBE',
         WEBMCP_AI_BOUNDED_PROBE: 'must-not-arrive',
-      },
+      }),
     });
     assert.equal(result.ok, true);
     assert.match(result.response.text, /WEBMCP_AI_BOUNDED_PROBE=$/m);
@@ -316,7 +331,7 @@ test('bounded profiles still strip ambient env', async () => {
 test('maxOutputBytes validates and flows through tool-call', async () => {
   const ws = mkdtempSync(join(tmpdir(), 'full-maxout-'));
   try {
-    const baseEnv = { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' };
+    const baseEnv = withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' });
     const ok = await handleToolCall({
       protocol: 'webmcp-tool-v1',
       requestId: 'maxout-1',
@@ -376,7 +391,7 @@ test('full missing workspace fails closed', async () => {
       prompt: 'hi',
       workspace: missing,
       accessProfile: 'full',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     }),
     (e) => e.code === 'INVALID_INPUT',
   );
@@ -504,13 +519,13 @@ test('full metadata carries digests only, no paths or secrets', async () => {
         storeRevisions: { automation: 'sha256:aaa' },
       },
     }, {
-      env: {
+      env: withV2Db({
         ...process.env,
         OPENCODE_BIN: fakeBin,
         FAKE_PROVIDER: 'opencode',
         GITHUB_TOKEN: 'fixture-secret-must-not-leak',
         WEBMCP_GATEWAY_TOKEN: 'fixture-authority-must-not-leak',
-      },
+      }),
     });
     assert.equal(result.ok, true);
     assert.equal(result.metadata.capability.accessProfile, 'full');
@@ -539,12 +554,12 @@ test('full provider failure stays typed without leaking stderr secrets', async (
         prompt: 'hi',
         workspace: ws,
         accessProfile: 'full',
-        env: {
+        env: withV2Db({
           ...process.env,
           OPENCODE_BIN: fakeBin,
           FAKE_PROVIDER: 'opencode',
           FAKE_EXIT_CODE: '7',
-        },
+        }),
       }),
       (e) => {
         assert.equal(e.code, 'PROVIDER_EXIT_ERROR');
@@ -568,7 +583,7 @@ test('full output cap is enforced', async () => {
         workspace: ws,
         accessProfile: 'full',
         maxOutputBytes: 1,
-        env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+        env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       }),
       (e) => e.code === 'PROVIDER_OUTPUT_LIMIT',
     );
@@ -599,7 +614,7 @@ test('bounded profiles stay fail-closed', async () => {
         workspace: ws,
         accessProfile: 'bounded-edit',
         allowedWriteRoots: [],
-        env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+        env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
       }),
       (e) => e.code === 'INVALID_INPUT',
     );
@@ -623,7 +638,7 @@ test('tool-call rejects top-level full field and keeps canonical accessProfile',
         requestId: 'full-alias-1',
         tool: 'ai.generate',
         input: { provider: 'opencode', prompt: 'x', workspace: ws, full: true },
-      }, { env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' } }),
+      }, { env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }) }),
       (e) => e.code === 'INVALID_INPUT' && /unknown input field: full/.test(e.message),
     );
     const ok = await handleToolCall({
@@ -631,7 +646,7 @@ test('tool-call rejects top-level full field and keeps canonical accessProfile',
       requestId: 'full-canonical-1',
       tool: 'ai.generate',
       input: { provider: 'opencode', prompt: 'x', workspace: ws, accessProfile: 'full' },
-    }, { env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' } });
+    }, { env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }) });
     assert.equal(ok.ok, true);
     assert.equal(ok.metadata.capability.accessProfile, 'full');
   } finally {
@@ -645,7 +660,7 @@ test('CLI input-json full:true maps to full while full:false does not', () => {
     const withTrue = spawnSync(process.execPath, [bin, 'generate', '--input-json', '-', '--json'], {
       input: JSON.stringify({ provider: 'opencode', prompt: 'hi', workspace: ws, full: true }),
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(withTrue.status, 0, withTrue.stderr);
     assert.equal(JSON.parse(withTrue.stdout).capability.accessProfile, 'full');
@@ -653,14 +668,14 @@ test('CLI input-json full:true maps to full while full:false does not', () => {
     const withFalse = spawnSync(process.execPath, [bin, 'generate', '--input-json', '-', '--json'], {
       input: JSON.stringify({ provider: 'opencode', prompt: 'hi', workspace: ws, full: false }),
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(withFalse.status, 0, withFalse.stderr);
     assert.notEqual(JSON.parse(withFalse.stdout).capability.accessProfile, 'full');
 
     const withFlag = spawnSync(process.execPath, [bin, 'generate', '--provider', 'opencode', '--prompt', 'hi', '--workspace', ws, '--full', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' },
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
     });
     assert.equal(withFlag.status, 0, withFlag.stderr);
     assert.equal(JSON.parse(withFlag.stdout).capability.accessProfile, 'full');

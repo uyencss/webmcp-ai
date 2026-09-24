@@ -9,6 +9,7 @@ import test from 'node:test';
 
 import { describeReviewDryRun, review } from '../src/review.mjs';
 import { handleToolCall, TOOL_PROTOCOL } from '../src/protocol.mjs';
+import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 
@@ -23,7 +24,7 @@ function makeReviewFixture(t, payloadObj, provider) {
   const goodHelp = provider === 'codex'
     ? 'codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode'
     : provider === 'opencode'
-      ? 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort'
+      ? 'opencode run --standalone --format json --agent build --model sonnet#effort'
       : '-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort';
   writeFileSync(fake, [
     '#!/usr/bin/env node',
@@ -31,7 +32,12 @@ function makeReviewFixture(t, payloadObj, provider) {
     `const payload = ${JSON.stringify(payload)};`,
     `const goodHelp = ${JSON.stringify(goodHelp)};`,
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
+    'if (args.includes("--version")) {',
+    '  const p = process.env.FAKE_PROVIDER || "";',
+    `  const prov = ${JSON.stringify(provider)};`,
+    '  if (prov === "opencode" || p === "opencode") { process.stdout.write("fake-cli 2.0.3\\n"); process.exit(0); }',
+    '  process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0);',
+    '}',
     'if (args.includes("--help")) { process.stdout.write(goodHelp + "\\n"); process.exit(0); }',
     'const outIdx = args.indexOf("--output-last-message");',
     'if (outIdx >= 0) { writeFileSync(args[outIdx + 1], payload); process.stdout.write("{\\"type\\":\\"completed\\"}\\n"); process.exit(0); }',
@@ -309,11 +315,15 @@ test('F6: edit-claim text without a verdict is REVIEW_RESULT_INCOMPLETE, not suc
   writeFileSync(fake, [
     '#!/usr/bin/env node',
     'const args = process.argv.slice(2);',
-    'if (args.includes("--version")) { process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0); }',
+    'if (args.includes("--version")) {',
+    '  const p = process.env.FAKE_PROVIDER || "claude";',
+    '  if (p === "opencode") { process.stdout.write("fake-cli 2.0.3\\n"); process.exit(0); }',
+    '  process.stdout.write("fake-cli 1.18.30\\n"); process.exit(0);',
+    '}',
     'if (args.includes("--help")) {',
     '  const p = process.env.FAKE_PROVIDER || "claude";',
     '  if (p === "codex") { process.stdout.write("codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode\\n"); process.exit(0); }',
-    '  if (p === "opencode") { process.stdout.write("opencode run --format json --agent build --dir /ws --model sonnet --variant effort\\n"); process.exit(0); }',
+    '  if (p === "opencode") { process.stdout.write("opencode run --standalone --format json --agent build --model sonnet#effort\\n"); process.exit(0); }',
     '  process.stdout.write("-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort\\n"); process.exit(0);',
     '}',
     'const outIdx = args.indexOf("--output-last-message");',
@@ -335,7 +345,7 @@ test('F6: edit-claim text without a verdict is REVIEW_RESULT_INCOMPLETE, not suc
       await assert.rejects(
         review({
           provider, prompt: 'review me', taskIntent: 'review', workspace: ws,
-          env: { ...process.env, CLAUDE_BIN: fake, CODEX_BIN: fake, OPENCODE_BIN: fake, FAKE_PROVIDER: provider },
+          env: withV2Db({ ...process.env, CLAUDE_BIN: fake, CODEX_BIN: fake, OPENCODE_BIN: fake, FAKE_PROVIDER: provider }),
         }),
         (e) => e.code === 'REVIEW_RESULT_INCOMPLETE',
         `${provider} edit-claim must not succeed`,
@@ -371,7 +381,7 @@ test('F8: resumed review sets resumed:true; fresh review sets resumed:false', as
   const fake = makeReviewFixture(t, { schema: 'webmcp-ai-review-result/1', verdict: 'approve', summary: 'fresh looks good' }, 'opencode');
   const ws = mkdtempSync(join(tmpdir(), 'fresh-resumed-'));
   try {
-    const env = { ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' };
+    const env = withV2Db({ ...process.env, OPENCODE_BIN: fake, FAKE_PROVIDER: 'opencode' });
     const fresh = await review({ provider: 'opencode', prompt: 'review me', workspace: ws, env });
     assert.equal(fresh.resumed, false);
     assert.equal(fresh.session.id, null, 'review must not expose raw provider session IDs');

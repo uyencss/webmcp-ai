@@ -87,7 +87,6 @@ test('opencode uses stdin, JSON NDJSON output, and a read-only plan agent by def
     prompt: 'opencode prompt',
     timeoutMs: 1234,
     workspace: '/ws',
-    opencodeProfile: 'v1',
   });
 
   assert.equal(invocation.stdin, 'opencode prompt');
@@ -95,12 +94,16 @@ test('opencode uses stdin, JSON NDJSON output, and a read-only plan agent by def
   assert.equal(invocation.args[invocation.args.indexOf('--format') + 1], 'json');
   assert.equal(invocation.args[invocation.args.indexOf('--agent') + 1], 'plan');
   assert.equal(invocation.args.includes('--auto'), false);
+  assert.ok(invocation.args.includes('--standalone'));
   // The injected sandbox must never carry an "ask" value or headless runs hang.
   assert.equal(invocation.env.OPENCODE_CONFIG_CONTENT.includes('"ask"'), false);
-  assert.equal(JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT).permission.read, 'allow');
+  const cfg = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT);
+  assert.ok(Array.isArray(cfg.permissions));
+  assert.equal(cfg.permission, undefined);
+  assert.ok(cfg.permissions.some((p) => p.action === 'read' && p.effect === 'allow'));
   // CLI invocations use an isolated DB to avoid SQLite lock contention.
   assert.ok(invocation.env.OPENCODE_DB, 'OPENCODE_DB must be set');
-  assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode-cli.db'), 'must use opencode-cli.db');
+  assert.ok(invocation.env.OPENCODE_DB.endsWith('opencode.db'), 'must use opencode.db');
   assert.ok(invocation.env.OPENCODE_DB.includes('/opencode/'), 'must stay in the opencode data directory');
 });
 
@@ -110,13 +113,15 @@ test('opencode accept-edits opts into supervised writes with --auto and the buil
     timeoutMs: 1234,
     agentMode: 'accept-edits',
     workspace: '/ws',
-    opencodeProfile: 'v1',
   });
   assert.ok(invocation.args.includes('--auto'));
+  assert.ok(invocation.args.includes('--standalone'));
   assert.equal(invocation.args[invocation.args.indexOf('--agent') + 1], 'build');
-  const permission = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT).permission;
-  assert.equal(permission.edit, 'allow');
-  assert.equal(permission.bash['rm -rf *'], 'deny');
+  const cfg = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT);
+  assert.ok(Array.isArray(cfg.permissions));
+  assert.equal(cfg.permission, undefined);
+  assert.ok(cfg.permissions.some((p) => p.action === 'edit' && p.effect === 'allow'));
+  assert.ok(cfg.permissions.some((p) => p.action === 'shell' && p.effect === 'deny'));
 });
 
 test('opencode fails closed on schema, a bad agent name, and an unknown agentMode', () => {
@@ -146,10 +151,12 @@ test('opencode compose-only denies every tool and never auto-approves', () => {
     timeoutMs: 1000,
     toolPolicy: 'compose-only',
     workspace: '/ws',
-    opencodeProfile: 'v1',
   });
   assert.equal(invocation.args.includes('--auto'), false);
-  assert.deepEqual(JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT).permission, { '*': 'deny' });
+  assert.ok(invocation.args.includes('--standalone'));
+  const cfg = JSON.parse(invocation.env.OPENCODE_CONFIG_CONTENT);
+  assert.ok(Array.isArray(cfg.permissions));
+  assert.deepEqual(cfg.permissions, [{ action: '*', resource: '*', effect: 'deny' }]);
 });
 
 test('opencode parses NDJSON events and falls back to raw stdout', () => {
@@ -235,22 +242,22 @@ test('opencode resolves the CLI database from the effective environment, never p
   // both flavors are trimmed so the joined path stays canonical.
   assert.equal(
     resolveOpencodeCliDb({ XDG_DATA_HOME: '/state/data/' }, { homeDir: '/home/tester' }),
-    '/state/data/opencode/opencode-cli.db',
+    '/state/data/opencode/opencode.db',
   );
   assert.equal(
     resolveOpencodeCliDb({ XDG_DATA_HOME: '\\state\\data\\' }, { homeDir: '/home/tester' }),
-    '\\state\\data/opencode/opencode-cli.db',
+    '\\state\\data/opencode/opencode.db',
   );
 
   // Homedir fallback applies when neither value is present. An explicitly
   // provided environment object must be used instead of process.env.
   assert.equal(
     resolveOpencodeCliDb({}, { homeDir: '/home/tester' }),
-    '/home/tester/.local/share/opencode/opencode-cli.db',
+    '/home/tester/.local/share/opencode/opencode.db',
   );
   assert.equal(
     resolveOpencodeCliDb({ OPENCODE_DB: '   ', XDG_DATA_HOME: '  ' }, { homeDir: '/home/tester' }),
-    '/home/tester/.local/share/opencode/opencode-cli.db',
+    '/home/tester/.local/share/opencode/opencode.db',
   );
 
   // OpenCode v2 resolves to opencode.db and rejects legacy opencode-cli.db
@@ -269,6 +276,12 @@ test('opencode resolves the CLI database from the effective environment, never p
   assert.throws(
     () => resolveOpencodeCliDb({ OPENCODE_DB: '/custom/opencode-cli.db' }, { profile: 'v2' }),
     (e) => e.code === 'PROVIDER_STATE_UNINITIALIZED' && e.details?.state === 'prohibited-db',
+  );
+
+  // Explicit v1 profile is refused with typed drift
+  assert.throws(
+    () => resolveOpencodeCliDb({}, { profile: 'v1' }),
+    (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT' && e.details?.required === 'v2',
   );
 });
 
