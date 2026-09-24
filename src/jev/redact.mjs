@@ -18,7 +18,7 @@
 // captchaEvidence.sitekey is emitted as a sha256: digest (it is neither a value nor free text).
 import { createHash } from 'node:crypto';
 import { AiCliError } from '../errors.mjs';
-import { OPERATIONS, SOLVER_CRITERIA_KEYS, NEXT_STEP_CRITERIA_KEYS } from './schemas.mjs';
+import { OPERATIONS, SOLVER_CRITERIA_KEYS, NEXT_STEP_CRITERIA_KEYS, DETECTOR_KINDS } from './schemas.mjs';
 
 export const REDACTED = '[REDACTED]';
 
@@ -54,6 +54,11 @@ const STRUCTURAL_CRITERIA_KEYS = new Set([
   ...OPERATIONS,
   ...SOLVER_CRITERIA_KEYS,
   ...NEXT_STEP_CRITERIA_KEYS,
+  // captcha-classify criteria keys ARE the frozen detector-kind vocabulary
+  // (the engine emits `{k: null}` for every CAPTCHA_KINDS entry). Without
+  // these the classify path refuses with JEV_REQUEST_INVALID (M2 amendment,
+  // 2026-09-24; contracts unchanged).
+  ...DETECTOR_KINDS,
   'answer',
   'ref',
   'targetRef',

@@ -27,6 +27,7 @@ import {
   REDACTED,
 } from '../src/jev/redact.mjs';
 import { buildFallback } from '../src/jev/fallback.mjs';
+import { DETECTOR_KINDS } from '../src/jev/schemas.mjs';
 
 const SECRET = 'fixture-secret-abc123';
 const DIGEST = `sha256:${'ab'.repeat(32)}`;
@@ -240,6 +241,37 @@ test('P1 Rule 4: criteria key outside allowed set throws JEV_REQUEST_INVALID', (
       `key "${badKey}" must be rejected`,
     );
   }
+});
+
+test('M2 amendment 2026-09-24: captcha-classify criteria keys are the frozen detector-kind vocabulary', () => {
+  const req = baseRequest();
+  req.kind = 'captcha-classify';
+  req.questions = {
+    captcha_kind: {
+      type: 'choice',
+      instructions: { goal: 'Classify captcha on page', question: 'Identify detector kind.' },
+      criteria: Object.fromEntries(DETECTOR_KINDS.map((kind) => [kind, null])),
+    },
+  };
+  const redacted = redactRequest(req, { secrets: [] });
+  for (const kind of DETECTOR_KINDS) {
+    assert.ok(kind in redacted.questions.captcha_kind.criteria, `detector kind "${kind}" must survive the projection`);
+  }
+
+  const bad = baseRequest();
+  bad.kind = 'captcha-classify';
+  bad.questions = {
+    captcha_kind: {
+      type: 'choice',
+      instructions: { goal: 'Classify captcha on page', question: 'Identify detector kind.' },
+      criteria: { hunter22: null },
+    },
+  };
+  assert.throws(
+    () => redactRequest(bad, { secrets: [] }),
+    (err) => err.code === 'JEV_REQUEST_INVALID',
+    'a non-vocabulary classify key must still be refused',
+  );
 });
 
 // ---------------------------------------------------------------------------
