@@ -10,6 +10,7 @@ import { validateRequest } from './schemas.mjs';
 import { createJevClient } from './client.mjs';
 import { readKeyFile } from './transport.mjs';
 import { asAiCliError } from '../errors.mjs';
+import { decideFallback } from './policy/policy.mjs';
 
 export const JEV_COMMAND_NAME = 'webmcp-jev';
 
@@ -78,10 +79,55 @@ function isHelpToken(token) {
   return token === '--help' || token === '-h' || token === 'help';
 }
 
-function writeErrorAndCode(error) {
+function writeErrorAndCode(error, policyEvaluation = null) {
   const typed = asAiCliError(error);
   process.stderr.write(`${typed.code}: ${typed.message}\n`);
+  const evaluation = policyEvaluation ?? typed.details?.policyEvaluation;
+  if (evaluation) {
+    process.stderr.write(`${JSON.stringify({ policyEvaluation: evaluation })}\n`);
+  }
   return typed.exitCode || 1;
+}
+
+export function wireFallbackPolicy({ request, error, circuit = 'closed', env = process.env } = {}) {
+  const typed = asAiCliError(error);
+  const failureCode = typed.code;
+  const circuitState = typed.details?.fallback?.circuit ?? circuit ?? 'closed';
+  const killSwitch = env?.JEV_FAST_PATH_DISABLED === '1' ||
+    env?.JEV_FAST_PATH_DISABLED === 'true' ||
+    (Boolean(env?.JEV_FAST_PATH_DISABLED) && env?.JEV_FAST_PATH_DISABLED !== '0' && env?.JEV_FAST_PATH_DISABLED !== 'false');
+  const enabled = !(env?.JEV_ENABLED === 'false' || env?.JEV_ENABLED === '0');
+  const flags = { enabled, killSwitch };
+
+  let policyEvaluation = null;
+  try {
+    policyEvaluation = decideFallback({
+      kind: request?.kind ?? 'query',
+      fallbackPolicy: request?.fallbackPolicy ?? 'normal-agent',
+      failure: failureCode,
+      circuit: circuitState,
+      attempts: 2,
+      maxAttempts: 2,
+      flags,
+    });
+  } catch {
+    // Fail-safe: if decideFallback throws for any reason, do not crash error reporting
+  }
+
+  if (policyEvaluation) {
+    if (!typed.details) typed.details = {};
+    typed.details.policyEvaluation = policyEvaluation;
+
+    // Fail-safe override: if M6 disagrees with M2 directive route, M6 verdict MUST win
+    if (typed.details.fallback && policyEvaluation.engine && policyEvaluation.engine !== typed.details.fallback.decisionEngine) {
+      typed.details.fallback = {
+        ...typed.details.fallback,
+        decisionEngine: policyEvaluation.engine,
+      };
+    }
+  }
+
+  return { typed, policyEvaluation };
 }
 
 function readRequestFile(path) {
@@ -96,7 +142,7 @@ function flagValue(args, flag) {
   return typeof value === 'string' && !value.startsWith('--') ? value : null;
 }
 
-async function runQuery(rest) {
+export async function runQuery(rest, { env = process.env, ...deps } = {}) {
   if (rest.some(isHelpToken) || !rest.includes('--request')) {
     process.stdout.write(jevQueryHelpText());
     return 0;
@@ -142,13 +188,16 @@ async function runQuery(rest) {
   // frozen pin and --skill-digest (null when absent) is passed through.
   const model = flagValue(rest, '--model') ?? JEV_PINNED_MODEL;
   const skillDigest = flagValue(rest, '--skill-digest');
+  let client = null;
   try {
-    const client = createJevClient({ baseUrl, apiKey, model, skillDigest });
+    client = createJevClient({ baseUrl, apiKey, model, skillDigest, ...deps });
     const { result } = await client.query(request);
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {
-    return writeErrorAndCode(error);
+    const circuitState = client?.getCircuitState?.() ?? 'closed';
+    const { typed, policyEvaluation } = wireFallbackPolicy({ request, error, circuit: circuitState, env });
+    return writeErrorAndCode(typed, policyEvaluation);
   }
 }
 
@@ -260,7 +309,7 @@ export async function runJevCli(argv = process.argv.slice(2), env = process.env,
     return 0;
   }
   if (command === 'query') {
-    return runQuery(rest);
+    return runQuery(rest, { env, ...deps });
   }
   if (command === 'canary') {
     return runCanary(rest, deps);

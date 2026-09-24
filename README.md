@@ -329,3 +329,7 @@ webmcp-ai providers install --host orbit --plan --json
 - **Version pins**: pinned to active runtime measurements (Claude `2.1.280`, OpenCode `2.0.15`, Codex `0.155.0-alpha.16`, AGY `1.2.9`). Missing pins fail with `PROVIDER_PIN_MISSING`.
 - **ORBIT host**: host-scoped plan and read-only inspection only (`authorized: false`). Apply requires explicit owner authorization per host and throws `HOST_SCOPE_NOT_AUTHORIZED` (M3 not authorized).
 - **Separation of concerns**: 5 separate layers (binary, model, auth, canary, skill). Installer never performs login, credential extraction, or auth copy. Receipts record package, version, and action; `auth` (`not-assessed`) and `canary` (`not-run`) remain strictly separated from installation receipts.
+
+## Jev Policy Promotion (M6 Phase B)
+
+The policy core under `src/jev/policy/` is a promoted copy of the runner policy module (`packages/webmcp-automation-runner/src/runner/jev-fallback/policy.mjs`) at runner source commit `8a86bd7e8f5d396dd8f854966b1273248ed0da8c` (source `policy.mjs` sha256: `6f6148601d17ae113456c60da5d727562ab59be8c03739ff85aa0df9e96a2814`), verified against the G13 oracle with 4890/4890 agreement. This release wires the policy evaluation into the failure path of the `query` flow only; success-path guard action wiring and rollout-config serialization are follow-up work. Divergence risk is explicitly disclosed: two copies of the policy engine exist across the repository until M7 single-sources it.
