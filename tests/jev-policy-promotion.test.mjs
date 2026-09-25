@@ -651,7 +651,7 @@ test('success-path override: origin not allowlisted routes away from jev', () =>
 // 9. Completion-signal hook & invariant
 // ---------------------------------------------------------------------------
 
-test('completion-signal: DONE operation records completionClaim: true in diagnostic while guardAction invariant stays false', () => {
+test('completion-signal: DONE stays advisory: diagnostic claim reflects guard (false)', () => {
   const req = baseBrowserStepRequest();
   const res = baseBrowserStepResult('DONE');
 
@@ -663,8 +663,10 @@ test('completion-signal: DONE operation records completionClaim: true in diagnos
   });
 
   assert.equal(allowed, true);
-  // Diagnostic records completion claim for Gate 5 measurement
-  assert.equal(policyEvaluation.completionClaim, true);
+  // Gate 10 regression: DONE is advisory only; a DONE advisory can never produce
+  // completionClaim: true from wireSuccessPolicy. Emitted diagnostic reflects guard (false).
+  assert.equal(policyEvaluation.completionClaim, false);
+  assert.notEqual(policyEvaluation.completionClaim, true);
   // Hard invariant: guardAction result completionClaim is ALWAYS false
   assert.equal(policyEvaluation.guard.completionClaim, false);
   assert.equal(policyEvaluation.guard.action, 'no-command');
@@ -841,7 +843,7 @@ test('cli query e2e: success path override blocks execution when kill switch is 
   }
 });
 
-test('cli query e2e: success path records completionClaim: true when DONE is selected', async () => {
+test('cli query e2e: success path stays advisory: diagnostic claim reflects guard (false) when DONE is selected', async () => {
   const tempDir = mkdtempSync(join(tmpdir(), 'jev-m6-e2e-done-'));
   const reqFile = join(tempDir, 'req.json');
   const keyFile = join(tempDir, 'key.txt');
@@ -892,7 +894,9 @@ test('cli query e2e: success path records completionClaim: true when DONE is sel
     const jsonLine = stderrChunks.map((c) => c.trim()).find((c) => c.startsWith('{"policyEvaluation":'));
     assert.ok(jsonLine);
     const parsed = JSON.parse(jsonLine);
-    assert.equal(parsed.policyEvaluation.completionClaim, true);
+    // Gate 10: emitted diagnostic claim reflects guard's verified claim (false); raw DONE is advisory only
+    assert.equal(parsed.policyEvaluation.completionClaim, false);
+    assert.notEqual(parsed.policyEvaluation.completionClaim, true);
     assert.equal(parsed.policyEvaluation.guard.completionClaim, false);
     assert.equal(parsed.policyEvaluation.guard.action, 'no-command');
   } finally {

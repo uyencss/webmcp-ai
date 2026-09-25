@@ -177,9 +177,6 @@ export function wireSuccessPolicy({ request, result, circuit = 'closed', env = p
     operation = result.answers.operation;
   }
 
-  const isCompletionClaim = operation === 'DONE' ||
-    Object.values(result?.answers ?? {}).some((a) => a?.choice === 'DONE');
-
   const effectiveSnapshot = snapshot ?? (request?.state?.snapshotDigest ? {
     expectedDigest: request.state.snapshotDigest,
     observedDigest: request.state.snapshotDigest,
@@ -223,7 +220,10 @@ export function wireSuccessPolicy({ request, result, circuit = 'closed', env = p
     ...decision,
     decision,
     guard,
-    completionClaim: isCompletionClaim,
+    // Gate 10: DONE is advisory only; completion is established only by
+    // independent postcondition verification outside this CLI, so the CLI
+    // never emits a true claim. Emitted diagnostic reflects the guard's verified claim.
+    completionClaim: guard?.completionClaim ?? false,
     engine: effectiveEngine,
     reason: effectiveReason,
   };
