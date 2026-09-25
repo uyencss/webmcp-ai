@@ -5,14 +5,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateRequest } from '../src/jev/schemas.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(HERE, '..');
-const CONTRACTS = join(PKG_ROOT, '..', '..', 'docs', 'initiatives', '2026-09-jev-fast-browser-runtime', 'contracts');
+
+function resolveContractsDir() {
+  const candidates = [
+    join(PKG_ROOT, '..', '..', 'docs', 'initiatives', '10-local-ready', '2026-09-jev-fast-browser-runtime', 'contracts'),
+    join(PKG_ROOT, '..', '..', 'docs', 'initiatives', '2026-09-jev-fast-browser-runtime', 'contracts'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  assert.fail(`Contracts directory not found. Tried paths:\n  - ${candidates[0]}\n  - ${candidates[1]}`);
+}
+
+const CONTRACTS = resolveContractsDir();
 
 function resolveAjv() {
   const candidates = [
