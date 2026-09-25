@@ -618,5 +618,3 @@ test('15. readBackProviderInstall accepts a manifest override and recomputes the
   assert.equal(entry.pinDigest, expected, 'read-back must confirm the overridden pin');
   assert.notEqual(entry.pinDigest, staleDigest);
 });
-
-

@@ -711,5 +711,3 @@ test('review and both dry-runs on a v2 host never select or write the legacy dat
     assert.ok(call.db && call.db.endsWith('opencode.db'), `run DB must end with opencode.db, got: ${call.db}`);
   }
 });
-
-

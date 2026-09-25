@@ -1220,4 +1220,3 @@ test('Z3: __proto__ question id reaches wire and is checked by id rules', () => 
     (err) => err.code === 'JEV_REQUEST_INVALID',
   );
 });
-

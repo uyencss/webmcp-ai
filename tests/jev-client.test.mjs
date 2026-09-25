@@ -1651,5 +1651,3 @@ test('Y1: mixed aliased elements and questions round trip correctly', async () =
   assert.equal(result.answers.operation.probabilities.btn, 0.9);
   assert.equal(result.answers.second.probabilities.btn, 0.8);
 });
-
-
