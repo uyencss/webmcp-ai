@@ -6,6 +6,29 @@ import { AiCliError } from '../errors.mjs';
 export const MAX_PROMPT_ARG_BYTES = 128 * 1024;
 const AGENT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+// Print-mode guard: every bounded (non-full) AGY lane disables slash-command
+// expansion so a prompt cannot trigger interactive-only skill behavior in a
+// headless print session. Verified present in the installed `agy --help`
+// (1.2.13) via validateAgyBoundedSupport before spawn.
+export const AGY_BOUNDED_REQUIRED_FLAGS = Object.freeze(['--disable-slash-commands']);
+
+function helpContainsToken(helpText, token) {
+  const escaped = String(token).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s,=<>()[\\]"'])${escaped}(?=$|[\\s,=<>()[\\]"'])`).test(String(helpText ?? ''));
+}
+
+export function validateAgyBoundedSupport(helpText) {
+  const text = String(helpText ?? '');
+  const missing = AGY_BOUNDED_REQUIRED_FLAGS.filter((flag) => !helpContainsToken(text, flag));
+  if (missing.length > 0) {
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed AGY CLI lacks bounded print-mode guard flags: ${missing.join(', ')}`, {
+      exitCode: 2,
+      details: { capability: 'bounded-guard', missing },
+    });
+  }
+  return true;
+}
+
 function installComposeOnlyGuard(workspace) {
   const agentsDir = join(workspace, '.agents');
   mkdirSync(agentsDir, { recursive: true, mode: 0o700 });
@@ -42,6 +65,7 @@ export const agyProvider = {
     explicitResume: true,
     modelDiscovery: true,
     toolPolicies: ['provider-default', 'compose-only'],
+    printModeGuards: ['--disable-slash-commands'],
     // Machine-readable mirror of the gates below: legacy generate defaults to
     // plan and also honors accept-edits; every portable vNext taskIntent is
     // rejected here (preventive deny-write unproven), so discovery must not
@@ -101,17 +125,26 @@ export const agyProvider = {
       });
     }
     const seconds = Math.max(1, Math.ceil(request.timeoutMs / 1000));
-    const cleanupGuard = request.toolPolicy === 'compose-only'
-      ? installComposeOnlyGuard(request.workspace)
-      : null;
     // Full passthrough (opt-in via --full): drop the forced sandbox so the
     // child runs like the native CLI with full folder + tool access.
     const isFull = request.accessProfile === 'full';
+    // Bounded print-mode guard: validated before any side effect (the
+    // compose-only guard directory below) so a direct caller supplying a
+    // drifted request.agyHelpText never strands a temp guard on disk. The
+    // live spawn lane runs the equivalent probe in src/client.mjs before
+    // this adapter is invoked; this is the direct-adapter-call seam.
+    if (!isFull && request.agyHelpText !== undefined && request.agyHelpText !== null) {
+      validateAgyBoundedSupport(request.agyHelpText);
+    }
+    const cleanupGuard = request.toolPolicy === 'compose-only'
+      ? installComposeOnlyGuard(request.workspace)
+      : null;
     return {
       args: [
         '-p', request.prompt,
         ...(!isFull ? ['--sandbox'] : []),
         '--mode', agentMode,
+        ...(!isFull ? ['--disable-slash-commands'] : []),
         '--print-timeout', `${seconds}s`,
         ...(request.agent ? ['--agent', request.agent] : []),
         ...(request.model ? ['--model', request.model] : []),

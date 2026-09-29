@@ -4,6 +4,34 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Add `src/remote.mjs`: a declared, code-only registry of remote Claude hosts
+  (host `m1`, SSH alias `mac-pro14`) with strictly validated operator env
+  overrides (`WEBMCP_AI_CLAUDE_SSH_ALIAS`, `WEBMCP_AI_CLAUDE_REMOTE_BIN`,
+  `WEBMCP_AI_CLAUDE_REMOTE_WORKER`, `WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE`), host
+  selection (`WEBMCP_AI_CLAUDE_HOST`), and a bounded read-only SSH probe
+  (`--version`/`--help` over `BatchMode`/`StrictHostKeyChecking` ssh options,
+  256 KiB output cap). Every failure mode (missing ssh, non-zero exit,
+  timeout, host key mismatch, DNS) maps to typed `CLAUDE_REMOTE_UNREACHABLE`
+  with a bounded reason code; invalid config maps to typed
+  `CLAUDE_REMOTE_CONFIG_INVALID` naming only the field, never the raw value.
+  This lane never falls back to a local binary. Worker/run/fingerprint
+  protocol is out of scope for this round.
+- Wire host `m1` into the provider install manifest (`transport: 'ssh'`):
+  `providers install --plan|--read-back --host m1` probe through the bounded
+  SSH read-only probe (state `match|drift|missing|unreachable`, never
+  mutates); `--apply --host m1` always refuses with typed
+  `REMOTE_INSTALL_UNSUPPORTED` (`exitCode: 3`) since there is no SSH mutation
+  path. Bump local pins to active runtime measurements: Claude `2.1.283`,
+  OpenCode `2.0.18`, Codex `0.157.1`, AGY `1.2.13`.
+- Add a bounded print-mode guard to every non-`full` AGY and Claude lane:
+  `--disable-slash-commands` (both providers) and, on the Claude review lane,
+  `--permission-prompts none`, so a prompt cannot expand interactive-only
+  skills or block on a permission prompt in a headless print session. The
+  installed CLI is probed (`<bin> --help`) before spawn on the live generate
+  lane; a drifted install fails closed with typed `PROVIDER_CAPABILITY_DRIFT`
+  instead of silently spawning without the guard. `--full` (native
+  passthrough) stays byte-identical — no new flags are added. Declared via
+  `printModeGuards` in each provider's `capabilities` (`providers inspect`).
 - Register `opencode-go/union-alpha` in model capabilities table with `supportsEffort: false`
   to fail closed against unsupported `--effort` flags before process spawn.
 - Record the verified optional OpenCode/OpenRouter route

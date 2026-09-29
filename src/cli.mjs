@@ -191,6 +191,7 @@ Generate options:
   --resolve-artifacts     AGY only: recover the full answer from its brain dir when stdout is a summary
   --agy-brain-dir <path>  Override the AGY brain directory used by --resolve-artifacts
   --dry-run               Resolve + sanitized inspection only; never spawns a provider
+  (bounded lanes on agy/claude apply a print-mode guard, e.g. --disable-slash-commands; see providers inspect printModeGuards)
   --stream                Forward provider stdout/stderr live to our stderr; stdout keeps one JSON envelope
   --stream-to <ch>        Live channel for --stream/--events: stderr (default) or stdout
   --events                Emit one advisory progress JSON per line to our stderr (see skill for states)
@@ -215,6 +216,7 @@ Review options (portable one-shot reviewer; reuses the ai.review resolver; read-
   --dry-run               Resolve + sanitized inspection only; never spawns a provider (no process spawn; digests only)
   --json                  Emit stable JSON on stdout
   (review intentionally disallows --stream/--events/--stream-to; use generate for live telemetry. Claude uses native stream-json --verbose only when events are requested in generate.)
+  (claude review applies a print-mode guard: --disable-slash-commands, --permission-prompts none)
 
 Migration:
   Prefer --task-intent (compose|review|implement|plan) with --access-profile

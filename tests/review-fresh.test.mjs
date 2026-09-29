@@ -25,7 +25,7 @@ function makeReviewFixture(t, payloadObj, provider) {
     ? 'codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode'
     : provider === 'opencode'
       ? 'opencode run --standalone --format json --agent build --model sonnet#effort'
-      : '-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort';
+      : '-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort --disable-slash-commands --permission-prompts none';
   writeFileSync(fake, [
     '#!/usr/bin/env node',
     "import { readFileSync, writeFileSync } from 'node:fs';",
@@ -92,7 +92,7 @@ const PLAN_EXAMPLE = {
 
 // F2: Claude inspect probes installed binary/version/help truthfully.
 test('F2: providers inspect claude reports available, missing and drifted without fabrication', async (t) => {
-  const goodHelp = '-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort';
+  const goodHelp = '-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort --disable-slash-commands --permission-prompts none';
   const availableFake = makeClaudeHelpFake(t, { helpText: `claude --help ${goodHelp}` });
   const driftedFake = makeClaudeHelpFake(t, { helpText: 'claude --help --tools only' });
 
@@ -114,7 +114,7 @@ test('F2: providers inspect claude reports available, missing and drifted withou
   assert.ok(Array.isArray(aPayload.limitations) && aPayload.limitations.length > 0, 'task-ready inspect must report limitations');
 
   const quotedHelpFake = makeClaudeHelpFake(t, {
-    helpText: 'claude --help -p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format <format> (choices: "text", "json", "stream-json") --verbose --no-session-persistence --resume --model --effort',
+    helpText: 'claude --help -p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format <format> (choices: "text", "json", "stream-json") --verbose --no-session-persistence --resume --model --effort --disable-slash-commands --permission-prompts none',
   });
   const quoted = spawnSync(process.execPath, [bin, 'providers', 'inspect', 'claude', '--task-intent', 'review', '--json'], {
     encoding: 'utf8', env: { ...process.env, CLAUDE_BIN: quotedHelpFake },
@@ -165,7 +165,7 @@ test('F2: providers inspect claude reports available, missing and drifted withou
 
 // F1: review/ai.review version-probes claude --help before model invocation.
 test('F1: review with drifted help fails PROVIDER_CAPABILITY_DRIFT before model invocation', async (t) => {
-  const goodHelp = '-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort';
+  const goodHelp = '-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort --disable-slash-commands --permission-prompts none';
   const verdictPayload = {
     schema: 'webmcp-ai-review-result/1', verdict: 'approve', summary: 'good probe verdict',
   };
@@ -324,7 +324,7 @@ test('F6: edit-claim text without a verdict is REVIEW_RESULT_INCOMPLETE, not suc
     '  const p = process.env.FAKE_PROVIDER || "claude";',
     '  if (p === "codex") { process.stdout.write("codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-last-message --color resume -c, --config sandbox_mode\\n"); process.exit(0); }',
     '  if (p === "opencode") { process.stdout.write("opencode run --standalone --format json --agent build --model sonnet#effort\\n"); process.exit(0); }',
-    '  process.stdout.write("-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort\\n"); process.exit(0);',
+    '  process.stdout.write("-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --resume --model --effort --disable-slash-commands --permission-prompts none\\n"); process.exit(0);',
     '}',
     'const outIdx = args.indexOf("--output-last-message");',
     'const text = "Edited src/example.mjs successfully";',

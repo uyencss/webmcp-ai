@@ -180,6 +180,8 @@ function writeAgyBrainFake() {
     '#!/usr/bin/env node',
     "import { mkdirSync, writeFileSync } from 'node:fs';",
     "import { join } from 'node:path';",
+    'const args = process.argv.slice(2);',
+    "if (args.includes('--help')) { process.stdout.write('--sandbox --mode --print-timeout --agent --model --effort --conversation --disable-slash-commands\\n'); process.exit(0); }",
     'const brain = process.env.FAKE_AGY_BRAIN;',
     "if (brain) { mkdirSync(join(brain, 'uuid-run'), { recursive: true }); writeFileSync(join(brain, 'uuid-run', 'answer.md'), 'FULL '.repeat(50)); }",
     "process.stdout.write('summary');",

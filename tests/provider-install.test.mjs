@@ -38,7 +38,7 @@ function makeSqliteFixture(filePath) {
   }
 }
 
-test('1. planProviderInstall local returns 4 pinned providers, no mutations, no update spawn', (t) => {
+test('1. planProviderInstall local returns 4 pinned providers, no mutations, no update spawn', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'plan-local-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -47,7 +47,7 @@ test('1. planProviderInstall local returns 4 pinned providers, no mutations, no 
   writeExecutable(fakeClaude, `#!/usr/bin/env node
 import { appendFileSync } from 'node:fs';
 if (process.argv.includes('--version')) {
-  process.stdout.write('2.1.280 (Claude Code)\\n');
+  process.stdout.write('2.1.283 (Claude Code)\\n');
   process.exit(0);
 }
 appendFileSync(${JSON.stringify(markerPath)}, JSON.stringify(process.argv.slice(2)) + '\\n');
@@ -58,7 +58,7 @@ process.exit(0);
   writeExecutable(fakeOpencode, `#!/usr/bin/env node
 import { appendFileSync } from 'node:fs';
 if (process.argv.includes('--version')) {
-  process.stdout.write('opencode v2.0.15\\n');
+  process.stdout.write('opencode v2.0.18\\n');
   process.exit(0);
 }
 appendFileSync(${JSON.stringify(markerPath)}, JSON.stringify(process.argv.slice(2)) + '\\n');
@@ -71,22 +71,22 @@ process.exit(0);
     OPENCODE_BIN: fakeOpencode,
   };
 
-  const plan = planProviderInstall({ host: 'local', env });
+  const plan = await planProviderInstall({ host: 'local', env });
   assert.equal(plan.ok, true);
   assert.equal(plan.schema, 'webmcp-ai-provider-install-plan/1');
   assert.deepEqual(plan.mutations, []);
   assert.equal(plan.providers.length, 4);
 
   const byId = Object.fromEntries(plan.providers.map((p) => [p.id, p]));
-  assert.equal(byId.claude.version, '2.1.280');
-  assert.equal(byId.opencode.version, '2.0.15');
-  assert.equal(byId.codex.version, '0.155.0-alpha.16');
-  assert.equal(byId.agy.version, '1.2.9');
+  assert.equal(byId.claude.version, '2.1.283');
+  assert.equal(byId.opencode.version, '2.0.18');
+  assert.equal(byId.codex.version, '0.157.1');
+  assert.equal(byId.agy.version, '1.2.13');
 
   assert.equal(existsSync(markerPath), false, 'plan must never spawn update commands');
 });
 
-test('2. planProviderInstall throws PROVIDER_PIN_MISSING when a provider lacks version', () => {
+test('2. planProviderInstall throws PROVIDER_PIN_MISSING when a provider lacks version', async () => {
   const badManifest = {
     ...PROVIDER_INSTALL_MANIFEST,
     hosts: {
@@ -100,7 +100,7 @@ test('2. planProviderInstall throws PROVIDER_PIN_MISSING when a provider lacks v
     },
   };
 
-  assert.throws(
+  await assert.rejects(
     () => planProviderInstall({ host: 'local', manifest: badManifest }),
     (err) => {
       assert.equal(err.code, 'PROVIDER_PIN_MISSING');
@@ -110,12 +110,12 @@ test('2. planProviderInstall throws PROVIDER_PIN_MISSING when a provider lacks v
   );
 });
 
-test('3. planProviderInstall orbit returns authorized:false, no spawn, action host-authorization-required', (t) => {
+test('3. planProviderInstall orbit returns authorized:false, no spawn, action host-authorization-required', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'plan-orbit-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
   const marker = join(tmp, 'marker.log');
-  const plan = planProviderInstall({ host: 'orbit', env: { ...process.env, CODEX_BIN: marker } });
+  const plan = await planProviderInstall({ host: 'orbit', env: { ...process.env, CODEX_BIN: marker } });
 
   assert.equal(plan.ok, true);
   assert.equal(plan.schema, 'webmcp-ai-provider-install-plan/1');
@@ -190,14 +190,14 @@ process.exit(0);
   const runs = readFileSync(marker, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.deepEqual(runs[0], ['update']);
 
-  // Successful update case: fake writes state file during update, then --version returns 2.1.280
+  // Successful update case: fake writes state file during update, then --version returns 2.1.283
   const stateFile = join(tmp, 'claude-updated.state');
   const fakeClaudeSuccess = join(tmp, 'fake-claude-success.mjs');
   writeExecutable(fakeClaudeSuccess, `#!/usr/bin/env node
 import { existsSync, writeFileSync } from 'node:fs';
 if (process.argv.includes('--version')) {
   if (existsSync(${JSON.stringify(stateFile)})) {
-    process.stdout.write('2.1.280 (Claude Code)\\n');
+    process.stdout.write('2.1.283 (Claude Code)\\n');
   } else {
     process.stdout.write('2.1.279 (Claude Code)\\n');
   }
@@ -220,7 +220,7 @@ process.exit(0);
   const claudeSuccess = receiptSuccess.providers.find((p) => p.id === 'claude');
   assert.equal(claudeSuccess.state, 'match');
   assert.equal(claudeSuccess.action, 'updated');
-  assert.equal(claudeSuccess.installedVersion, '2.1.280');
+  assert.equal(claudeSuccess.installedVersion, '2.1.283');
 });
 
 test('6. receipt security hygiene: no auth:true, auth:not-assessed, canary:not-run per-provider, no tmpdir path', async (t) => {
@@ -255,7 +255,7 @@ process.exit(0);
   assert.equal(text.includes(tmp), false);
   assert.equal(text.includes(process.env.HOME), false);
 
-  const plan = planProviderInstall({ host: 'local', env });
+  const plan = await planProviderInstall({ host: 'local', env });
   for (const p of plan.providers) {
     assert.equal(p.auth, 'not-assessed');
     assert.equal(p.canary, 'not-run');
@@ -264,7 +264,7 @@ process.exit(0);
   assert.equal(/"auth":\s*true/.test(planText), false);
   assert.equal(/"authenticated":\s*true/.test(planText), false);
 
-  const orbitPlan = planProviderInstall({ host: 'orbit', env });
+  const orbitPlan = await planProviderInstall({ host: 'orbit', env });
   for (const p of orbitPlan.providers) {
     assert.equal(p.auth, 'not-assessed');
     assert.equal(p.canary, 'not-run');
@@ -293,7 +293,7 @@ test('7. readBackProviderInstall local: v2 ready when sqlite valid, missing when
   const fakeOpencode = join(tmp, 'fake-opencode.mjs');
   writeExecutable(fakeOpencode, `#!/usr/bin/env node
 if (process.argv.includes('--version')) {
-  process.stdout.write('opencode v2.0.15\\n');
+  process.stdout.write('opencode v2.0.18\\n');
   process.exit(0);
 }
 process.exit(0);
@@ -417,7 +417,7 @@ process.exit(0);
   assert.equal(claudeRb.hash, expectedHash);
   assert.equal(claudeRb.hashSource, 'binary-sha256');
 
-  const plan = planProviderInstall({ host: 'local', env });
+  const plan = await planProviderInstall({ host: 'local', env });
   const claudePlan = plan.providers.find((p) => p.id === 'claude');
   assert.equal(claudePlan.hash, expectedHash);
   assert.equal(claudePlan.hashSource, 'binary-sha256');
@@ -475,7 +475,7 @@ process.exit(0);
     CLAUDE_BIN: fakeClaude,
   };
 
-  const plan = planProviderInstall({ host: 'local', env, manifest: customManifest });
+  const plan = await planProviderInstall({ host: 'local', env, manifest: customManifest });
   assert.equal(plan.ok, true);
   const plannedClaude = plan.providers.find((p) => p.id === 'claude');
   assert.equal(plannedClaude.state, 'drift');
@@ -548,7 +548,7 @@ process.exit(0);
   const env = { ...process.env, CLAUDE_BIN: fakeClaude };
 
   // Plan local
-  const plan = planProviderInstall({ host: 'local', env });
+  const plan = await planProviderInstall({ host: 'local', env });
   for (const entry of plan.providers) {
     const def = PROVIDER_INSTALL_MANIFEST.hosts.local.providers.find((p) => p.id === entry.id);
     assert.ok(def, `manifest provider def found for ${entry.id}`);
@@ -556,7 +556,7 @@ process.exit(0);
   }
 
   // Plan orbit
-  const orbitPlan = planProviderInstall({ host: 'orbit', env });
+  const orbitPlan = await planProviderInstall({ host: 'orbit', env });
   for (const entry of orbitPlan.providers) {
     const def = PROVIDER_INSTALL_MANIFEST.hosts.orbit.providers.find((p) => p.id === entry.id);
     assert.ok(def, `manifest provider def found for orbit ${entry.id}`);
@@ -591,7 +591,7 @@ test('14. a mutated pin can never carry a stale pinDigest', async (t) => {
   const expected = computePinDigest({ ...newClaude });    // recompute từ fields MỚI
   assert.notEqual(expected, staleDigest);
   const env = { ...process.env, CLAUDE_BIN: '/usr/bin/true' };
-  const plan = planProviderInstall({ host: 'local', env, manifest });
+  const plan = await planProviderInstall({ host: 'local', env, manifest });
   const planned = plan.providers.find((p) => p.id === 'claude');
   assert.equal(planned.pinDigest, expected);
   assert.notEqual(planned.pinDigest, staleDigest);
@@ -617,4 +617,104 @@ test('15. readBackProviderInstall accepts a manifest override and recomputes the
   const entry = rb.providers.find((p) => p.id === 'claude');
   assert.equal(entry.pinDigest, expected, 'read-back must confirm the overridden pin');
   assert.notEqual(entry.pinDigest, staleDigest);
+});
+
+// --- host m1 (remote Claude over SSH) ---
+
+function writeFakeSsh(dir) {
+  const script = join(dir, 'fake-ssh.mjs');
+  writeExecutable(script, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const last = args[args.length - 1];
+if (process.env.FAKE_SSH_EXIT_CODE) { process.exit(Number(process.env.FAKE_SSH_EXIT_CODE)); }
+if (last === '--version') { process.stdout.write((process.env.FAKE_SSH_VERSION || '2.1.283 (Claude Code)') + '\\n'); process.exit(0); }
+if (last === '--help') { process.stdout.write('--disable-slash-commands --permission-prompts none\\n'); process.exit(0); }
+process.exit(1);
+`);
+  return script;
+}
+
+test('16. planProviderInstall host m1: match/drift/unreachable states via the bounded SSH probe, never spawns locally', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'plan-m1-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const localMarker = join(tmp, 'local-spawn-marker.log');
+  const fakeSsh = writeFakeSsh(tmp);
+
+  const matchPlan = await planProviderInstall({
+    host: 'm1',
+    env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, CLAUDE_BIN: localMarker },
+  });
+  assert.equal(matchPlan.ok, true);
+  assert.equal(matchPlan.host, 'm1');
+  assert.equal(matchPlan.hostScoped, true);
+  assert.equal(matchPlan.authorized, true);
+  assert.deepEqual(matchPlan.mutations, []);
+  assert.equal(matchPlan.providers.length, 1);
+  const matched = matchPlan.providers[0];
+  assert.equal(matched.id, 'claude');
+  assert.equal(matched.state, 'match');
+  assert.equal(matched.action, 'none');
+  assert.equal(matched.transport, 'ssh');
+  assert.equal(matched.host, 'm1');
+  assert.equal(matched.hash, null);
+  assert.equal(existsSync(localMarker), false, 'ssh host must never spawn a local binary');
+
+  const driftPlan = await planProviderInstall({
+    host: 'm1',
+    env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, FAKE_SSH_VERSION: '2.1.200 (Claude Code)' },
+  });
+  const drifted = driftPlan.providers[0];
+  assert.equal(drifted.state, 'drift');
+  assert.equal(drifted.action, 'operator-required');
+  assert.equal(drifted.installed, '2.1.200');
+
+  const unreachablePlan = await planProviderInstall({
+    host: 'm1',
+    env: { ...process.env, WEBMCP_AI_SSH_BIN: '/definitely/missing/ssh-does-not-exist' },
+  });
+  const unreachable = unreachablePlan.providers[0];
+  assert.equal(unreachable.state, 'unreachable');
+  assert.equal(unreachable.action, 'unreachable');
+  assert.equal(unreachable.installed, null);
+});
+
+test('17. applyProviderInstall host m1 refuses with typed REMOTE_INSTALL_UNSUPPORTED, no ssh spawn', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'apply-m1-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const fakeSsh = writeFakeSsh(tmp);
+  const marker = join(tmp, 'ssh-was-called.marker');
+
+  await assert.rejects(
+    () => applyProviderInstall({ host: 'm1', env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh }, execute: true }),
+    (err) => {
+      assert.equal(err.code, 'REMOTE_INSTALL_UNSUPPORTED');
+      assert.equal(err.exitCode, 3);
+      assert.equal(err.retryable, false);
+      assert.deepEqual(err.details, { host: 'm1' });
+      return true;
+    },
+  );
+  assert.equal(existsSync(marker), false);
+});
+
+test('18. readBackProviderInstall host m1 returns a bounded SSH-probed per-provider entry', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'readback-m1-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const fakeSsh = writeFakeSsh(tmp);
+
+  const rb = await readBackProviderInstall({ host: 'm1', env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh } });
+  assert.equal(rb.ok, true);
+  assert.equal(rb.host, 'm1');
+  assert.equal(rb.authorized, true);
+  assert.equal(rb.providers.length, 1);
+  const entry = rb.providers[0];
+  assert.equal(entry.id, 'claude');
+  assert.equal(entry.pinnedVersion, '2.1.283');
+  assert.equal(entry.installedVersion, '2.1.283');
+  assert.equal(entry.state, 'match');
+  assert.equal(entry.transport, 'ssh');
+  assert.equal(entry.host, 'm1');
+  assert.equal(entry.hash, null);
+  assert.equal(entry.auth, 'not-assessed');
+  assert.equal(entry.canary, 'not-run');
 });

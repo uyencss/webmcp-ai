@@ -9,11 +9,58 @@ export const CLAUDE_REVIEW_ARGS = Object.freeze({
   permissionMode: 'dontAsk',
   tools: 'Read,Glob,Grep',
   disallowedTools: 'Edit,Write,NotebookEdit',
+  permissionPrompts: 'none',
 });
+
+// Print-mode guard flags for every bounded (non-full) lane: --disable-slash-
+// commands prevents a prompt from expanding interactive-only skills in a
+// headless print session, and --permission-prompts none (review lane only;
+// exact literal 'none') pins who answers a permission prompt so a bounded
+// reviewer never blocks on host input. Verified present in the installed
+// `claude --help` (2.1.283) via validateClaudeReviewSupport before spawn.
 
 function helpContainsToken(helpText, token) {
   const escaped = String(token).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?:^|[\\s,=<>()[\\]"'])${escaped}(?=$|[\\s,=<>()[\\]"'])`).test(String(helpText ?? ''));
+}
+
+// The literal 'none' independently matching anywhere in a large --help
+// output is too loose (the word can appear in an unrelated flag's
+// description) and too strict as a substring check (it doesn't prove *this*
+// 'none' answers --permission-prompts). Instead, require a bounded/token
+// 'none' within a window after each --permission-prompts occurrence. The
+// window tolerates the installed 2.1.283 CLI wrapping the value description
+// onto a later line (e.g. "--permission-prompts <target>\n  ... host | none").
+const PERMISSION_PROMPTS_NONE_WINDOW_CHARS = 240;
+const PERMISSION_PROMPTS_FLAG_PATTERN = /--permission-prompts/g;
+const BOUNDED_NONE_PATTERN = /(?:^|[\s,=<>()[\]"'])none(?=$|[\s,=<>()[\]"'])/;
+
+function helpProvesPermissionPromptsNone(helpText) {
+  const text = String(helpText ?? '');
+  const flagPattern = new RegExp(PERMISSION_PROMPTS_FLAG_PATTERN);
+  let match;
+  while ((match = flagPattern.exec(text)) !== null) {
+    const windowStart = match.index + match[0].length;
+    const window = text.slice(windowStart, windowStart + PERMISSION_PROMPTS_NONE_WINDOW_CHARS);
+    if (BOUNDED_NONE_PATTERN.test(window)) return true;
+  }
+  return false;
+}
+
+// Bounded print-mode guard requirement for every non-review, non-full Claude
+// lane (compose and legacy bounded generic). Mirrors AGY's
+// validateAgyBoundedSupport shape: only the guard flag is required, not the
+// full reviewer flag set.
+export function validateClaudeBoundedSupport(helpText) {
+  const text = String(helpText ?? '');
+  const missing = ['--disable-slash-commands'].filter((flag) => !helpContainsToken(text, flag));
+  if (missing.length > 0) {
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed Claude CLI lacks bounded print-mode guard flags: ${missing.join(', ')}`, {
+      exitCode: 2,
+      details: { capability: 'bounded-guard', missing },
+    });
+  }
+  return true;
 }
 
 export function validateClaudeReviewSupport(helpText) {
@@ -21,9 +68,16 @@ export function validateClaudeReviewSupport(helpText) {
   const required = [
     '-p', '--permission-mode', '--tools', '--disallowedTools', '--safe-mode', '--no-chrome',
     '--output-format', 'json', 'stream-json', '--verbose', '--no-session-persistence',
-    '--resume', '--model', '--effort',
+    '--resume', '--model', '--effort', '--disable-slash-commands', '--permission-prompts',
   ];
   const missing = required.filter((flag) => !helpContainsToken(text, flag));
+  // 'none' is proven only when adjacent to --permission-prompts (see
+  // helpProvesPermissionPromptsNone above); when --permission-prompts itself
+  // is absent it is already reported above and 'none' is not separately
+  // duplicated into the report.
+  if (!missing.includes('--permission-prompts') && !helpProvesPermissionPromptsNone(text)) {
+    missing.push('none');
+  }
   if (missing.length > 0) {
     throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed Claude CLI lacks reviewer flags: ${missing.join(', ')}`, {
       exitCode: 2,
@@ -44,6 +98,7 @@ export const claudeProvider = {
     explicitResume: true,
     modelDiscovery: false,
     toolPolicies: ['provider-default'],
+    printModeGuards: ['--disable-slash-commands'],
     // Machine-readable mirror of buildInvocation below: no AGY agentMode;
     // review/compose/implement are supported vNext intents (review needs the
     // installed help probe); plan needs a separate contract and is rejected.
@@ -150,6 +205,8 @@ export const claudeProvider = {
         '--disallowedTools', CLAUDE_REVIEW_ARGS.disallowedTools,
         '--safe-mode',
         '--no-chrome',
+        '--disable-slash-commands',
+        '--permission-prompts', CLAUDE_REVIEW_ARGS.permissionPrompts,
         ...(wantsEvents ? ['--output-format', 'stream-json', '--verbose'] : ['--output-format', 'json']),
         ...(request.sessionId ? ['--resume', request.sessionId] : ['--no-session-persistence']),
         ...(request.model ? ['--model', request.model] : []),
@@ -166,6 +223,7 @@ export const claudeProvider = {
     const args = [
       '-p',
       ...(!isFull ? ['--tools', '', '--safe-mode'] : []),
+      ...(!isFull ? ['--disable-slash-commands'] : []),
       '--no-chrome',
       ...(wantsStream ? ['--output-format', 'stream-json', '--verbose'] : ['--output-format', 'json']),
       ...(request.sessionId ? ['--resume', request.sessionId] : ['--no-session-persistence']),

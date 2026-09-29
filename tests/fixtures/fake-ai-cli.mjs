@@ -22,8 +22,10 @@ if (args.includes('--help')) {
       ? 'opencode run --standalone --format json --agent build --model sonnet#effort'
       : 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort';
     process.stdout.write(`${help}\n`);
+  } else if (provider === 'agy') {
+    process.stdout.write('--sandbox --mode --print-timeout --agent --model --effort --conversation --disable-slash-commands\n');
   } else {
-    process.stdout.write('--permission-mode --tools --disallowedTools --safe-mode --no-chrome --no-session-persistence\n');
+    process.stdout.write('--permission-mode --tools --disallowedTools --safe-mode --no-chrome --no-session-persistence --disable-slash-commands --permission-prompts none\n');
   }
   process.exit(0);
 }

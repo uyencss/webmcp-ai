@@ -353,7 +353,7 @@ webmcp-ai providers install --apply [--execute] [--receipt <path>] --json
 webmcp-ai providers install --host orbit --plan --json
 ```
 
-- **Version pins**: pinned to active runtime measurements (Claude `2.1.280`, OpenCode `2.0.15`, Codex `0.155.0-alpha.16`, AGY `1.2.9`). Missing pins fail with `PROVIDER_PIN_MISSING`.
+- **Version pins**: pinned to active runtime measurements (Claude `2.1.283`, OpenCode `2.0.18`, Codex `0.157.1`, AGY `1.2.13`). Missing pins fail with `PROVIDER_PIN_MISSING`.
 - **ORBIT host**: host-scoped plan and read-only inspection only (`authorized: false`). Apply requires explicit owner authorization per host and throws `HOST_SCOPE_NOT_AUTHORIZED` (M3 not authorized).
 - **Separation of concerns**: 5 separate layers (binary, model, auth, canary, skill). Installer never performs login, credential extraction, or auth copy. Receipts record package, version, and action; `auth` (`not-assessed`) and `canary` (`not-run`) remain strictly separated from installation receipts.
 

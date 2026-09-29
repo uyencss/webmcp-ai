@@ -124,7 +124,7 @@ test('F3 RED: claude review has explicit deny flags and safe-mode, drift is type
     (e) => e.code === 'PROVIDER_CAPABILITY_DRIFT',
     'Claude option names must be matched on token boundaries',
   );
-  assert.ok(validateClaudeReviewSupport('... -p --permission-mode ... --tools ... --disallowedTools ... --safe-mode ... --no-chrome ... --output-format json stream-json --verbose --no-session-persistence --resume --model --effort ...'));
+  assert.ok(validateClaudeReviewSupport('... -p --permission-mode ... --tools ... --disallowedTools ... --safe-mode ... --no-chrome ... --output-format json stream-json --verbose --no-session-persistence --resume --model --effort --disable-slash-commands --permission-prompts none ...'));
   // events contract: stream-json --verbose only when requested; review lane disallows events.
   const streamed = getProvider('claude').buildInvocation({
     prompt: 'review this', timeoutMs: 1000, taskIntent: 'review', accessProfile: 'review-readonly', eventsRequested: true,

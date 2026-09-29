@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { buildSafeChildEnv } from '../capabilities.mjs';
 import { AiCliError } from '../errors.mjs';
 import { runProcess } from '../process-runner.mjs';
+import { readRemoteClaudeState } from '../remote.mjs';
 import { getProvider, resolveProviderBin } from './index.mjs';
 import {
   inspectOpencodeDb,
@@ -127,14 +128,14 @@ const localClaude = Object.freeze({
   id: 'claude',
   bin: 'claude',
   env: 'CLAUDE_BIN',
-  version: '2.1.280',
+  version: '2.1.283',
   source: 'native-installer',
   installKind: 'self-update',
   updateArgs: Object.freeze(['update']),
   installable: true,
   pinDigest: computePinDigest({
     id: 'claude',
-    version: '2.1.280',
+    version: '2.1.283',
     source: 'native-installer',
     updateArgs: ['update'],
     installable: true,
@@ -145,14 +146,14 @@ const localOpencode = Object.freeze({
   id: 'opencode',
   bin: 'opencode',
   env: 'OPENCODE_BIN',
-  version: '2.0.15',
+  version: '2.0.18',
   source: 'native-installer',
   installKind: 'self-update',
   updateArgs: Object.freeze(['upgrade']),
   installable: true,
   pinDigest: computePinDigest({
     id: 'opencode',
-    version: '2.0.15',
+    version: '2.0.18',
     source: 'native-installer',
     updateArgs: ['upgrade'],
     installable: true,
@@ -163,13 +164,13 @@ const localCodex = Object.freeze({
   id: 'codex',
   bin: 'codex',
   env: 'CODEX_BIN',
-  version: '0.155.0-alpha.16',
+  version: '0.157.1',
   source: 'app-bundled:ChatGPT.app',
   installable: false,
   note: 'read-back only (app provisioned)',
   pinDigest: computePinDigest({
     id: 'codex',
-    version: '0.155.0-alpha.16',
+    version: '0.157.1',
     source: 'app-bundled:ChatGPT.app',
     updateArgs: [],
     installable: false,
@@ -180,13 +181,13 @@ const localAgy = Object.freeze({
   id: 'agy',
   bin: 'agy',
   env: 'AGY_BIN',
-  version: '1.2.9',
+  version: '1.2.13',
   source: 'system',
   installable: false,
   note: 'provider-not-install-target',
   pinDigest: computePinDigest({
     id: 'agy',
-    version: '1.2.9',
+    version: '1.2.13',
     source: 'system',
     updateArgs: [],
     installable: false,
@@ -230,6 +231,34 @@ const orbitProvidersList = [
 Object.defineProperty(orbitProvidersList, 'codex', { value: orbitCodex, enumerable: false });
 const orbitProviders = Object.freeze(orbitProvidersList);
 
+// m1: operator-declared remote Claude host (SSH alias `mac-pro14`). Unlike
+// `local`, this host is never spawned directly — every plan/read-back probe
+// runs through src/remote.mjs's bounded SSH read-only probe and is always
+// remote:true, installable:false (read-back only; no ssh mutation path).
+const m1Claude = Object.freeze({
+  id: 'claude',
+  bin: 'claude',
+  version: '2.1.283',
+  source: 'native-installer',
+  installable: false,
+  remote: true,
+  note: 'remote host m1; read-back requires SSH',
+  pinDigest: computePinDigest({
+    id: 'claude',
+    version: '2.1.283',
+    source: 'native-installer',
+    updateArgs: [],
+    installable: false,
+  }),
+});
+
+const m1ProvidersList = [
+  m1Claude,
+];
+
+Object.defineProperty(m1ProvidersList, 'claude', { value: m1Claude, enumerable: false });
+const m1Providers = Object.freeze(m1ProvidersList);
+
 const localHost = Object.freeze({
   authorized: true,
   providers: localProviders,
@@ -242,14 +271,24 @@ const orbitHost = Object.freeze({
   providers: orbitProviders,
 });
 
+const m1Host = Object.freeze({
+  authorized: true,
+  transport: 'ssh',
+  sshHost: 'mac-pro14',
+  scope: 'host',
+  note: 'operator-declared remote Claude host; probes are bounded and never infer local state',
+  providers: m1Providers,
+});
+
 const manifestBase = {
   schema: 'webmcp-ai-provider-install-manifest/1',
-  updated: '2026-09-24',
+  updated: '2026-09-29',
   hashAlgorithm: 'sha256',
   pinDigestAlgorithm: 'sha256',
   hosts: Object.freeze({
     local: localHost,
     orbit: orbitHost,
+    m1: m1Host,
   }),
   routes: Object.freeze({
     deepseek: Object.freeze({
@@ -291,7 +330,7 @@ function resolveBin(providerDef, env) {
   }
 }
 
-export function planProviderInstall({
+export async function planProviderInstall({
   host = 'local',
   env = process.env,
   manifest = PROVIDER_INSTALL_MANIFEST,
@@ -340,6 +379,46 @@ export function planProviderInstall({
         auth: 'not-assessed',
         canary: 'not-run',
       })),
+      auth: 'separate',
+      canary: 'separate',
+    };
+  }
+
+  // A host declared with transport 'ssh' (e.g. m1) never spawns a local
+  // binary. Every entry is probed through the bounded, read-only SSH probe
+  // in src/remote.mjs; a probe/config failure resolves to state
+  // 'unreachable' rather than throwing, so this never crashes the plan.
+  if (hostConfig.transport === 'ssh') {
+    const sshPlannedProviders = [];
+    for (const p of providers) {
+      const remoteState = await readRemoteClaudeState({ hostId: normHost, env, pin: p.version });
+      const action = remoteState.state === 'match' ? 'none'
+        : remoteState.state === 'drift' ? 'operator-required'
+        : remoteState.state === 'missing' ? 'read-back-only'
+        : 'unreachable';
+      sshPlannedProviders.push({
+        id: p.id,
+        version: p.version,
+        source: p.source,
+        pinDigest: computePinDigest(p),
+        action,
+        installed: remoteState.installedVersion,
+        state: remoteState.state,
+        transport: 'ssh',
+        host: normHost,
+        hash: null,
+        auth: 'not-assessed',
+        canary: 'not-run',
+      });
+    }
+    return {
+      ok: true,
+      schema: 'webmcp-ai-provider-install-plan/1',
+      host: normHost,
+      hostScoped: true,
+      authorized: true,
+      mutations: [],
+      providers: sshPlannedProviders,
       auth: 'separate',
       canary: 'separate',
     };
@@ -414,7 +493,7 @@ export function planProviderInstall({
   return {
     ok: true,
     schema: 'webmcp-ai-provider-install-plan/1',
-    host: 'local',
+    host: normHost,
     hostScoped: false,
     authorized: true,
     mutations: [],
@@ -448,7 +527,17 @@ export async function applyProviderInstall({
     });
   }
 
-  const plan = planProviderInstall({ host: normHost, env, manifest });
+  // A host declared with transport 'ssh' (e.g. m1) has no mutation path: we
+  // never run an update command over SSH. Refuse before any probe.
+  if (hostConfig.transport === 'ssh') {
+    throw new AiCliError('REMOTE_INSTALL_UNSUPPORTED', `Remote Claude host ${normHost} does not support install apply over SSH`, {
+      exitCode: 3,
+      retryable: false,
+      details: { host: normHost },
+    });
+  }
+
+  const plan = await planProviderInstall({ host: normHost, env, manifest });
   const safeEnv = buildSafeChildEnv(env, {});
   const receiptProviders = [];
 
@@ -594,6 +683,39 @@ export async function readBackProviderInstall({ host = 'local', env = process.en
       authorized: false,
       providers: [],
       state: 'host-authorization-required',
+      auth: 'not-assessed',
+      canary: 'not-run',
+    };
+  }
+
+  const sshHostConfig = manifest?.hosts?.[normHost] || manifest?.[normHost];
+  if (normHost !== 'local' && sshHostConfig?.transport === 'ssh') {
+    const sshProviders = Array.isArray(sshHostConfig.providers)
+      ? sshHostConfig.providers
+      : Object.entries(sshHostConfig.providers || {}).map(([id, p]) => ({ id, ...p }));
+    const providers = [];
+    for (const p of sshProviders) {
+      const remoteState = await readRemoteClaudeState({ hostId: normHost, env, pin: p.version });
+      providers.push({
+        id: p.id,
+        pinnedVersion: p.version,
+        installedVersion: remoteState.installedVersion,
+        state: remoteState.state,
+        source: p.source,
+        pinDigest: computePinDigest(p),
+        hash: null,
+        transport: 'ssh',
+        host: normHost,
+        auth: 'not-assessed',
+        canary: 'not-run',
+      });
+    }
+    return {
+      ok: true,
+      schema: 'webmcp-ai-provider-readback/1',
+      host: normHost,
+      authorized: true,
+      providers,
       auth: 'not-assessed',
       canary: 'not-run',
     };

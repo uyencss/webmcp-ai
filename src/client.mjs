@@ -20,7 +20,8 @@ import {
 import { AiCliError } from './errors.mjs';
 import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
-import { validateClaudeReviewSupport } from './providers/claude.mjs';
+import { validateAgyBoundedSupport } from './providers/agy.mjs';
+import { validateClaudeBoundedSupport, validateClaudeReviewSupport } from './providers/claude.mjs';
 import { validateCodexReviewSupport } from './providers/codex.mjs';
 import {
   assertOpencodeV2DbReady,
@@ -302,7 +303,7 @@ async function ensureClaudeReviewSupport({ provider, env }) {
  * spawned. Missing binary maps to CLI_NOT_INSTALLED; any other probe
  * failure maps to PROVIDER_CAPABILITY_DRIFT. Never leaks paths/raw help.
  */
-async function ensureHelpReviewSupport({ provider, env, label, validate, helpArgs = ['--help'] }) {
+async function ensureHelpReviewSupport({ provider, env, label, validate, helpArgs = ['--help'], capability = 'review' }) {
   const command = resolveProviderBin(provider, env);
   const safeEnv = buildSafeChildEnv(env, {});
   let helpText = null;
@@ -315,15 +316,46 @@ async function ensureHelpReviewSupport({ provider, env, label, validate, helpArg
     if (error?.code === 'CLI_NOT_INSTALLED') {
       throw new AiCliError('CLI_NOT_INSTALLED', `${label} CLI binary not installed or not executable`, {
         exitCode: 2,
-        details: { capability: 'review' },
+        details: { capability },
       });
     }
     throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed ${label} CLI reviewer capability unproven: ${error?.code || 'probe failed'}`, {
       exitCode: 2,
-      details: { capability: 'review' },
+      details: { capability },
     });
   }
   validate(helpText);
+}
+
+/**
+ * Bounded, read-only print-mode guard probe for the AGY spawn lane. Runs
+ * `<bin> --help` (no model) and validates that the installed CLI still
+ * advertises the bounded print-mode guard flags before every non-full spawn.
+ * Mirrors ensureHelpReviewSupport's shape but uses a capability label of
+ * 'bounded-guard' rather than 'review' (AGY has no reviewer lane).
+ */
+async function ensureAgyBoundedSupport({ provider, env }) {
+  const command = resolveProviderBin(provider, env);
+  const safeEnv = buildSafeChildEnv(env, {});
+  let helpText = null;
+  try {
+    const help = await runProcess(command, ['--help'], {
+      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+    });
+    helpText = `${help.stdout}\n${help.stderr}`;
+  } catch (error) {
+    if (error?.code === 'CLI_NOT_INSTALLED') {
+      throw new AiCliError('CLI_NOT_INSTALLED', 'AGY CLI binary not installed or not executable', {
+        exitCode: 2,
+        details: { capability: 'bounded-guard' },
+      });
+    }
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Installed AGY CLI bounded print-mode guard capability unproven: ${error?.code || 'probe failed'}`, {
+      exitCode: 2,
+      details: { capability: 'bounded-guard' },
+    });
+  }
+  validateAgyBoundedSupport(helpText);
 }
 
 /**
@@ -474,6 +506,18 @@ export async function generate(input) {
       if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
       throw error;
     }
+  } else if (provider.id === 'claude' && request.accessProfile !== 'full') {
+    // Every other non-full Claude lane (compose, legacy bounded generic)
+    // still emits --disable-slash-commands; probe it the same way AGY does
+    // so a drifted install fails closed before spawn instead of silently
+    // running without the guard.
+    try {
+      await ensureHelpReviewSupport({ provider, env, label: 'Claude', validate: validateClaudeBoundedSupport, capability: 'bounded-guard' });
+    } catch (error) {
+      try { invocation.cleanup?.(); } catch {}
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw error;
+    }
   }
   if (provider.id === 'codex' && request.taskIntent === 'review') {
     try {
@@ -493,6 +537,19 @@ export async function generate(input) {
         helpArgs: ['run', '--help'],
         validate: (helpText) => validateOpencodeReviewSupport(helpText, { profile: request.opencodeProfile }),
       });
+    } catch (error) {
+      try { invocation.cleanup?.(); } catch {}
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw error;
+    }
+  }
+  // Bounded print-mode guard probe: every non-full AGY spawn is validated
+  // against the installed `agy --help` before the child process starts, so a
+  // drifted install (guard flag removed upstream) fails closed instead of
+  // silently spawning without the guard.
+  if (provider.id === 'agy' && request.accessProfile !== 'full') {
+    try {
+      await ensureAgyBoundedSupport({ provider, env });
     } catch (error) {
       try { invocation.cleanup?.(); } catch {}
       if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }

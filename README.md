@@ -324,11 +324,14 @@ webmcp-ai providers install --plan --json
 webmcp-ai providers install --read-back --json
 webmcp-ai providers install --apply [--execute] [--receipt <path>] --json
 webmcp-ai providers install --host orbit --plan --json
+webmcp-ai providers install --host m1 --plan --json
 ```
 
-- **Version pins**: pinned to active runtime measurements (Claude `2.1.280`, OpenCode `2.0.15`, Codex `0.155.0-alpha.16`, AGY `1.2.9`). Missing pins fail with `PROVIDER_PIN_MISSING`.
+- **Version pins**: pinned to active runtime measurements (Claude `2.1.283`, OpenCode `2.0.18`, Codex `0.157.1`, AGY `1.2.13`). Missing pins fail with `PROVIDER_PIN_MISSING`.
 - **ORBIT host**: host-scoped plan and read-only inspection only (`authorized: false`). Apply requires explicit owner authorization per host and throws `HOST_SCOPE_NOT_AUTHORIZED` (M3 not authorized).
+- **m1 host (remote Claude over SSH)**: an operator-declared remote Claude host (SSH alias `mac-pro14`), resolved and probed through `src/remote.mjs` (bounded, read-only `--version`/`--help` over `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes ...`). `plan`/`read-back` report `state: match|drift|missing|unreachable` and never fall back to a local binary; a probe or config failure resolves to `unreachable` rather than throwing. `apply` has no mutation path over SSH and always throws typed `REMOTE_INSTALL_UNSUPPORTED` (`exitCode: 3`). Override the declared host fields with `WEBMCP_AI_CLAUDE_SSH_ALIAS`, `WEBMCP_AI_CLAUDE_REMOTE_BIN`, `WEBMCP_AI_CLAUDE_REMOTE_WORKER`, `WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE` (strictly validated; invalid values fail with typed `CLAUDE_REMOTE_CONFIG_INVALID` and never echo the raw value).
 - **Separation of concerns**: 5 separate layers (binary, model, auth, canary, skill). Installer never performs login, credential extraction, or auth copy. Receipts record package, version, and action; `auth` (`not-assessed`) and `canary` (`not-run`) remain strictly separated from installation receipts.
+- **Print-mode guard flags**: bounded (non-`full`) AGY and Claude lanes add `--disable-slash-commands` (both providers) and, on the Claude review lane, `--permission-prompts none`, so a prompt cannot expand interactive-only skills or block on a permission prompt in a headless print session. The installed CLI is probed (`<bin> --help`) before spawn; a drifted install fails closed with typed `PROVIDER_CAPABILITY_DRIFT` rather than silently spawning without the guard. `--full` (native passthrough) is unaffected — no new flags are added. See `printModeGuards` in `providers inspect <id>`.
 
 ## Jev Policy Promotion (M6 Phase B)
 
