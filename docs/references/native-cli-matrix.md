@@ -23,7 +23,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 ### A. Codex CLI (Native)
 - **Đường dẫn binary**:
   - ATLAS: `/Users/ttcenter/.local/bin/codex` hoặc `/Applications/ChatGPT.app/Contents/Resources/codex`
-  - ORBIT (Mac M1): `/Users/uyenuyen/.local/bin/codex` (truy cập qua `ssh mac-m1`)
+  - ORBIT (Mac M1): `/Users/uyenuyen/.local/bin/codex` (truy cập qua SSH alias do operator tự khai báo, ví dụ `ssh mac-m1`; wrapper dùng alias khai báo `mac-pro14` cho host `m1`)
 - **Mẫu lệnh Headless 1-Shot**:
   ```bash
   codex exec \
@@ -142,7 +142,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 1. **Kiểm tra Quota**:
    - `node /Users/ttcenter/Desktop/VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`
 2. **Quy tắc Fallback Model**:
-   - Codex 5h window = 0% $\rightarrow$ Route sang Mac M1 (`ssh mac-m1`) hoặc chuyển Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
+   - Codex 5h window = 0% $\rightarrow$ Route sang Mac M1 (SSH alias do operator tự khai báo, ví dụ `ssh mac-m1`; wrapper dùng alias khai báo `mac-pro14` cho host `m1`) hoặc chuyển Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
    - Claude Weekly < 20% $\rightarrow$ Ưu tiên dùng AGY Claude hoặc AGY Gemini Flash để bảo vệ hạn ngạch Claude Code CLI.
 3. **Lineage Honesty**:
    - Ghi nhận đúng provider và model trong nhật ký / ledger; không ngụy tạo model hoặc đổi tên route.

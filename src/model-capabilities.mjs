@@ -149,6 +149,8 @@ export function effortRejection({ providerId, modelId, effort }) {
   }
   const providerEffort = describeProviderEffort(providerId);
   if (providerEffort && !providerEffort.values.includes(effort)) {
+    // Forward-looking: no shipped override lists a value outside its
+    // provider's closed set, so this allow-branch is currently unreachable.
     const modelOverrideAllows = described
       && described.supportsEffort === true
       && Array.isArray(described.effortValues)

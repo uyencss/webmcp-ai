@@ -95,6 +95,8 @@ export const agyProvider = {
   defaultBin: 'agy',
   capabilities: {
     structuredOutput: true,
+    // No raw-text stdin prompt lane: prompts travel as `-p` argv or as a
+    // structured NDJSON envelope on the stream-json lane, never as raw text.
     stdinPrompt: false,
     explicitResume: true,
     explicitFork: false,

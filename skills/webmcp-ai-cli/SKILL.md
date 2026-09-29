@@ -293,7 +293,7 @@ Bảng tra cứu cú pháp gọi 1-shot headless và quy tắc trích xuất cho
 | **Claude** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude -p --model <m> --effort high --output-format json --restricted < <prompt> > out.json` | Stdin `< prompt` | JSON `.result` | **BẮT BUỘC** `-p` để tránh interactive TUI. `--restricted` tắt tools can thiệp shell/code. |
 | **OpenCode** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode run --standalone --format json --agent plan --model <m> < <prompt> > out.json` | Stdin `< prompt` hoặc đối số chuỗi | Stdout text hoặc JSON | **KHÔNG** ép biến `OPENCODE_DB` sang file DB rỗng/chưa sync vì sẽ mất quyền subscription Go models. |
 | **AGY** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | `node "$AI_CLI" generate --provider agy --model <m> [--effort high] --prompt "..." --json` | `--prompt` hoặc stdin | JSON `response.text` | Claude Opus 4.6 **KHÔNG** hỗ trợ `--effort` (exits 1). Flash hỗ trợ `--effort high`. |
-| **WebMCP AI** | Mọi model trên | `node "$AI_CLI" generate --provider <p> --model <m> --prompt-file <f> --json` | `--prompt-file` | JSON `response.text` | Wrapper thống nhất tự động cô lập workspace, auto-sync credentials, chuẩn hóa `error.code`. |
+| **WebMCP AI** | Mọi model trên | `node "$AI_CLI" generate --provider <p> --model <m> --prompt-file <f> --json` | `--prompt-file` | JSON `response.text` | Wrapper thống nhất tự động cô lập workspace, chuẩn hóa `error.code` (không sync credentials — installer không login/copy auth). |
 
 ### 2. Mẫu Lệnh Headless 1-Shot Chi Tiết
 
@@ -351,7 +351,7 @@ node "$AI_CLI" generate --provider agy --model gemini-3.8-flash-high --effort hi
 ### 3. Preflight & Fallback Rules Cho Agent
 1. **Kiểm tra Quota**: `node $VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`
 2. **Fallback khi hết Quota**:
-   - Codex ATLAS 5h = 0% $\rightarrow$ Route sang Mac M1 (`ssh mac-m1 'codex exec ...'`) hoặc đổi Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
+   - Codex ATLAS 5h = 0% $\rightarrow$ Route sang Mac M1 (SSH alias do operator tự khai báo, ví dụ `ssh mac-m1 'codex exec ...'` — khác với alias `mac-pro14` mà wrapper dùng cho host `m1`) hoặc đổi Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
    - Claude Weekly < 20% $\rightarrow$ Ưu tiên AGY Claude / Gemini Flash để bảo vệ quota Claude Code CLI.
 3. **Lineage Honesty**: Ghi đúng provider/model vào ledger; không ngụy tạo tên route.
 

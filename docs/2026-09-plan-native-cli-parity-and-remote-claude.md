@@ -1,7 +1,7 @@
 ---
 title: WebMCP AI CLI — Native CLI parity and remote Claude plan
 type: plan
-status: proposed
+status: implemented-code-live-remote-canary-pending
 created: 2026-09-29
 updated: 2026-09-29
 ---
@@ -92,3 +92,41 @@ Với review/implement trên repo, yêu cầu ánh xạ workspace local → M1 v
 - Mã nguồn tại HEAD `071b3b4` và help/version/read-back local ngày 29/09/2026; Claude version/help lấy qua SSH `mac-pro14` cùng ngày. Không có model call.
 - Tài liệu chính thức [OpenCode CLI commands](https://opencode.ai/v2/docs/cli/commands/): `run` nhận message dạng ví dụ positional; `--format json` xuất JSONL cho script.
 - Các lệnh kiểm tra đã dùng: `codex exec --help`, `codex exec review --help`, `codex exec fork --help`, `agy --help`, `opencode run --help`, `node bin/webmcp-ai.mjs preflight --json`, `providers inspect ... --task-intent review`, `providers install --read-back --json`, `npm test`.
+
+## 6. Implementation ledger (appended 2026-09-29, R6 closure — original text above untouched)
+
+`npm test` = 658 pass / 0 fail at closure; `npm run test:package-closure` ok
+(`rangeDiffCheck.ok: true`); coverage lines 90.03% OK / functions 93.12% OK /
+branches 78.29% FAIL vs 80% (baseline at `f509063`: 90.94% / 93.25% / 78.03%
+FAIL — branches slightly improved, no round made it worse; R6 edits are
+comment-only). Local machine truth at commit: codex 0.157.1 `match`, agy
+1.2.13 `match`, claude 2.1.283 `match` (review inspect `taskReady: true`;
+an earlier same-session reading saw 2.1.279 with
+`PROVIDER_CAPABILITY_DRIFT` and `taskReady: false`, resolved when the
+machine updated to the pin before commit), opencode local 2.0.19 vs pin
+2.0.18 `drift` (review inspect still `taskReady: true`,
+`mapping.profile: v2`), host `m1` `state: unreachable`, host `orbit`
+unauthorized. The remaining drift (opencode) is honest machine state, not a
+doc error: pins (Claude 2.1.283, OpenCode 2.0.18, Codex 0.157.1, AGY 1.2.13)
+match the manifest.
+
+| Item | Status | Commit | Verification evidence |
+|---|---|---|---|
+| P0-A Claude remote transport | done+verified (tests); live canary unproven | `f30c4c1` (R2) | `node --test tests/remote-worker.test.mjs` 11/11 (selftest, fingerprint, run, flag allowlist exit 64, compose cwd:null cleanup, env strip, output cap, timeout SIGTERM/SIGKILL); dry-run `WEBMCP_AI_CLAUDE_HOST=m1 generate` shows `transport: { type: 'ssh', host: 'm1' }`; `providers install --plan --host m1` reports `state: unreachable` fail-closed (m1 unreachable at closure) |
+| P0-B host-aware discovery/manifest | done+verified | `55b3b98` (R1) | `providers install --plan/--read-back --host local` (claude/codex/agy `match` vs pins; opencode `drift`, 2.0.19 vs pin 2.0.18), `--host orbit` (`authorized: false`), `--host m1` (`unreachable`, never throws); no local fallback |
+| P0-C print-mode guards | done+verified | `55b3b98` (R1) | `printModeGuards: ['--disable-slash-commands']` on agy+claude in `providers list/inspect/preflight/doctor`; claude fork dry-run argv contains `--disable-slash-commands`; `--full` adds no flags |
+| P1-D AGY structured output | done+verified | `8472a5d` (R3) | `capabilities.structuredOutput: true` + `structuredOutputProbe: { verifiedOn: 2026-09-29, cli: 1.2.13, method: canary }`; typed `PROVIDER_STRUCTURED_OUTPUT_MISSING` / `PROVIDER_SCHEMA_INVALID` |
+| P1-E AGY long prompt / stream-json | done+verified | `8472a5d` (R3) | preflight `maxPromptBytes: 4194304` (4 MiB), artifacts `brain-fallback`; `PROMPT_TOO_LARGE` above cap; `stdinPrompt: false` (NDJSON envelope lane, never raw text) |
+| P1-F two-layer effort | done+verified | `8472a5d` (R3) | `PROVIDER_EFFORT` agy `low\|medium\|high\|max`, claude `low\|medium\|high\|xhigh\|max` (codex/opencode omitted — no closed set); `models inspect --provider agy/claude` echo provider sets; `UNSUPPORTED_EFFORT` before spawn |
+| P1-G OpenCode v2 | done+verified (pin drift noted) | `55b3b98` (R1) + `b5bdad6` (R4) | `providers inspect opencode --task-intent review`: `taskReady: true`, `mapping.profile: v2` on installed 2.0.19; v1 refused `PROVIDER_CAPABILITY_DRIFT`; real v2 JSONL fixtures under `tests/fixtures/opencode-v2-jsonl/`; `stdinPrompt: true` (2.0.19 canary); `structuredOutput: false` kept (`--format json` is event JSONL, not a schema contract) |
+| P2-H codex Git diff review | done+verified | `b5bdad6` (R4) | `review --provider codex --review-target uncommitted --dry-run` argv = `exec review -c sandbox_mode="read-only" -c approval_policy="never" --ephemeral --ignore-user-config --ignore-rules --output-schema <tmp> --output-last-message <tmp> -` (no `--uncommitted`, scope named in prompt); non-codex → `UNSUPPORTED_CAPABILITY`; +sessionId → `TASK_INTENT_ACCESS_CONFLICT`; non-git → `REVIEW_TARGET_NOT_GIT` |
+| P2-I native JSONL telemetry | done+verified (tests); live stream unproven here | `06f0c9e` (R5) | `classifyCodexEvent` (`thread.started`→researching, `turn.completed`→verifying, `turn.failed`→blocked); generate-lane `--json` only when `eventsRequested`, review lane never; final answer always from `--output-last-message` |
+| P2-J explicit session fork | done+verified | `06f0c9e` (R5) | claude fork dry-run argv `--resume <session> --fork-session`; codex fork dry-run argv `exec fork -c sandbox_mode="read-only" … <session> -` while real runs fail closed `UNSUPPORTED_CAPABILITY` (`explicitFork: false`, reason in `src/client.mjs:654`); opencode `--session <id> --fork` (`explicitFork: true`); agy → `UNSUPPORTED_CAPABILITY`; review envelope frozen `{ id: null, resumable: false }` |
+| P2-K Claude extras (`--max-budget-usd`, `--bare`, `ultrareview`) | deferred | — | No adapter; per §1 items 5–6 (`--bare` needs a proven API-key lane, no `--continue`/`--last`). Unproven, still reported unsupported — no wrapper claim exists. |
+
+Residual unproven at closure: live remote-Claude run over SSH (host `m1`
+unreachable → `state: unreachable`); live AGY/Codex/OpenCode model canaries
+beyond the recorded 2026-09-29 receipts; operator-local `mac-m1` SSH alias in
+manual-fallback examples (no `Host mac*` entry in local `~/.ssh/config`;
+wrapper's declared alias remains `mac-pro14`, operator-overridable via
+`WEBMCP_AI_CLAUDE_SSH_ALIAS`).
