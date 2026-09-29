@@ -9,7 +9,7 @@ import test from 'node:test';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const installer = fileURLToPath(new URL('../scripts/install-agent.mjs', import.meta.url));
 
-test('installs the companion skill into Codex, Gemini, and Claude homes', (t) => {
+test('installs the companion skill into Codex, Gemini, Claude, and OpenCode homes', (t) => {
   const home = mkdtempSync(join(tmpdir(), 'webmcp-ai-skill-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const result = spawnSync(process.execPath, [installer, 'all'], {
@@ -23,6 +23,7 @@ test('installs the companion skill into Codex, Gemini, and Claude homes', (t) =>
     '.codex/skills/webmcp-ai-cli',
     '.gemini/config/skills/webmcp-ai-cli',
     '.claude/skills/webmcp-ai-cli',
+    '.config/opencode/skills/webmcp-ai-cli',
   ]) {
     const installedSkill = join(home, skillRoot, 'SKILL.md');
     const installedMetadata = join(home, skillRoot, 'agents/openai.yaml');
@@ -47,5 +48,5 @@ test('installs the companion skill into Codex, Gemini, and Claude homes', (t) =>
 test('rejects an unknown agent target', () => {
   const result = spawnSync(process.execPath, [installer, 'unknown'], { encoding: 'utf8' });
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /codex, gemini, claude, or all/);
+  assert.match(result.stderr, /codex, gemini, claude, opencode, or all/);
 });

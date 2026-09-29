@@ -4,6 +4,9 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- `npm run install:agent` now also installs the companion skill for OpenCode
+  (`~/.config/opencode/skills/webmcp-ai-cli`) alongside codex/gemini/claude.
+
 - Post-pre-accept hardening (R7/R8, 2026-09-29):
   - **Remote fail-closed fixes (R7)**: `runRemoteClaude` now rejects a zero-exit run whose worker reported truncated
     stdout/stderr with typed `PROVIDER_OUTPUT_LIMIT` (previously capped output could be reported as success).

@@ -10,6 +10,7 @@ const targets = {
   codex: join(homedir(), '.codex', 'skills'),
   gemini: join(homedir(), '.gemini', 'config', 'skills'),
   claude: join(homedir(), '.claude', 'skills'),
+  opencode: join(homedir(), '.config', 'opencode', 'skills'),
 };
 
 function install(target) {
@@ -22,12 +23,12 @@ function install(target) {
 
 const requested = process.argv[2] || 'all';
 if (requested === '--help' || requested === '-h') {
-  process.stdout.write('Usage: node scripts/install-agent.mjs <codex|gemini|claude|all>\n');
+  process.stdout.write('Usage: node scripts/install-agent.mjs <codex|gemini|claude|opencode|all>\n');
 } else if (requested === 'all') {
   Object.keys(targets).forEach(install);
 } else if (Object.hasOwn(targets, requested)) {
   install(requested);
 } else {
-  process.stderr.write('Target must be codex, gemini, claude, or all.\n');
+  process.stderr.write('Target must be codex, gemini, claude, opencode, or all.\n');
   process.exitCode = 2;
 }

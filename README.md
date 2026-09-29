@@ -19,7 +19,8 @@ cd packages/webmcp-ai-cli
 npm link
 ```
 
-Install the companion skill for all supported local agents:
+Install the companion skill for all supported local agents (codex, gemini, claude, opencode;
+OpenCode installs to `~/.config/opencode/skills/`):
 
 ```bash
 npm run install:agent
