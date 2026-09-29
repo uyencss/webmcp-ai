@@ -479,3 +479,177 @@ test('10. Errors never leak sensitive paths, usernames, or secrets', async (t) =
     assert.equal(detailsStr.includes('/Users/'), false);
   }
 });
+
+// 11. Truncated worker output at exit 0 fails closed with PROVIDER_OUTPUT_LIMIT
+test('11. Truncated remote run output rejects with PROVIDER_OUTPUT_LIMIT', async (t) => {
+  const tmp = isolateTmpdir(t, 'remote-trunc-');
+  const fakeWorker = join(tmp, 'fake-trunc-worker.mjs');
+  writeFileSync(
+    fakeWorker,
+    `#!/usr/bin/env node
+const truncated = { stdout: process.env.FAKE_TRUNCATE_STDOUT === '1', stderr: process.env.FAKE_TRUNCATE_STDERR === '1' };
+process.stdout.write(JSON.stringify({
+  schema: 'webmcp-ai-claude-remote-response/1',
+  mode: 'run',
+  exitCode: 0,
+  signal: null,
+  stdout: 'ok-output',
+  stderr: '',
+  timedOut: false,
+  truncated,
+}) + '\\n');
+`,
+    'utf8',
+  );
+  chmodSync(fakeWorker, 0o755);
+
+  const baseEnv = {
+    ...process.env,
+    WEBMCP_AI_SSH_BIN: FAKE_SSH_BIN,
+    WEBMCP_AI_CLAUDE_REMOTE_BIN: FAKE_CLAUDE_BIN,
+    WEBMCP_AI_CLAUDE_REMOTE_WORKER: fakeWorker,
+    WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE: tmp,
+  };
+
+  // exitCode 0 + truncated stdout -> typed PROVIDER_OUTPUT_LIMIT
+  await assert.rejects(
+    () => runRemoteClaude({
+      hostId: 'm1',
+      env: { ...baseEnv, FAKE_TRUNCATE_STDOUT: '1' },
+      args: ['-p', 'hi'],
+      prompt: 'hi',
+      cwd: tmp,
+    }),
+    (err) => {
+      assert.equal(err.code, 'PROVIDER_OUTPUT_LIMIT');
+      assert.equal(err.details?.transport, 'ssh');
+      assert.equal(err.details?.host, 'm1');
+      assert.equal(err.details?.stdout, true);
+      assert.equal(err.details?.stderr, false);
+      return true;
+    },
+  );
+
+  // exitCode 0 + truncated stderr -> same typed error naming stderr
+  await assert.rejects(
+    () => runRemoteClaude({
+      hostId: 'm1',
+      env: { ...baseEnv, FAKE_TRUNCATE_STDERR: '1' },
+      args: ['-p', 'hi'],
+      prompt: 'hi',
+      cwd: tmp,
+    }),
+    (err) => {
+      assert.equal(err.code, 'PROVIDER_OUTPUT_LIMIT');
+      assert.equal(err.details?.stdout, false);
+      assert.equal(err.details?.stderr, true);
+      assert.match(err.message, /stderr/);
+      return true;
+    },
+  );
+
+  // Untruncated exit-0 response still resolves normally.
+  const res = await runRemoteClaude({
+    hostId: 'm1',
+    env: baseEnv,
+    args: ['-p', 'hi'],
+    prompt: 'hi',
+    cwd: tmp,
+  });
+  assert.equal(res.exitCode, 0);
+  assert.equal(res.stdout, 'ok-output');
+});
+
+// 12. Null==null digests (untracked file >1 MiB on both sides) fail closed
+test('12. Unverifiable fingerprint (oversize untracked file) rejects instead of matching null==null', async (t) => {
+  const tmp = isolateTmpdir(t, 'remote-unverifiable-');
+  const repoDir = join(tmp, 'repo');
+  execFileSync('mkdir', ['-p', repoDir]);
+  initGitRepo(repoDir);
+
+  // An untracked file above the 1 MiB cutoff makes untrackedDigest null.
+  writeFileSync(join(repoDir, 'big-untracked.bin'), Buffer.alloc(1024 * 1024 + 1, 0x61));
+
+  const localFp = computeWorkspaceFingerprint(repoDir);
+  assert.equal(localFp.untrackedDigest, null);
+
+  const env = {
+    ...process.env,
+    WEBMCP_AI_SSH_BIN: FAKE_SSH_BIN,
+    WEBMCP_AI_CLAUDE_REMOTE_BIN: FAKE_CLAUDE_BIN,
+    WEBMCP_AI_CLAUDE_REMOTE_WORKER: WORKER_BIN,
+    WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE: repoDir,
+  };
+
+  await assert.rejects(
+    () => verifyRemoteWorkspace({ hostId: 'm1', env, localDir: repoDir, remoteDir: repoDir }),
+    (err) => {
+      assert.equal(err.code, 'CLAUDE_REMOTE_WORKSPACE_MISMATCH');
+      assert.equal(err.details?.reason, 'unverifiable-fingerprint');
+      assert.ok(err.details?.localNull.includes('untrackedDigest'));
+      assert.ok(err.details?.remoteNull.includes('untrackedDigest'));
+      return true;
+    },
+  );
+});
+
+// 13. Crafted remote fingerprints: null digest fails closed, equal passes, differing mismatches
+test('13. verifyRemoteWorkspace fails closed on null digests but passes equal fingerprints', async (t) => {
+  const tmp = isolateTmpdir(t, 'remote-fp-verify-');
+  const repoDir = join(tmp, 'repo');
+  execFileSync('mkdir', ['-p', repoDir]);
+  initGitRepo(repoDir);
+
+  const localFp = computeWorkspaceFingerprint(repoDir);
+
+  async function verifyAgainst(remoteFp) {
+    const fakeWorker = join(tmp, `fake-fp-worker-${Math.random().toString(36).slice(2)}.mjs`);
+    writeFileSync(fakeWorker, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(remoteFp))} + '\\n');\n`, 'utf8');
+    chmodSync(fakeWorker, 0o755);
+    const env = {
+      ...process.env,
+      WEBMCP_AI_SSH_BIN: FAKE_SSH_BIN,
+      WEBMCP_AI_CLAUDE_REMOTE_BIN: FAKE_CLAUDE_BIN,
+      WEBMCP_AI_CLAUDE_REMOTE_WORKER: fakeWorker,
+      WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE: repoDir,
+    };
+    return verifyRemoteWorkspace({ hostId: 'm1', env, localDir: repoDir, remoteDir: repoDir });
+  }
+
+  // Null statusDigest on the remote side -> unverifiable-fingerprint.
+  await assert.rejects(
+    () => verifyAgainst({ ...localFp, statusDigest: null }),
+    (err) => {
+      assert.equal(err.code, 'CLAUDE_REMOTE_WORKSPACE_MISMATCH');
+      assert.equal(err.details?.reason, 'unverifiable-fingerprint');
+      assert.ok(err.details?.remoteNull.includes('statusDigest'));
+      return true;
+    },
+  );
+
+  // Null diffDigest on the remote side -> same fail-closed path.
+  await assert.rejects(
+    () => verifyAgainst({ ...localFp, diffDigest: null }),
+    (err) => {
+      assert.equal(err.code, 'CLAUDE_REMOTE_WORKSPACE_MISMATCH');
+      assert.equal(err.details?.reason, 'unverifiable-fingerprint');
+      return true;
+    },
+  );
+
+  // Genuine value difference -> the existing mismatch path (no unverifiable reason).
+  await assert.rejects(
+    () => verifyAgainst({ ...localFp, head: '0'.repeat(40) }),
+    (err) => {
+      assert.equal(err.code, 'CLAUDE_REMOTE_WORKSPACE_MISMATCH');
+      assert.equal(err.details?.reason, undefined);
+      assert.ok(err.details?.local);
+      assert.ok(err.details?.remote);
+      return true;
+    },
+  );
+
+  // Equal normal fingerprints still pass.
+  const ok = await verifyAgainst({ ...localFp });
+  assert.equal(ok.ok, true);
+});

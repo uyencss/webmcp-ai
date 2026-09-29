@@ -291,6 +291,12 @@ export const agyProvider = {
       // Outside the try/catch above: a typed error thrown by agyEnvelopeResult
       // (e.g. PROVIDER_STRUCTURED_OUTPUT_MISSING) must propagate, never be
       // swallowed as if this were a JSON.parse failure.
+      if (singleBlob.status !== 'SUCCESS') {
+        throw new AiCliError('PROVIDER_EXIT_ERROR', `AGY json result status was ${singleBlob.status}`, {
+          retryable: true,
+          details: { provider: 'agy', status: singleBlob.status },
+        });
+      }
       return agyEnvelopeResult(singleBlob, { requireStructured });
     }
 

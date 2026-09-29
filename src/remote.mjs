@@ -495,6 +495,25 @@ export async function verifyRemoteWorkspace({ hostId, env = process.env, localDi
     });
   }
 
+  // Fail closed when a fingerprint input cannot be computed on either
+  // side: untrackedDigest is null when an untracked file exceeds 1 MiB or
+  // stat fails, and any digest is null when its git probe fails. Without
+  // this, null==null would compare equal and pass as a "match".
+  const FINGERPRINT_FIELDS = ['head', 'tree', 'statusDigest', 'diffDigest', 'untrackedDigest'];
+  const localNull = FINGERPRINT_FIELDS.filter((field) => local[field] == null);
+  const remoteNull = FINGERPRINT_FIELDS.filter((field) => remote[field] == null);
+  if (localNull.length > 0 || remoteNull.length > 0) {
+    throw new AiCliError('CLAUDE_REMOTE_WORKSPACE_MISMATCH', 'Workspace verification failed: fingerprint input could not be computed', {
+      exitCode: 2,
+      details: {
+        host: hostId,
+        reason: 'unverifiable-fingerprint',
+        localNull,
+        remoteNull,
+      },
+    });
+  }
+
   const matches = local.head === remote.head
     && local.tree === remote.tree
     && local.statusDigest === remote.statusDigest
@@ -610,6 +629,18 @@ export async function runRemoteClaude({
     throw new AiCliError('PROVIDER_TIMEOUT', `Remote Claude exceeded the ${timeoutMs}ms timeout`, {
       retryable: true,
       details: { transport: 'ssh', host: hostId, timeoutMs },
+    });
+  }
+
+  // A truncated run is not a successful generate even at exit 0: the
+  // worker capped stdout/stderr at maxOutputBytes and the tail is lost.
+  // Mirror the local runner's PROVIDER_OUTPUT_LIMIT (process-runner.mjs).
+  if (workerResponse.truncated?.stdout || workerResponse.truncated?.stderr) {
+    const stdoutTruncated = Boolean(workerResponse.truncated?.stdout);
+    const stderrTruncated = Boolean(workerResponse.truncated?.stderr);
+    const streams = [stdoutTruncated && 'stdout', stderrTruncated && 'stderr'].filter(Boolean).join(' and ');
+    throw new AiCliError('PROVIDER_OUTPUT_LIMIT', `Remote Claude output exceeded the limit (truncated ${streams})`, {
+      details: { transport: 'ssh', host: hostId, stdout: stdoutTruncated, stderr: stderrTruncated },
     });
   }
 

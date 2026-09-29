@@ -421,6 +421,7 @@ Status: `declared; live canary pending`
   - Working tree diff digest (sha256 of `git diff HEAD`)
   - Untracked files count and content digest (sha256 of sorted paths, sizes, and `git hash-object --no-filters` hashes, with a 1 MiB file cutoff)
   If the digests differ or either side is not a git repository, execution fails closed with `CLAUDE_REMOTE_WORKSPACE_MISMATCH` and the remote Claude model is **never spawned**.
+  Verification also fails closed (`reason: 'unverifiable-fingerprint'`) when a fingerprint input cannot be computed on either side — e.g. an untracked file larger than 1 MiB, or a failed git probe. `.gitignore`d files are not covered by the fingerprint (documented limitation: `git ls-files --others --exclude-standard` skips them, so they are invisible to verification).
 - **Compose isolation**: In `compose` or `compose-only` modes, execution occurs in an ephemeral temporary directory on the remote host (`cwd: null`), completely decoupled from the caller workspace and automatically cleaned up upon completion.
 
 ### No credential transfer

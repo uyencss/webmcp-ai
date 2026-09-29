@@ -223,6 +223,23 @@ test('AGY parseOutput reads the json envelope, requires structured_output when s
   );
 });
 
+test('AGY parseOutput rejects a non-SUCCESS single-blob json envelope with typed PROVIDER_EXIT_ERROR', () => {
+  const failedBlob = JSON.stringify({ conversation_id: 'conv-6', status: 'FAILED', response: 'partial text' });
+  assert.throws(
+    () => getProvider('agy').parseOutput({ stdout: failedBlob, request: {} }),
+    (error) => error.code === 'PROVIDER_EXIT_ERROR'
+      && error.message === 'AGY json result status was FAILED'
+      && error.details.provider === 'agy'
+      && error.details.status === 'FAILED',
+  );
+
+  // SUCCESS single-blob happy path is unchanged.
+  const okBlob = JSON.stringify({ conversation_id: 'conv-7', status: 'SUCCESS', response: ' hi \n' });
+  assert.deepEqual(getProvider('agy').parseOutput({ stdout: okBlob, request: {} }), {
+    text: 'hi', structured: null, sessionId: 'conv-7',
+  });
+});
+
 test('opencode uses stdin, JSON NDJSON output, and a read-only plan agent by default', () => {
   const invocation = getProvider('opencode').buildInvocation({
     prompt: 'opencode prompt',
