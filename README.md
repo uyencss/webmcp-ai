@@ -404,6 +404,12 @@ Status: `declared; live canary pending`
 | `WEBMCP_AI_CLAUDE_REMOTE_MAP` | Unset | Optional local-to-remote workspace path mapping override (`localPath=remotePath`). |
 | `WEBMCP_AI_CLAUDE_REMOTE_NODE` | `node` | Node.js binary name or absolute path on the remote host. |
 
+> **The `m1` defaults above are the coordinator machine's declared values.** When the remote user or layout differs
+> (e.g. `uyenuyen@mac-m1`, where `/Users/ttcenter` does not exist), set `WEBMCP_AI_CLAUDE_SSH_ALIAS`,
+> `WEBMCP_AI_CLAUDE_REMOTE_BIN`, `WEBMCP_AI_CLAUDE_REMOTE_WORKER` and `WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE` to the
+> remote values; without them the lane fails closed (typed `CLAUDE_REMOTE_UNREACHABLE` / worker errors) and never falls
+> back to a local binary. The live check recorded in the plan's §6.1 used exactly these overrides.
+
 ### Fail-closed semantics
 
 - **Configuration integrity**: Operator overrides are strictly validated before any SSH invocation. Paths containing shell metacharacters, whitespace, null bytes, or `..` path traversal segments fail closed with typed `CLAUDE_REMOTE_CONFIG_INVALID` (`exitCode: 2`). Error messages and details report only the invalid field name, never echoing raw paths or usernames.
