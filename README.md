@@ -386,6 +386,47 @@ webmcp-ai providers install --host m1 --plan --json
 - **Separation of concerns**: 5 separate layers (binary, model, auth, canary, skill). Installer never performs login, credential extraction, or auth copy. Receipts record package, version, and action; `auth` (`not-assessed`) and `canary` (`not-run`) remain strictly separated from installation receipts.
 - **Print-mode guard flags**: bounded (non-`full`) AGY and Claude lanes add `--disable-slash-commands` (both providers) and, on the Claude review lane, `--permission-prompts none`, so a prompt cannot expand interactive-only skills or block on a permission prompt in a headless print session. The installed CLI is probed (`<bin> --help`) before spawn; a drifted install fails closed with typed `PROVIDER_CAPABILITY_DRIFT` rather than silently spawning without the guard. `--full` (native passthrough) is unaffected — no new flags are added. See `printModeGuards` in `providers inspect <id>`.
 
+## Remote Claude transport (opt-in ssh)
+
+Status: `declared; live canary pending`
+
+`webmcp-ai` supports dispatching Claude Code CLI tasks to an operator-declared remote host over SSH (host `m1`), avoiding quota exhaustion on local developer machines while guaranteeing identical review, compose, and generation contracts.
+
+### Environment configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WEBMCP_AI_CLAUDE_HOST` | `local` (unset) | Host selector. Set to `m1` to opt into remote execution. Unknown values fail closed. |
+| `WEBMCP_AI_CLAUDE_SSH_ALIAS` | `mac-pro14` | SSH hostname/alias passed to `ssh`. Validated against `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. |
+| `WEBMCP_AI_CLAUDE_REMOTE_BIN` | `/Users/ttcenter/.local/bin/claude` | Absolute path to the Claude Code CLI binary on the remote host. |
+| `WEBMCP_AI_CLAUDE_REMOTE_WORKER` | `/Users/ttcenter/.webmcp-ai/claude-remote-worker.mjs` | Absolute path to the WebMCP remote worker script on the remote host. |
+| `WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE` | `/Users/ttcenter/Desktop/VIBE_CODE` | Remote workspace root containing valid project workspaces. |
+| `WEBMCP_AI_CLAUDE_REMOTE_MAP` | Unset | Optional local-to-remote workspace path mapping override (`localPath=remotePath`). |
+| `WEBMCP_AI_CLAUDE_REMOTE_NODE` | `node` | Node.js binary name or absolute path on the remote host. |
+
+### Fail-closed semantics
+
+- **Configuration integrity**: Operator overrides are strictly validated before any SSH invocation. Paths containing shell metacharacters, whitespace, null bytes, or `..` path traversal segments fail closed with typed `CLAUDE_REMOTE_CONFIG_INVALID` (`exitCode: 2`). Error messages and details report only the invalid field name, never echoing raw paths or usernames.
+- **Fail-closed transport**: If the remote host is unreachable (SSH connection refused, key mismatch, DNS failure, timeout, non-zero SSH exit), execution fails immediately with typed `CLAUDE_REMOTE_UNREACHABLE` (`exitCode: 2`). The wrapper **never falls back silently to a local Claude binary**.
+- **Version pin enforcement**: Remote Claude CLI version is probed before execution; any drift from the pinned version (`2.1.283`) fails closed with typed `CLAUDE_REMOTE_VERSION_DRIFT`.
+- **Worker protocol enforcement**: The remote worker validates every argument against a strict allowlist. Disallowed flags (e.g. `--dangerously-skip-permissions`) cause the worker to reject the request with exit code 64, mapped to typed `CLAUDE_REMOTE_WORKER_ERROR`.
+
+### Workspace mapping & fingerprint verification
+
+- **Path translation**: Local workspaces are mapped to remote paths using longest-prefix matching over declared pairs (default: `/Users/ttcenter/Desktop/VIBE_CODE` -> `/Users/uyenuyen/Desktop/VIBE_CODE`) and operator overrides (`WEBMCP_AI_CLAUDE_REMOTE_MAP`). Unmapped paths fail closed with `CLAUDE_REMOTE_WORKSPACE_UNMAPPED`.
+- **Pre-spawn fingerprint verification**: For state-sensitive intents (`review` and `implement`), the local workspace and remote workspace are verified prior to spawning the model. Both sides compute an exact git fingerprint:
+  - Commit SHA (`git rev-parse HEAD`)
+  - Tree SHA (`git rev-parse HEAD^{tree}`)
+  - Working tree status digest (sha256 of `git status --porcelain=v1 -z`)
+  - Working tree diff digest (sha256 of `git diff HEAD`)
+  - Untracked files count and content digest (sha256 of sorted paths, sizes, and `git hash-object --no-filters` hashes, with a 1 MiB file cutoff)
+  If the digests differ or either side is not a git repository, execution fails closed with `CLAUDE_REMOTE_WORKSPACE_MISMATCH` and the remote Claude model is **never spawned**.
+- **Compose isolation**: In `compose` or `compose-only` modes, execution occurs in an ephemeral temporary directory on the remote host (`cwd: null`), completely decoupled from the caller workspace and automatically cleaned up upon completion.
+
+### No credential transfer
+
+SSH transport carries only task requests, prompts, and sanitized environment variables. **No API tokens, auth credentials, Anthropic keys, or WebMCP Vault secrets are ever transferred over SSH.** Authentication remains strictly local to the remote machine running Claude Code.
+
 ## Jev Policy Promotion (M6 Phase B)
 
 The policy core under `src/jev/policy/` is a promoted copy of the runner policy module (`packages/webmcp-automation-runner/src/runner/jev-fallback/policy.mjs`) at runner source commit `aae9d8ed0d5ebea199f13650f4113c07b58917da` (runner source `policy.mjs` sha256: `6f6148601d17ae113456c60da5d727562ab59be8c03739ff85aa0df9e96a2814`, promoted copy sha256: `d792835e2468b80811e87d31014e33a52aeccfd543885cc1b8698481452fefe3`), verified against the G13 oracle with 4890/4890 agreement (`temp/m5m6m7-closeout/evidence/m6-oracle-phaseB-part2.json`). In Phase B Part 1, the failure path was wired through `decideFallback` (`wireFallbackPolicy`). In Part 2, success-path guard action wiring (`wireSuccessPolicy` via `guardAction`) and ai-cli-local rollout-config resolution and validation (`rollout.mjs`, supporting `$JEV_ROLLOUT_CONFIG` file precedence over `JEV_FAST_PATH_DISABLED`/`JEV_ENABLED` env vars without reading M3-owned files) landed with fail-safe overrides and completion-signal diagnostic hooks (`completionClaim` invariant recording for Gate 5 enablement). Remaining follow-up is live execution runs for Gate 5; divergence risk is explicitly disclosed with two copies existing across the repository until M7 single-sources the engine.

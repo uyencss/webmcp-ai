@@ -639,4 +639,3 @@ test('AGY buildInvocation rejects sessionAction fork with typed UNSUPPORTED_CAPA
     (error) => error.code === 'UNSUPPORTED_CAPABILITY' && error.details?.capability === 'explicitFork',
   );
 });
-

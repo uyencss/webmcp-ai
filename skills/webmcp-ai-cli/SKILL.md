@@ -370,6 +370,26 @@ webmcp-ai providers install --host orbit --plan --json
 - **ORBIT host**: host-scoped plan and read-only inspection only (`authorized: false`). Apply requires explicit owner authorization per host and throws `HOST_SCOPE_NOT_AUTHORIZED` (M3 not authorized).
 - **Separation of concerns**: 5 separate layers (binary, model, auth, canary, skill). Installer never performs login, credential extraction, or auth copy. Receipts record package, version, and action; `auth` (`not-assessed`) and `canary` (`not-run`) remain strictly separated from installation receipts.
 
+## Remote Claude transport (opt-in ssh)
+
+Status: `declared; live canary pending`
+
+Opt in to remote Claude Code execution over SSH to avoid local developer machine quota exhaustion:
+
+```bash
+WEBMCP_AI_CLAUDE_HOST=m1 webmcp-ai generate \
+  --provider claude \
+  --prompt-file ./prompt.md \
+  --workspace "$PWD" \
+  --json
+```
+
+- **Host selector**: `WEBMCP_AI_CLAUDE_HOST=m1` routes execution to the declared `m1` host (`mac-pro14` via SSH). Unset or `local` defaults to local Claude. Unknown hosts fail closed with `CLAUDE_REMOTE_CONFIG_INVALID`.
+- **Operator overrides**: `WEBMCP_AI_CLAUDE_SSH_ALIAS`, `WEBMCP_AI_CLAUDE_REMOTE_BIN`, `WEBMCP_AI_CLAUDE_REMOTE_WORKER`, `WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE`, `WEBMCP_AI_CLAUDE_REMOTE_MAP`.
+- **Fail-closed semantics**: Remote unreachable fails closed with `CLAUDE_REMOTE_UNREACHABLE` (`exitCode: 2`); never falls back silently to local Claude binary. Version drift from `2.1.283` raises `CLAUDE_REMOTE_VERSION_DRIFT`. Disallowed flags raise `CLAUDE_REMOTE_WORKER_ERROR`.
+- **Workspace mapping & fingerprint verification**: Local workspaces map via longest-prefix matching. On `review` and `implement`, git fingerprints (`HEAD`, tree, status, diff, untracked digest) must match byte-for-byte; divergence fails closed with `CLAUDE_REMOTE_WORKSPACE_MISMATCH` and the remote model is never spawned. `compose` runs in an isolated remote temp directory.
+- **No credential transfer**: Authentication stays local to the remote machine; tokens, passwords, and Vault secrets are never transferred over SSH.
+
 ## Safety
 
 - Do not use implicit `--continue` or "last session" behavior.

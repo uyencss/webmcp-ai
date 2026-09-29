@@ -11,6 +11,7 @@ import { getProvider } from './providers/index.mjs';
 import { resolveReviewTargetForRequest } from './providers/codex.mjs';
 import { normalizeOpencodeProfile } from './providers/opencode.mjs';
 import { parseReviewOutput, REVIEW_RESULT_SCHEMA } from './review-result.mjs';
+import { mapWorkspaceToRemote, selectClaudeHost } from './remote.mjs';
 
 export const REVIEW_TASK_DEFAULT = 'review';
 export const REVIEW_PROFILE_DEFAULT = 'review-readonly';
@@ -358,11 +359,29 @@ function sanitizeDryRunArgs(args, capability, sessionId = null) {
 export function describeReviewDryRun(input = {}) {
   const resolved = resolveReviewRequest(input);
   const resumed = resolved.sessionId !== null && resolved.sessionId !== undefined;
+  let transportMeta = null;
+  if (resolved.provider.id === 'claude' && selectClaudeHost(input.env || process.env) !== 'local') {
+    const hostId = selectClaudeHost(input.env || process.env);
+    let workspaceStatus = '<mapped>';
+    try {
+      mapWorkspaceToRemote({ hostId, env: input.env || process.env, localWorkspace: resolved.capability.workspace });
+      workspaceStatus = '<mapped>';
+    } catch {
+      workspaceStatus = '<unmapped>';
+    }
+    transportMeta = {
+      type: 'ssh',
+      host: hostId,
+      workspace: workspaceStatus,
+      verified: false,
+    };
+  }
   return {
     ok: true,
     dryRun: true,
     schema: REVIEW_RESULT_SCHEMA,
     provider: resolved.provider.id,
+    ...(transportMeta ? { transport: transportMeta } : {}),
     taskIntent: resolved.taskIntent,
     accessProfile: resolved.accessProfile,
     reviewTarget: resolved.reviewTarget,
@@ -452,6 +471,7 @@ export async function review(input = {}) {
     ok: true,
     provider: result.provider,
     model: result.model,
+    ...(result.transport ? { transport: result.transport } : {}),
     resumed,
     review: {
       schema: parsed.schema, verdict: parsed.verdict, summary: parsed.summary, findings: parsed.findings,

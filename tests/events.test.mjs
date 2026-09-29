@@ -384,5 +384,3 @@ test('codex synthetic defensive shapes classify to valid states', () => {
   assert.ok(states.includes('editing'));
   assert.ok(states.includes('working'));
 });
-
-

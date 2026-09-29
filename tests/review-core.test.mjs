@@ -450,4 +450,3 @@ test('protocol and review lane sessionAction contract', async () => {
   assert.equal(revResult.resumed, true);
   assert.equal(revResult.session?.forkedFrom, undefined);
 });
-

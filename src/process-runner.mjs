@@ -6,7 +6,9 @@ const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const CLASSIFICATION_SAMPLE_BYTES = 16 * 1024;
 
 function boundedDiagnostics(stdout, stderr) {
-  return Buffer.concat([...stderr, ...stdout])
+  const outBufs = Array.isArray(stdout) ? stdout : [Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout ?? ''))];
+  const errBufs = Array.isArray(stderr) ? stderr : [Buffer.isBuffer(stderr) ? stderr : Buffer.from(String(stderr ?? ''))];
+  return Buffer.concat([...errBufs, ...outBufs])
     .toString('utf8')
     .slice(-CLASSIFICATION_SAMPLE_BYTES);
 }
@@ -29,7 +31,7 @@ function structuredProviderError(text) {
   return null;
 }
 
-function classifyProviderExit({ stdout, stderr, exitCode, exitSignal }) {
+export function classifyProviderExit({ stdout, stderr, exitCode, exitSignal }) {
   const text = boundedDiagnostics(stdout, stderr).toLowerCase();
   const nativeError = structuredProviderError(text);
   const details = {
@@ -176,6 +178,7 @@ export function runProcess(command, args, {
       target.push(chunk);
     };
 
+    child.stdin.on('error', () => {});
     child.stdout.on('data', collect(stdout, forwardStdout));
     child.stderr.on('data', collect(stderr, forwardStderr));
 

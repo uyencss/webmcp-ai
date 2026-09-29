@@ -198,6 +198,7 @@ export async function handleToolCall(request, options = {}) {
       metadata: {
         provider: result.provider.id,
         model: result.model,
+        ...(result.transport ? { transport: result.transport.type, host: result.transport.host } : {}),
         elapsedMs: result.timing.elapsedMs,
         review: { verdict: result.review.verdict, resumed: result.resumed === true },
         resumed: result.resumed === true,
@@ -228,6 +229,7 @@ export async function handleToolCall(request, options = {}) {
     metadata: {
       provider: result.provider.id,
       model: result.model,
+      ...(result.transport ? { transport: result.transport.type, host: result.transport.host } : {}),
       ...(result.review ? {} : {
         sessionId: result.session.id,
         ...(result.session?.forkedFrom !== undefined ? { forkedFrom: result.session.forkedFrom } : {}),

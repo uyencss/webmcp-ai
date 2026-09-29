@@ -567,4 +567,3 @@ test('generate with AGY fork fails closed with typed UNSUPPORTED_CAPABILITY', as
     (error) => error.code === 'UNSUPPORTED_CAPABILITY' && error.details?.capability === 'explicitFork',
   );
 });
-

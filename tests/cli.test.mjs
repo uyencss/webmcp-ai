@@ -414,4 +414,3 @@ test('CLI generate --session-action dry-run and rejections', () => {
   assert.equal(noSessionPayload.error.code, 'INVALID_INPUT');
   assert.equal(noSessionPayload.error.details?.field, 'sessionAction');
 });
-

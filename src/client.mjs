@@ -33,6 +33,16 @@ import {
 import { parseReviewOutput } from './review-result.mjs';
 import { resolveTaskIntent } from './task-intent.mjs';
 import { createHash } from 'node:crypto';
+import {
+  extractSemverToken,
+  mapWorkspaceToRemote,
+  probeRemoteClaude,
+  readRemoteClaudeState,
+  runRemoteClaude,
+  selectClaudeHost,
+  verifyRemoteWorkspace,
+} from './remote.mjs';
+import { PROVIDER_INSTALL_MANIFEST, versionMatchesPin } from './providers/install.mjs';
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -486,6 +496,8 @@ export async function generate(input) {
   const lockRetries = lockRetryCount(input.retryLock);
   const env = input.env || process.env;
   const command = resolveProviderBin(provider, env);
+  const claudeHost = provider.id === 'claude' ? selectClaudeHost(env) : 'local';
+  const isRemoteClaude = provider.id === 'claude' && claudeHost !== 'local';
   // OpenCode dual-profile detection: one bounded `<bin> --version` probe per
   // spawn (no model). The installed binary profile is always detected. An
   // explicit request.opencodeProfile (if provided) must match the detected
@@ -525,6 +537,75 @@ export async function generate(input) {
     ? mkdtempSync(join(tmpdir(), `webmcp-ai-${provider.id}-compose-`))
     : null;
   const workspace = policyWorkspace || capability.workspace || process.cwd();
+
+  // Remote Claude preflight: probe version + help, check version drift, validate
+  // review/bounded/fork support, map workspace and verify remote workspace.
+  let remoteCwd = null;
+  if (isRemoteClaude) {
+    let remoteProbe;
+    try {
+      remoteProbe = await probeRemoteClaude({ hostId: claudeHost, env, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS });
+    } catch (err) {
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw err;
+    }
+
+    const expectedPin = PROVIDER_INSTALL_MANIFEST.hosts?.[claudeHost]?.providers?.claude?.version || '2.1.283';
+    const actualVersion = extractSemverToken(remoteProbe.version);
+    if (!actualVersion || !versionMatchesPin(remoteProbe.version, expectedPin)) {
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw new AiCliError('CLAUDE_REMOTE_VERSION_DRIFT', 'Remote Claude CLI version drifted from expected pin', {
+        exitCode: 2,
+        details: { host: claudeHost, expected: expectedPin, actual: actualVersion ?? null },
+      });
+    }
+
+    if (request.taskIntent === 'review') {
+      try {
+        validateClaudeReviewSupport(remoteProbe.helpText);
+      } catch (err) {
+        if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+        throw err;
+      }
+    } else if (request.accessProfile !== 'full') {
+      try {
+        validateClaudeBoundedSupport(remoteProbe.helpText);
+      } catch (err) {
+        if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+        throw err;
+      }
+    }
+
+    if (request.sessionAction === 'fork') {
+      if (!remoteProbe.helpText.includes('--fork-session')) {
+        if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+        throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed Claude CLI lacks --fork-session', {
+          exitCode: 2,
+          details: { capability: 'explicitFork', missing: ['--fork-session'] },
+        });
+      }
+    }
+
+    if (isComposeOnly) {
+      remoteCwd = null;
+    } else {
+      try {
+        remoteCwd = mapWorkspaceToRemote({ hostId: claudeHost, env, localWorkspace: workspace });
+      } catch (err) {
+        if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+        throw err;
+      }
+      if (request.taskIntent === 'review' || request.taskIntent === 'implement') {
+        try {
+          await verifyRemoteWorkspace({ hostId: claudeHost, env, localDir: workspace, remoteDir: remoteCwd });
+        } catch (err) {
+          if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+          throw err;
+        }
+      }
+    }
+  }
+
   // The effective environment is handed to the provider adapter so env-derived
   // settings (e.g. the isolated OpenCode database) resolve from what actually
   // reaches the child process, never from process.env behind the caller.
@@ -577,7 +658,7 @@ export async function generate(input) {
         details: { capability: 'explicitFork' },
       });
     }
-    if (provider.id === 'claude') {
+    if (provider.id === 'claude' && !isRemoteClaude) {
       try {
         const help = await runProcess(command, ['--help'], {
           env: buildSafeChildEnv(env, {}), timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
@@ -627,7 +708,7 @@ export async function generate(input) {
   // legacy generate without taskIntent review never probes. Probe failures
   // clean up the preview invocation + compose workspace before rethrow so
   // drifted review never leaks temp dirs.
-  if (provider.id === 'claude' && request.taskIntent === 'review') {
+  if (provider.id === 'claude' && !isRemoteClaude && request.taskIntent === 'review') {
     try {
       await ensureClaudeReviewSupport({ provider, env });
     } catch (error) {
@@ -635,7 +716,7 @@ export async function generate(input) {
       if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
       throw error;
     }
-  } else if (provider.id === 'claude' && request.accessProfile !== 'full') {
+  } else if (provider.id === 'claude' && !isRemoteClaude && request.accessProfile !== 'full') {
     // Every other non-full Claude lane (compose, legacy bounded generic)
     // still emits --disable-slash-commands; probe it the same way AGY does
     // so a drifted install fails closed before spawn instead of silently
@@ -767,16 +848,30 @@ export async function generate(input) {
   emitEvent('stdout', 'queued', `${provider.id}${request.model ? ` model ${request.model}` : ''} workspace ${workspace}`);
   try {
     const processResult = await runWithLockRetry(
-      () => runProcess(command, invocation.args, {
-        stdin: invocation.stdin,
-        cwd: workspace,
-        env: childEnv,
-        timeoutMs: request.timeoutMs,
-        maxOutputBytes,
-        signal: input.signal,
-        onStdout: streamForward('stdout'),
-        onStderr: streamForward('stderr'),
-      }),
+      () => {
+        if (isRemoteClaude) {
+          return runRemoteClaude({
+            hostId: claudeHost,
+            env,
+            args: invocation.args,
+            prompt: invocation.stdin,
+            cwd: remoteCwd,
+            timeoutMs: request.timeoutMs,
+            maxOutputBytes,
+            signal: input.signal,
+          });
+        }
+        return runProcess(command, invocation.args, {
+          stdin: invocation.stdin,
+          cwd: workspace,
+          env: childEnv,
+          timeoutMs: request.timeoutMs,
+          maxOutputBytes,
+          signal: input.signal,
+          onStdout: streamForward('stdout'),
+          onStderr: streamForward('stderr'),
+        });
+      },
       lockRetries,
       (attempt) => emitEvent('stdout', 'retrying', `provider storage locked; retry ${attempt}/${lockRetries}`),
     );
@@ -819,6 +914,7 @@ export async function generate(input) {
       ok: true,
       provider: { id: provider.id, name: provider.name },
       model: request.model,
+      ...(isRemoteClaude ? { transport: { type: 'ssh', host: claudeHost } } : {}),
       response: { text: responseText, structured: parsed.structured },
       ...(resolved.artifacts.length ? { artifacts: resolved.artifacts, artifactsResolved: resolved.resolved } : {}),
       ...(reviewResult ? { review: reviewResult } : {}),
@@ -958,10 +1054,31 @@ export function describeGenerateDryRun(input = {}) {
     }
   }
   const promptDigest = createHash('sha256').update(String(request.prompt)).digest('hex').slice(0, 16);
+  let transportMeta = null;
+  if (provider.id === 'claude' && selectClaudeHost(input.env || process.env) !== 'local') {
+    const hostId = selectClaudeHost(input.env || process.env);
+    let workspaceStatus = '<mapped>';
+    const isCompose = request.accessProfile === 'compose-only' || request.toolPolicy === 'compose-only';
+    if (!isCompose) {
+      try {
+        mapWorkspaceToRemote({ hostId, env: input.env || process.env, localWorkspace: workspace });
+        workspaceStatus = '<mapped>';
+      } catch {
+        workspaceStatus = '<unmapped>';
+      }
+    }
+    transportMeta = {
+      type: 'ssh',
+      host: hostId,
+      workspace: workspaceStatus,
+      verified: false,
+    };
+  }
   return {
     ok: true,
     dryRun: true,
     provider: provider.id,
+    ...(transportMeta ? { transport: transportMeta } : {}),
     taskIntent: request.taskIntent ?? null,
     accessProfile: capability.accessProfile,
     ...(provider.id === 'opencode' ? {
@@ -1008,11 +1125,33 @@ export async function probeProviders({ env = process.env } = {}) {
  * quota lives without spawning any provider, so a multi-lane caller can pick a
  * route before spending a single call.
  */
-export function describePreflight({ env = process.env } = {}) {
-  const providers = listProviders().map((metadata) => {
+export async function describePreflight({ env = process.env, probeRemote = false } = {}) {
+  const providers = await Promise.all(listProviders().map(async (metadata) => {
     const provider = getProvider(metadata.id);
     const command = resolveProviderBin(provider, env);
     const surface = describeModel(metadata.id, null);
+    if (metadata.id === 'claude' && selectClaudeHost(env) !== 'local') {
+      const hostId = selectClaudeHost(env);
+      let remoteState = 'not-probed';
+      if (probeRemote) {
+        try {
+          const stateObj = await readRemoteClaudeState({ hostId, env });
+          remoteState = stateObj.state === 'unreachable' ? 'unreachable' : 'reachable';
+        } catch {
+          remoteState = 'unreachable';
+        }
+      }
+      return {
+        id: metadata.id,
+        name: metadata.name,
+        transport: 'ssh',
+        installed: remoteState === 'reachable' ? true : (remoteState === 'unreachable' ? false : null),
+        remote: { host: hostId, state: remoteState },
+        capabilities: { ...metadata.capabilities },
+        maxPromptBytes: surface?.maxPromptBytes ?? null,
+        artifacts: surface?.artifacts ?? 'inline',
+      };
+    }
     return {
       id: metadata.id,
       name: metadata.name,
@@ -1021,7 +1160,7 @@ export function describePreflight({ env = process.env } = {}) {
       maxPromptBytes: surface?.maxPromptBytes ?? null,
       artifacts: surface?.artifacts ?? 'inline',
     };
-  });
+  }));
   return {
     ok: true,
     providers,

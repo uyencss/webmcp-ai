@@ -1,6 +1,11 @@
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+
 import { buildSafeChildEnv } from './capabilities.mjs';
 import { AiCliError } from './errors.mjs';
-import { runProcess } from './process-runner.mjs';
+import { classifyProviderExit, runProcess } from './process-runner.mjs';
 
 // Declared trusted registry of remote Claude hosts. This is code, not request
 // data: a caller can only ever select among these ids (see selectClaudeHost);
@@ -14,6 +19,7 @@ const CLAUDE_REMOTE_HOSTS = Object.freeze({
     binary: '/Users/ttcenter/.local/bin/claude',
     worker: '/Users/ttcenter/.webmcp-ai/claude-remote-worker.mjs',
     workspaceRoot: '/Users/ttcenter/Desktop/VIBE_CODE',
+    nodeBin: 'node',
   }),
 });
 
@@ -25,6 +31,7 @@ const HOST_ENV_OVERRIDES = Object.freeze({
   binary: 'WEBMCP_AI_CLAUDE_REMOTE_BIN',
   worker: 'WEBMCP_AI_CLAUDE_REMOTE_WORKER',
   workspaceRoot: 'WEBMCP_AI_CLAUDE_REMOTE_WORKSPACE',
+  nodeBin: 'WEBMCP_AI_CLAUDE_REMOTE_NODE',
 });
 
 const SSH_HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -65,6 +72,21 @@ function validateAbsolutePath(value, field) {
   return value;
 }
 
+function validateNodeBin(value, field) {
+  if (typeof value !== 'string' || !value) throw invalidConfig(field);
+  if (value.includes('\0')) throw invalidConfig(field);
+  if (UNSAFE_PATH_CHARS.test(value)) throw invalidConfig(field);
+  if (value.startsWith('/')) {
+    const segments = value.split('/').filter(Boolean);
+    if (segments.includes('..')) throw invalidConfig(field);
+    return value;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
+    throw invalidConfig(field);
+  }
+  return value;
+}
+
 /** Every declared registry entry, shallow-copied (no live references out). */
 export function listClaudeRemoteHosts() {
   return Object.values(CLAUDE_REMOTE_HOSTS).map((host) => ({ ...host }));
@@ -83,12 +105,14 @@ export function resolveClaudeRemoteHost(id, env = process.env) {
   const binary = safeEnv[HOST_ENV_OVERRIDES.binary] ?? declared.binary;
   const worker = safeEnv[HOST_ENV_OVERRIDES.worker] ?? declared.worker;
   const workspaceRoot = safeEnv[HOST_ENV_OVERRIDES.workspaceRoot] ?? declared.workspaceRoot;
+  const nodeBin = safeEnv[HOST_ENV_OVERRIDES.nodeBin] ?? declared.nodeBin;
   return {
     id: declared.id,
     sshHost: validateSshHost(sshHost, 'sshHost'),
     binary: validateAbsolutePath(binary, 'binary'),
     worker: validateAbsolutePath(worker, 'worker'),
     workspaceRoot: validateAbsolutePath(workspaceRoot, 'workspaceRoot'),
+    nodeBin: validateNodeBin(nodeBin, 'nodeBin'),
   };
 }
 
@@ -198,7 +222,7 @@ export async function probeRemoteClaude({ hostId, env = process.env, timeoutMs =
   };
 }
 
-function extractSemverToken(text) {
+export function extractSemverToken(text) {
   const match = String(text ?? '').match(/(?:(?<=\bv)|\b)\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/);
   return match ? match[0] : null;
 }
@@ -242,4 +266,401 @@ export async function readRemoteClaudeState({
     return { state: 'match', installedVersion, transport: 'ssh' };
   }
   return { state: 'drift', installedVersion, transport: 'ssh' };
+}
+
+const MAX_UNTRACKED_FILE_BYTES = 1024 * 1024; // 1 MiB
+
+function validateMappingPair(pair, field) {
+  if (typeof pair !== 'string' || !pair) throw invalidConfig(field);
+  const eqIdx = pair.indexOf('=');
+  if (eqIdx <= 0 || eqIdx >= pair.length - 1) throw invalidConfig(field);
+  const local = pair.slice(0, eqIdx);
+  const remote = pair.slice(eqIdx + 1);
+  validateAbsolutePath(local, field);
+  validateAbsolutePath(remote, field);
+  return { local, remote };
+}
+
+/**
+ * Longest-prefix match over declared mapping pairs.
+ * Default: /Users/ttcenter/Desktop/VIBE_CODE -> /Users/uyenuyen/Desktop/VIBE_CODE
+ * Operator override: WEBMCP_AI_CLAUDE_REMOTE_MAP = local=remote
+ */
+export function mapWorkspaceToRemote({ hostId, env = process.env, localWorkspace }) {
+  if (localWorkspace === null || localWorkspace === undefined) return null;
+  if (typeof localWorkspace !== 'string' || !localWorkspace) {
+    throw new AiCliError('CLAUDE_REMOTE_WORKSPACE_UNMAPPED', 'Local workspace cannot be mapped to remote host', {
+      exitCode: 2,
+      details: { host: hostId },
+    });
+  }
+
+  const pairs = [];
+  const override = env?.WEBMCP_AI_CLAUDE_REMOTE_MAP;
+  if (override !== undefined && override !== null && override !== '') {
+    pairs.push(validateMappingPair(override, 'WEBMCP_AI_CLAUDE_REMOTE_MAP'));
+  }
+  pairs.push({
+    local: '/Users/ttcenter/Desktop/VIBE_CODE',
+    remote: '/Users/uyenuyen/Desktop/VIBE_CODE',
+  });
+
+  // Longest prefix match
+  pairs.sort((a, b) => b.local.length - a.local.length);
+
+  for (const { local, remote } of pairs) {
+    if (localWorkspace === local) return remote;
+    const prefix = local.endsWith('/') ? local : `${local}/`;
+    if (localWorkspace.startsWith(prefix)) {
+      const rel = localWorkspace.slice(prefix.length);
+      return remote.endsWith('/') ? `${remote}${rel}` : `${remote}/${rel}`;
+    }
+  }
+
+  throw new AiCliError('CLAUDE_REMOTE_WORKSPACE_UNMAPPED', 'Local workspace cannot be mapped to remote host', {
+    exitCode: 2,
+    details: { host: hostId },
+  });
+}
+
+/**
+ * Local implementation of the exact worker fingerprint algorithm:
+ * git rev-parse HEAD, git rev-parse HEAD^{tree}, sha256 of git status -z,
+ * sha256 of git diff HEAD, and sha256 over sorted path\0size\0fileHash\0
+ * for untracked files (via git hash-object --no-filters; files > 1 MiB -> null).
+ */
+export function computeWorkspaceFingerprint(dir) {
+  if (typeof dir !== 'string' || !dir || !isAbsolute(dir)) {
+    throw new AiCliError('INVALID_INPUT', 'dir must be an absolute path', { exitCode: 2 });
+  }
+  let cwd;
+  try {
+    cwd = realpathSync(dir);
+  } catch {
+    cwd = dir;
+  }
+
+  const isGit = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+
+  if (isGit.status !== 0) {
+    return {
+      head: null,
+      tree: null,
+      statusDigest: null,
+      diffDigest: null,
+      untrackedCount: 0,
+      untrackedDigest: null,
+      nonGit: true,
+    };
+  }
+
+  const headProbe = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 10_000 });
+  const head = headProbe.status === 0 ? headProbe.stdout.trim() : null;
+
+  const treeProbe = spawnSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd, encoding: 'utf8', timeout: 10_000 });
+  const tree = treeProbe.status === 0 ? treeProbe.stdout.trim() : null;
+
+  const statusProbe = spawnSync('git', ['status', '--porcelain=v1', '-z'], { cwd, timeout: 10_000 });
+  const statusDigest = statusProbe.status === 0
+    ? createHash('sha256').update(statusProbe.stdout || Buffer.alloc(0)).digest('hex')
+    : null;
+
+  const diffProbe = spawnSync('git', ['diff', 'HEAD'], { cwd, timeout: 15_000 });
+  const diffDigest = diffProbe.status === 0
+    ? createHash('sha256').update(diffProbe.stdout || Buffer.alloc(0)).digest('hex')
+    : null;
+
+  const untrackedProbe = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd, timeout: 15_000 });
+  let untrackedCount = 0;
+  let untrackedDigest = null;
+
+  if (untrackedProbe.status === 0) {
+    const raw = untrackedProbe.stdout || Buffer.alloc(0);
+    const files = raw.toString('utf8').split('\0').filter(Boolean).sort();
+    untrackedCount = files.length;
+
+    let hasLargeFile = false;
+    for (const file of files) {
+      try {
+        const s = statSync(join(cwd, file));
+        if (s.size > MAX_UNTRACKED_FILE_BYTES) {
+          hasLargeFile = true;
+          break;
+        }
+      } catch {
+        hasLargeFile = true;
+        break;
+      }
+    }
+
+    if (hasLargeFile) {
+      untrackedDigest = null;
+    } else if (files.length === 0) {
+      untrackedDigest = createHash('sha256').update('').digest('hex');
+    } else {
+      const hash = createHash('sha256');
+      for (const file of files) {
+        const s = statSync(join(cwd, file));
+        const hashRes = spawnSync('git', ['hash-object', '--no-filters', '--', file], { cwd, encoding: 'utf8', timeout: 5000 });
+        const fileHash = hashRes.status === 0 ? hashRes.stdout.trim() : '';
+        hash.update(`${file}\0${s.size}\0${fileHash}\0`);
+      }
+      untrackedDigest = hash.digest('hex');
+    }
+  }
+
+  return {
+    head,
+    tree,
+    statusDigest,
+    diffDigest,
+    untrackedCount,
+    untrackedDigest,
+    nonGit: false,
+  };
+}
+
+/**
+ * Request the remote worker to compute a fingerprint of remoteDir via SSH.
+ */
+export async function runRemoteFingerprint({
+  hostId,
+  env = process.env,
+  remoteDir,
+  cwd,
+  timeoutMs = 30_000,
+}) {
+  const host = resolveClaudeRemoteHost(hostId, env);
+  const sshBin = resolveSshBin(env);
+  const sshArgs = buildSshArgs(host.sshHost);
+  const sshEnv = buildSshChildEnv(env);
+  const targetDir = remoteDir || cwd;
+
+  const payload = JSON.stringify({
+    schema: 'webmcp-ai-claude-remote-request/1',
+    mode: 'fingerprint',
+    cwd: targetDir,
+    workspaceRoot: host.workspaceRoot,
+  });
+
+  let rawResult;
+  try {
+    rawResult = await runProcess(
+      sshBin,
+      [...sshArgs, host.nodeBin, host.worker, '--mode', 'fingerprint'],
+      {
+        stdin: payload,
+        env: sshEnv,
+        timeoutMs,
+        maxOutputBytes: 256 * 1024,
+      },
+    );
+  } catch (error) {
+    if (error?.code === 'PROVIDER_ABORTED') throw error;
+    throw mapSshError(error, hostId);
+  }
+
+  try {
+    const line = rawResult.stdout.trim().split(/\r?\n/).find((l) => l.startsWith('{'));
+    return JSON.parse(line || rawResult.stdout.trim());
+  } catch {
+    throw new AiCliError('CLAUDE_REMOTE_WORKER_ERROR', 'Remote Claude worker fingerprint returned invalid output', {
+      exitCode: 2,
+      details: { host: hostId },
+    });
+  }
+}
+
+/**
+ * Verify that local and remote workspaces are bitwise/git identical before model run.
+ * Fails closed on mismatch or nonGit for review/implement.
+ */
+export async function verifyRemoteWorkspace({ hostId, env = process.env, localDir, remoteDir }) {
+  const local = computeWorkspaceFingerprint(localDir);
+  const remote = await runRemoteFingerprint({ hostId, env, remoteDir });
+
+  if (local.nonGit || remote.nonGit) {
+    throw new AiCliError('CLAUDE_REMOTE_WORKSPACE_MISMATCH', 'Workspace verification failed: not a Git repository', {
+      exitCode: 2,
+      details: {
+        host: hostId,
+        reason: 'non-git',
+        localNonGit: Boolean(local.nonGit),
+        remoteNonGit: Boolean(remote.nonGit),
+      },
+    });
+  }
+
+  const matches = local.head === remote.head
+    && local.tree === remote.tree
+    && local.statusDigest === remote.statusDigest
+    && local.diffDigest === remote.diffDigest
+    && local.untrackedCount === remote.untrackedCount
+    && local.untrackedDigest === remote.untrackedDigest;
+
+  if (!matches) {
+    throw new AiCliError('CLAUDE_REMOTE_WORKSPACE_MISMATCH', 'Remote workspace does not match local workspace', {
+      exitCode: 2,
+      details: {
+        host: hostId,
+        local: {
+          head: local.head ? local.head.slice(0, 8) : null,
+          tree: local.tree ? local.tree.slice(0, 8) : null,
+          statusDigest: local.statusDigest ? local.statusDigest.slice(0, 8) : null,
+          diffDigest: local.diffDigest ? local.diffDigest.slice(0, 8) : null,
+          untrackedCount: local.untrackedCount,
+          untrackedDigest: local.untrackedDigest ? local.untrackedDigest.slice(0, 8) : null,
+        },
+        remote: {
+          head: remote.head ? remote.head.slice(0, 8) : null,
+          tree: remote.tree ? remote.tree.slice(0, 8) : null,
+          statusDigest: remote.statusDigest ? remote.statusDigest.slice(0, 8) : null,
+          diffDigest: remote.diffDigest ? remote.diffDigest.slice(0, 8) : null,
+          untrackedCount: remote.untrackedCount,
+          untrackedDigest: remote.untrackedDigest ? remote.untrackedDigest.slice(0, 8) : null,
+        },
+      },
+    });
+  }
+
+  return {
+    ok: true,
+    digest: local.tree || local.head || local.statusDigest,
+  };
+}
+
+/**
+ * Spawn the remote Claude worker over SSH in run mode.
+ */
+export async function runRemoteClaude({
+  hostId,
+  env = process.env,
+  args,
+  prompt,
+  cwd,
+  timeoutMs = 600_000,
+  maxOutputBytes = 32 * 1024 * 1024,
+  signal,
+}) {
+  const host = resolveClaudeRemoteHost(hostId, env);
+  const sshBin = resolveSshBin(env);
+  const sshArgs = buildSshArgs(host.sshHost);
+  const sshEnv = buildSshChildEnv(env);
+
+  const payload = JSON.stringify({
+    schema: 'webmcp-ai-claude-remote-request/1',
+    mode: 'run',
+    args,
+    prompt: typeof prompt === 'string' ? prompt : '',
+    cwd,
+    workspaceRoot: host.workspaceRoot,
+    timeoutMs,
+    maxOutputBytes,
+    env: {},
+  });
+
+  const outerTimeoutMs = timeoutMs + 30_000;
+  let rawResult;
+  try {
+    rawResult = await runProcess(
+      sshBin,
+      [...sshArgs, host.nodeBin, host.worker, '--mode', 'run', '--claude-bin', host.binary],
+      {
+        stdin: payload,
+        env: sshEnv,
+        timeoutMs: outerTimeoutMs,
+        maxOutputBytes: maxOutputBytes + 1024 * 1024,
+        signal,
+      },
+    );
+  } catch (error) {
+    if (error?.code === 'PROVIDER_ABORTED') throw error;
+    if (error?.details?.exitCode === 64) {
+      throw new AiCliError('CLAUDE_REMOTE_WORKER_ERROR', 'Remote Claude worker rejected request', {
+        exitCode: 2,
+        details: { host: hostId, exitCode: 64 },
+      });
+    }
+    throw mapSshError(error, hostId);
+  }
+
+  let workerResponse;
+  try {
+    const line = rawResult.stdout.trim().split(/\r?\n/).find((l) => l.includes('webmcp-ai-claude-remote-response/1'));
+    workerResponse = JSON.parse(line || rawResult.stdout.trim());
+  } catch {
+    throw new AiCliError('CLAUDE_REMOTE_WORKER_ERROR', 'Remote Claude worker response was malformed or missing', {
+      exitCode: 2,
+      details: { host: hostId },
+    });
+  }
+
+  if (workerResponse.schema !== 'webmcp-ai-claude-remote-response/1' || workerResponse.mode !== 'run') {
+    throw new AiCliError('CLAUDE_REMOTE_WORKER_ERROR', 'Remote Claude worker response schema invalid', {
+      exitCode: 2,
+      details: { host: hostId },
+    });
+  }
+
+  if (workerResponse.timedOut) {
+    throw new AiCliError('PROVIDER_TIMEOUT', `Remote Claude exceeded the ${timeoutMs}ms timeout`, {
+      retryable: true,
+      details: { transport: 'ssh', host: hostId, timeoutMs },
+    });
+  }
+
+  if (workerResponse.exitCode !== 0) {
+    throw classifyProviderExit({
+      stdout: workerResponse.stdout,
+      stderr: workerResponse.stderr,
+      exitCode: workerResponse.exitCode,
+      exitSignal: workerResponse.signal,
+    });
+  }
+
+  return {
+    stdout: workerResponse.stdout,
+    stderr: workerResponse.stderr,
+    exitCode: 0,
+  };
+}
+
+/**
+ * Probe the remote worker via --mode selftest over SSH.
+ */
+export async function probeRemoteWorker({ hostId, env = process.env, timeoutMs = 8000 }) {
+  const host = resolveClaudeRemoteHost(hostId, env);
+  const sshBin = resolveSshBin(env);
+  const sshArgs = buildSshArgs(host.sshHost);
+  const sshEnv = buildSshChildEnv(env);
+
+  let rawResult;
+  try {
+    rawResult = await runProcess(
+      sshBin,
+      [...sshArgs, host.nodeBin, host.worker, '--mode', 'selftest', '--claude-bin', host.binary],
+      {
+        env: sshEnv,
+        timeoutMs,
+        maxOutputBytes: 64 * 1024,
+      },
+    );
+  } catch (error) {
+    if (error?.code === 'PROVIDER_ABORTED') throw error;
+    throw mapSshError(error, hostId);
+  }
+
+  try {
+    const line = rawResult.stdout.trim().split(/\r?\n/).find((l) => l.startsWith('{'));
+    return JSON.parse(line || rawResult.stdout.trim());
+  } catch {
+    throw new AiCliError('CLAUDE_REMOTE_WORKER_ERROR', 'Remote Claude worker selftest returned invalid response', {
+      exitCode: 2,
+      details: { host: hostId },
+    });
+  }
 }

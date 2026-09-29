@@ -21,6 +21,7 @@ import {
   readBackProviderInstall,
   writeProviderInstallReceipt,
 } from './providers/install.mjs';
+import { probeRemoteClaude, readRemoteClaudeState, selectClaudeHost } from './remote.mjs';
 
 const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
 
@@ -560,7 +561,9 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     return 0;
   }
   if (command === 'preflight') {
-    const payload = { ...describePreflight({ env }), packageVersion: packageJson.version };
+    const probeRemote = Boolean(options['probe-remote']);
+    const preflight = await describePreflight({ env, probeRemote });
+    const payload = { ...preflight, packageVersion: packageJson.version };
     printValue(payload, json);
     return 0;
   }
@@ -676,6 +679,70 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         return 0;
       }
       if (provider.id === 'claude') {
+        if (selectClaudeHost(env) !== 'local') {
+          const hostId = selectClaudeHost(env);
+          let remoteProbe;
+          try {
+            remoteProbe = await probeRemoteClaude({ hostId, env, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS });
+          } catch {
+            printValue({
+              ok: true, provider: provider.id, taskIntent: 'review',
+              accessProfile: 'review-readonly',
+              transport: 'ssh',
+              remote: { host: hostId, state: 'unreachable' },
+              installed: false, version: null, authenticated,
+              policySupported: true, canaryProven: false, taskReady: false,
+              supported: false,
+              code: 'CLAUDE_REMOTE_UNREACHABLE',
+              reason: 'Remote Claude host is unreachable',
+              missing: ['reachable remote host'],
+              limitations: [...CLAUDE_REVIEW_LIMITATIONS],
+              mapping: {
+                flags: ['--permission-mode dontAsk', '--tools Read,Glob,Grep', '--disallowedTools Edit,Write,NotebookEdit', '--safe-mode', '--no-chrome', '--no-session-persistence'],
+              },
+            }, json);
+            return 0;
+          }
+
+          const remoteVersion = sanitizeInspectVersion(remoteProbe.version);
+          try {
+            validateClaudeReviewSupport(remoteProbe.helpText);
+            printValue({
+              ok: true, provider: provider.id, taskIntent: 'review',
+              accessProfile: 'review-readonly',
+              transport: 'ssh',
+              remote: { host: hostId, state: 'reachable' },
+              installed: true, version: remoteVersion, authenticated,
+              policySupported: true, canaryProven: false, taskReady: true,
+              supported: true,
+              code: null, reason: null, missing: [],
+              limitations: [...CLAUDE_REVIEW_LIMITATIONS],
+              mapping: {
+                flags: ['--permission-mode dontAsk', '--tools Read,Glob,Grep', '--disallowedTools Edit,Write,NotebookEdit', '--safe-mode', '--no-chrome', '--no-session-persistence'],
+                events: 'native stream-json --verbose only when events requested; review CLI disallows --stream/--events (explicit contract)',
+              },
+            }, json);
+            return 0;
+          } catch (drift) {
+            printValue({
+              ok: true, provider: provider.id, taskIntent: 'review',
+              accessProfile: 'review-readonly',
+              transport: 'ssh',
+              remote: { host: hostId, state: 'reachable' },
+              installed: true, version: remoteVersion, authenticated,
+              policySupported: true, canaryProven: false, taskReady: false,
+              supported: false,
+              code: 'PROVIDER_CAPABILITY_DRIFT',
+              reason: drift.message,
+              missing: drift.details?.missing ?? ['reviewer flags'],
+              limitations: [...CLAUDE_REVIEW_LIMITATIONS],
+              mapping: {
+                flags: ['--permission-mode dontAsk', '--tools Read,Glob,Grep', '--disallowedTools Edit,Write,NotebookEdit', '--safe-mode', '--no-chrome', '--no-session-persistence'],
+              },
+            }, json);
+            return 0;
+          }
+        }
         // Actually invoke the installed help/version probe and validate.
         // A drifted/missing CLI returns DRIFT/unavailable, never
         // supported:true by static table alone.
@@ -914,6 +981,25 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         }, json);
         return 0;
       }
+    }
+    if (providerMeta.id === 'claude' && selectClaudeHost(env) !== 'local') {
+      const hostId = selectClaudeHost(env);
+      let remoteState = 'not-probed';
+      try {
+        const stateObj = await readRemoteClaudeState({ hostId, env });
+        remoteState = stateObj.state === 'unreachable' ? 'unreachable' : 'reachable';
+      } catch {
+        remoteState = 'unreachable';
+      }
+      printValue({
+        ok: true,
+        provider: {
+          ...providerMeta,
+          transport: 'ssh',
+          remote: { host: hostId, state: remoteState },
+        },
+      }, json, (value) => JSON.stringify(value.provider, null, 2));
+      return 0;
     }
     printValue({ ok: true, provider: providerMeta }, json, (value) => JSON.stringify(value.provider, null, 2));
     return 0;

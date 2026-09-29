@@ -11,6 +11,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 |---|---|---|---|---|---|---|
 | **Codex CLI** | `gpt-6-sol`<br>`gpt-5.6-luna` | `codex` | `exec --sandbox read-only --ephemeral --skip-git-repo-check -c approval_policy=never` | Stdin + dấu `-` cuối lệnh | `--output-last-message <f.md>` (hoặc parse stream JSONL) | **BẮT BUỘC** `--skip-git-repo-check` trên Codex 0.155.0+. Thiếu `-` ở cuối sẽ bị treo prompt. |
 | **Claude Code** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude` | `-p --output-format json --restricted` | `< prompt.txt` (stdin) | Thuộc tính `.result` trong stdout JSON | **BẮT BUỘC** `-p` để tránh mở UI TUI interactive. `--restricted` tắt tools can thiệp shell/code. |
+| **Claude Code (Remote M1)** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude` (remote) | Qua SSH worker: `WEBMCP_AI_CLAUDE_HOST=m1` | Stdin `< prompt.txt` (qua JSON payload) | Thuộc tính `.result` trong response JSON | **Fail-closed**: Không fallback về local; git fingerprint verification trước khi spawn; không chuyển giao credentials. |
 | **OpenCode (v2)** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode` | `run --standalone` | Đối số chuỗi hoặc stdin `< prompt.txt` | Text trực tiếp trên stdout hoặc parse NDJSON | **KHÔNG** ép biến `OPENCODE_DB` sang file DB rỗng/chưa sync vì sẽ mất quyền subscription Go models. |
 | **Antigravity** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | `agy` (hoặc wrapper) | `--agent-mode plan` (khi qua wrapper) | `-p "..."` hoặc stdin | `response.text` (hoặc brain artifact .md) | `claude-opus-4-6-thinking` **KHÔNG** hỗ trợ `--effort` (sẽ lỗi exit 1). Gemini Flash hỗ trợ `--effort high`. |
 | **WebMCP AI** | Mọi model trên | `webmcp-ai` | `generate --json` | `--prompt "..."` hoặc `--prompt-file <path>` | Chuẩn JSON `{ ok: true, response: { text } }` | Wrapper thống nhất tự động cô lập workspace, chuẩn hóa mã lỗi `error.code`. |
@@ -60,6 +61,10 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
   - Nếu `is_error: true`, đọc mã lỗi tại `.subtype`.
 - **Session Fork (R5)**:
   - `claude --resume <SESSION_ID> --fork-session` phân nhánh session mới, output mang `session_id` mới.
+- **Remote Claude qua SSH (Mac M1 host `m1`)**:
+  - Truy cập qua SSH alias: `mac-pro14` (`WEBMCP_AI_CLAUDE_HOST=m1`).
+  - Worker script: `/Users/ttcenter/.webmcp-ai/claude-remote-worker.mjs` trên host M1.
+  - Fail-closed: Thất bại SSH/network trả lỗi `CLAUDE_REMOTE_UNREACHABLE`, không fallback về local binary; workspace được kiểm chứng git fingerprint byte-for-byte trước khi spawn.
 
 ---
 
