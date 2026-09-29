@@ -48,6 +48,16 @@ const REVIEW_INPUT_SCHEMA = {
     sessionId: { type: ['string', 'null'] },
     taskIntent: { enum: ['review', null] },
     accessProfile: { enum: ['review-readonly', null] },
+    // Codex-only native Git diff review; validated in resolveReviewTargetForRequest.
+    reviewTarget: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      properties: {
+        type: { enum: ['uncommitted', 'base', 'commit'] },
+        ref: { type: 'string' },
+        sha: { type: 'string' },
+      },
+    },
     workspace: { type: ['string', 'null'] },
     allowedReadRoots: { type: ['array', 'null'], items: { type: 'string' } },
     allowedWriteRoots: { type: ['array', 'null'], items: { type: 'string' } },
@@ -85,7 +95,7 @@ const ALLOWED_INPUT_FIELDS = new Set([
 
 const REVIEW_ALLOWED_INPUT_FIELDS = new Set([
   'provider', 'prompt', 'model', 'effort', 'opencodeProfile', 'timeoutMs', 'maxOutputBytes', 'sessionId', 'taskIntent',
-  'accessProfile', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions',
+  'accessProfile', 'reviewTarget', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions',
 ]);
 
 export async function handleToolCall(request, options = {}) {

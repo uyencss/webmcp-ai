@@ -416,6 +416,11 @@ export const opencodeProvider = {
   defaultBin: 'opencode',
   capabilities: {
     structuredOutput: false,
+    // Verified 2026-09-29 against installed opencode v2.0.19 (2.0.18 canary
+    // cited in the R4 report): `printf '...' | opencode run --standalone
+    // --format json --model <m>` exits 0 and emits a real
+    // `{"type":"text",...,"part":{"type":"text","text":"OK",...}}` JSONL
+    // line. Stdin prompts work on v2; no capability flip needed.
     stdinPrompt: true,
     explicitResume: true,
     modelDiscovery: true,

@@ -8,6 +8,7 @@ import {
 import { generate } from './client.mjs';
 import { AiCliError } from './errors.mjs';
 import { getProvider } from './providers/index.mjs';
+import { resolveReviewTargetForRequest } from './providers/codex.mjs';
 import { normalizeOpencodeProfile } from './providers/opencode.mjs';
 import { parseReviewOutput, REVIEW_RESULT_SCHEMA } from './review-result.mjs';
 
@@ -37,10 +38,35 @@ function explicitOpencodeProfile(provider, profile) {
  * evidence execution — evidence stays Coordinator-owned. Frozen contract:
  * findings use {id,severity:critical|high|medium|low,file,line,message,
  * recommendation}; file/line may be omitted only for architectural findings.
+ *
+ * `reviewTarget` (Codex native Git diff review only) swaps the trailing
+ * instruction: the sandbox is genuinely read-only there (enforced by
+ * `-c sandbox_mode="read-only"`), so "do not run shell commands" is replaced
+ * with the more precise "do not attempt any write" and the scope is named
+ * explicitly, with the model told to gather the actual diff itself via
+ * read-only `git` commands (Codex's own `--uncommitted`/`--base`/`--commit`
+ * flags cannot be combined with this custom prompt — canary 2026-09-29 on
+ * codex-cli 0.157.1 — so the scope lives in the prompt instead of argv; see
+ * src/providers/codex.mjs). The target variant additionally instructs a
+ * fail-closed `blocked` verdict when the named scope cannot actually be
+ * resolved (unknown ref, a failing `git` command, or empty diff context) so
+ * an unresolvable scope can never silently fall through to reviewing
+ * whatever the model happens to see and returning a false `approve`. The
+ * portable (no reviewTarget) text is unchanged byte-for-byte.
  */
-export function buildReviewPrompt(prompt) {
+export function buildReviewPrompt(prompt, { reviewTarget = null } = {}) {
   const body = requireNonEmptyPrompt(prompt);
-  return `${body}\n\nRespond with ONLY compact JSON matching schema "${REVIEW_RESULT_SCHEMA}": {"schema":"${REVIEW_RESULT_SCHEMA}","verdict":"approve|request-changes|blocked|indeterminate","summary":"<one-line reason>"}. Include "blockedReason" when verdict is "blocked". Findings, when present, must be [{id:"F1",severity:"critical|high|medium|low",file:"<path>",line:<n>,message:"<defect>",recommendation:"<repair>"}]; omit file/line only for architectural findings. Do not emit plans, diffs, or prose outside that JSON. Do not run shell commands, edit files, or access the network.`;
+  const contract = `Respond with ONLY compact JSON matching schema "${REVIEW_RESULT_SCHEMA}": {"schema":"${REVIEW_RESULT_SCHEMA}","verdict":"approve|request-changes|blocked|indeterminate","summary":"<one-line reason>"}. Include "blockedReason" when verdict is "blocked". Findings, when present, must be [{id:"F1",severity:"critical|high|medium|low",file:"<path>",line:<n>,message:"<defect>",recommendation:"<repair>"}]; omit file/line only for architectural findings. Do not emit plans, diffs, or prose outside that JSON.`;
+  if (reviewTarget) {
+    const scope = reviewTarget.type === 'uncommitted'
+      ? 'the uncommitted changes (staged, unstaged, and untracked) in this Git repository; use `git status` and `git diff`/`git diff --cached` yourself to see them'
+      : reviewTarget.type === 'base'
+        ? `the changes in this Git repository against the base ref "${reviewTarget.ref}"; use \`git diff ${reviewTarget.ref}...HEAD\` yourself to see them`
+        : `the changes introduced by commit "${reviewTarget.sha}" in this Git repository; use \`git show ${reviewTarget.sha}\` yourself to see them`;
+    const failClosed = 'If you cannot determine exactly this scope via the named read-only git command (unknown ref, git error, or empty diff context), return verdict "blocked" with a "blockedReason" describing what was unresolvable — never review a different scope instead.';
+    return `Review ${scope}.\n\n${body}\n\n${contract} The sandbox is read-only; do not attempt any write. ${failClosed}`;
+  }
+  return `${body}\n\n${contract} Do not run shell commands, edit files, or access the network.`;
 }
 
 /**
@@ -166,6 +192,15 @@ export function resolveReviewRequest(input = {}) {
       details: { capability: 'review', taskIntent: resolvedIntent.taskIntent, accessProfile: resolvedIntent.accessProfile },
     });
   }
+  // 4b. reviewTarget (Codex native Git diff review). Validated before any
+  // capability/preview work: non-empty target requires provider codex and no
+  // sessionId. An absent/empty-object target resolves to null and leaves the
+  // portable review lane byte-identical for every provider.
+  const reviewTarget = resolveReviewTargetForRequest(input.reviewTarget ?? null, {
+    providerId: provider.id,
+    sessionId: input.sessionId || null,
+    taskIntent: resolvedIntent.taskIntent,
+  });
   const prompt = requireNonEmptyPrompt(input.prompt);
   const timeoutMs = input.timeoutMs ?? undefined;
   if (timeoutMs !== undefined) {
@@ -209,7 +244,7 @@ export function resolveReviewRequest(input = {}) {
   const previewWorkspace = capability.workspace;
   let previewArgs = null;
   const preview = provider.buildInvocation({
-    prompt: buildReviewPrompt(prompt),
+    prompt: buildReviewPrompt(prompt, { reviewTarget }),
     model: input.model || null,
     effort: input.effort || null,
     schema: null,
@@ -219,6 +254,7 @@ export function resolveReviewRequest(input = {}) {
     toolPolicy: 'provider-default',
     accessProfile: capability.accessProfile,
     taskIntent: resolvedIntent.taskIntent,
+    reviewTarget,
     workspace: previewWorkspace,
     allowedReadRoots: capability.allowedReadRoots,
     allowedWriteRoots: [],
@@ -250,6 +286,7 @@ export function resolveReviewRequest(input = {}) {
     accessProfile: resolvedIntent.accessProfile,
     capability,
     prompt,
+    reviewTarget,
     ...(provider.id === 'opencode' ? {
       opencodeProfile,
       opencodeProfileSource: opencodeProfile === null ? 'unresolved' : 'explicit',
@@ -311,6 +348,7 @@ export function describeReviewDryRun(input = {}) {
     provider: resolved.provider.id,
     taskIntent: resolved.taskIntent,
     accessProfile: resolved.accessProfile,
+    reviewTarget: resolved.reviewTarget,
     ...(resolved.provider.id === 'opencode' ? {
       opencodeProfile: resolved.opencodeProfile,
       opencodeProfileSource: resolved.opencodeProfileSource,
@@ -361,7 +399,7 @@ export async function review(input = {}) {
   }
   const resolved = resolveReviewRequest(input);
   const env = input.env || process.env;
-  const reviewPrompt = buildReviewPrompt(resolved.prompt);
+  const reviewPrompt = buildReviewPrompt(resolved.prompt, { reviewTarget: resolved.reviewTarget });
   const result = await generate({
     provider: resolved.provider.id,
     prompt: reviewPrompt,
@@ -373,6 +411,7 @@ export async function review(input = {}) {
     agent: null,
     toolPolicy: undefined,
     accessProfile: resolved.accessProfile,
+    reviewTarget: resolved.reviewTarget,
     workspace: input.workspace,
     allowedReadRoots: input.allowedReadRoots,
     allowedWriteRoots: [],

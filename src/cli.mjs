@@ -24,6 +24,7 @@ import {
 
 const packageJson = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
 
+const DEFAULT_PROBE_TIMEOUT_MS = Number.parseInt(process.env.WEBMCP_AI_PROBE_TIMEOUT_MS || '', 10) || 15_000;
 const ORCHESTRATION_PACKAGE = '@gyga-browser/webmcp-ai-orchestration';
 
 function isMissingRequestedPackage(error) {
@@ -202,6 +203,9 @@ Review options (portable one-shot reviewer; reuses the ai.review resolver; read-
   --prompt <text>         Review prompt (or --prompt-file <path>, or --input-json <path|->)
   --task-intent <intent>  review only (absent defaults to review; plan/compose/implement rejected; unknown -> TASK_INTENT_INVALID)
   --access-profile <profile>  review-readonly only (absent defaults to review-readonly; mismatch -> TASK_INTENT_ACCESS_CONFLICT)
+  --review-target <uncommitted|base|commit>  Codex-only native Git diff review (typed UNSUPPORTED_CAPABILITY on other providers; conflicts with --session-id)
+  --review-base <ref>     Base ref for --review-target base
+  --review-commit <sha>   Commit sha for --review-target commit
   --model <model>         Provider model override
   --effort <level>        Provider reasoning/effort override
   --opencode-profile <v1|v2>  Explicit OpenCode adapter profile for preview/dispatch
@@ -328,6 +332,16 @@ function isTrueFlag(value) {
 
 function generateInput(options) {
   const fromJson = options['input-json'] ? readJsonInput(options['input-json']) : {};
+  // reviewTarget (Codex native Git diff review) is review-only; ai.generate
+  // never accepts it. Reject at the CLI boundary so `generate --review-target
+  // ...` fails typed instead of silently ignoring the flag and running an
+  // ordinary portable generate.
+  if (options['review-target'] !== undefined || options['review-base'] !== undefined || options['review-commit'] !== undefined || fromJson.reviewTarget !== undefined) {
+    throw new AiCliError('UNSUPPORTED_CAPABILITY', 'reviewTarget is not allowed for generate; use review', {
+      exitCode: 2,
+      details: { capability: 'reviewTarget' },
+    });
+  }
   const schema = options.schema ? readJsonInput(options.schema) : fromJson.schema;
   const prompt = options['prompt-file']
     ? readFileSync(options['prompt-file'], 'utf8')
@@ -378,6 +392,21 @@ function generateInput(options) {
     agyBrainDir: options['agy-brain-dir'] ?? fromJson.agyBrainDir,
     dryRun: isTrueFlag(options['dry-run'] ?? fromJson.dryRun),
   };
+}
+
+// Builds the reviewTarget object from --review-target/--review-base/
+// --review-commit exactly as given (including malformed combinations); the
+// authoritative shape/exactly-one-variant validation happens centrally in
+// normalizeReviewTarget (src/providers/codex.mjs), not here. CLI flags take
+// precedence over an --input-json reviewTarget field when any are present.
+function reviewTargetFromOptions(options, fromJson) {
+  const hasCliFlag = options['review-target'] !== undefined || options['review-base'] !== undefined || options['review-commit'] !== undefined;
+  if (!hasCliFlag) return fromJson.reviewTarget;
+  const target = {};
+  if (options['review-target'] !== undefined) target.type = String(options['review-target']);
+  if (options['review-base'] !== undefined) target.ref = options['review-base'];
+  if (options['review-commit'] !== undefined) target.sha = options['review-commit'];
+  return target;
 }
 
 function reviewInput(options) {
@@ -446,6 +475,7 @@ function reviewInput(options) {
     sessionId: options['session-id'] ?? fromJson.sessionId,
     taskIntent: options['task-intent'] ?? fromJson.taskIntent,
     accessProfile: options['access-profile'] ?? fromJson.accessProfile,
+    reviewTarget: reviewTargetFromOptions(options, fromJson),
     timeoutMs: options['timeout-ms'] ? Number(options['timeout-ms']) : fromJson.timeoutMs,
     maxOutputBytes: options['max-output-bytes'] ? Number(options['max-output-bytes']) : fromJson.maxOutputBytes,
     workspace: options.workspace ?? fromJson.workspace,
@@ -604,7 +634,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       if (installed) {
         try {
           const ver = await runProcess(commandBin, ['--version'], {
-            env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 64 * 1024,
+            env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 64 * 1024,
           });
           version = sanitizeInspectVersion(ver.stdout.trim() || ver.stderr.trim());
         } catch (error) {
@@ -666,7 +696,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         let helpError = null;
         try {
           const help = await runProcess(commandBin, ['--help'], {
-            env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+            env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
           });
           helpText = `${help.stdout}\n${help.stderr}`;
         } catch (error) {
@@ -747,7 +777,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         let codexHelpError = null;
         try {
           const help = await runProcess(commandBin, ['exec', '--help'], {
-            env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+            env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
           });
           codexHelpText = `${help.stdout}\n${help.stderr}`;
         } catch (error) {
@@ -833,7 +863,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         let opencodeHelpError = null;
         try {
           const help = await runProcess(commandBin, ['run', '--help'], {
-            env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+            env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
           });
           opencodeHelpText = `${help.stdout}\n${help.stderr}`;
         } catch (error) {

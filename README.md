@@ -69,6 +69,39 @@ appear in shell history. Claude and Codex prompts are forwarded over stdin. AGY
 only documents argument-based print mode, so the AGY adapter enforces a
 bounded prompt size.
 
+### Codex native Git diff review (`reviewTarget`)
+
+`webmcp-ai review` accepts an optional, Codex-only `reviewTarget` that scopes
+the review to a Git diff instead of the whole prompt:
+
+```bash
+webmcp-ai review --provider codex --prompt-file ./prompt.md --review-target uncommitted --workspace "$PWD" --json
+webmcp-ai review --provider codex --prompt-file ./prompt.md --review-target base --review-base main --workspace "$PWD" --json
+webmcp-ai review --provider codex --prompt-file ./prompt.md --review-target commit --review-commit HEAD --workspace "$PWD" --json
+```
+
+- Exactly one of `{type:"uncommitted"}` / `{type:"base",ref}` /
+  `{type:"commit",sha}`; an absent/empty value keeps the ordinary portable
+  review lane byte-identical. Any provider other than `codex` fails typed
+  `UNSUPPORTED_CAPABILITY`. Combining `reviewTarget` with `--session-id` fails
+  typed `TASK_INTENT_ACCESS_CONFLICT` (resume scope is not provable for a
+  native diff review). The workspace must be a Git repository (a bounded
+  `git rev-parse --show-toplevel` probe fails typed `REVIEW_TARGET_NOT_GIT`
+  otherwise). `ai.generate` rejects `reviewTarget` outright — it is review-only.
+- **Real-CLI constraint (codex-cli 0.157.1, verified 2026-09-29):** although
+  `codex exec review --help` lists `--uncommitted`/`--base`/`--commit`, the
+  installed binary refuses to combine any of them with a custom prompt
+  (including the `-` stdin marker this wrapper needs to deliver the
+  `webmcp-ai-review-result/1` JSON-contract instructions), and even without a
+  custom prompt that built-in flow does not honor `--output-schema` (its
+  final message is free prose, never the JSON contract). So this wrapper
+  never passes `--uncommitted`/`--base`/`--commit` as CLI flags — the scope is
+  named in the prompt instead, and the model is instructed to gather the
+  actual diff itself via read-only `git diff`/`git show`, run inside
+  `-c sandbox_mode="read-only" -c approval_policy="never" --ephemeral
+  --ignore-user-config --ignore-rules`. `--sandbox`, `--color`, and
+  `--skip-git-repo-check` are never used on this lane.
+
 ## Dispatch preflight and per-model facts
 
 `webmcp-ai preflight --json` is a read-only aggregate for multi-lane dispatch:

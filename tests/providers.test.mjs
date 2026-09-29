@@ -9,6 +9,7 @@ import test from 'node:test';
 import { resolveOpencodeCliDb } from '../src/providers/opencode.mjs';
 import { getProvider, listProviders } from '../src/providers/index.mjs';
 import { MAX_PROMPT_ARG_BYTES, MAX_STREAM_PROMPT_BYTES } from '../src/providers/agy.mjs';
+import { isolateTmpdir } from './helpers/isolated-tmpdir.mjs';
 
 test('provider registry exposes agy, claude, codex, and opencode', () => {
   assert.deepEqual(listProviders().map((provider) => provider.id), ['agy', 'claude', 'codex', 'opencode']);
@@ -104,7 +105,8 @@ test('AGY structured output adds --output-format json --json-schema and cleans u
   assert.equal(existsSync(schemaDir), false);
 });
 
-test('AGY schema temp dir is cleaned up even when a later validation step throws', () => {
+test('AGY schema temp dir is cleaned up even when a later validation step throws', (t) => {
+  isolateTmpdir(t);
   // Use a plain file (not a directory) as the compose-only workspace so
   // installComposeOnlyGuard's mkdirSync throws AFTER the schema temp dir has
   // already been allocated (schema allocation runs before the compose-only
@@ -126,7 +128,8 @@ test('AGY schema temp dir is cleaned up even when a later validation step throws
   }
 });
 
-test('AGY schema serialization failure (circular) throws before any temp dir is allocated', () => {
+test('AGY schema serialization failure (circular) throws before any temp dir is allocated', (t) => {
+  isolateTmpdir(t);
   const circular = {};
   circular.self = circular;
   const before = readdirSync(tmpdir()).filter((n) => n.startsWith('webmcp-ai-agy-'));

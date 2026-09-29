@@ -26,6 +26,9 @@ function writeExecutable(path, content) {
 function writeFakeSsh(dir) {
   const script = join(dir, 'fake-ssh.mjs');
   writeExecutable(script, `#!/usr/bin/env node
+if (process.env.FAKE_SSH_SLEEP_MS) {
+  await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SSH_SLEEP_MS)));
+}
 const args = process.argv.slice(2);
 const last = args[args.length - 1];
 if (process.env.FAKE_SSH_EXIT_CODE) {
@@ -257,12 +260,22 @@ test('buildSshArgs returns an argv array only, never a shell string', () => {
   assert.ok(custom.includes('ConnectTimeout=3'));
 });
 
+// R4-FIX2: under concurrent load (many test files spawning Node subprocesses
+// at once), a short probe budget can make even a *successful* fake-ssh spawn
+// exceed its per-call timeout (perCallTimeoutMs = floor(timeoutMs/2)), which
+// then maps to CLAUDE_REMOTE_UNREACHABLE/timeout and both fails the success
+// test and silently "passes" the exit-code mapping tests below for the wrong
+// reason. A generous, explicit budget lets the real path be exercised even on
+// a loaded machine; the dedicated timeout test further down still proves the
+// timeout path deliberately with its own small budget.
+const GENEROUS_PROBE_TIMEOUT_MS = 30_000;
+
 test('probeRemoteClaude succeeds and returns version + helpText via a fake ssh binary', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'remote-probe-ok-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const fakeSsh = writeFakeSsh(dir);
   const env = { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh };
-  const result = await probeRemoteClaude({ hostId: 'm1', env, timeoutMs: 4000 });
+  const result = await probeRemoteClaude({ hostId: 'm1', env, timeoutMs: GENEROUS_PROBE_TIMEOUT_MS });
   assert.equal(result.available, true);
   assert.match(result.version, /2\.1\.283/);
   assert.match(result.helpText, /--disable-slash-commands/);
@@ -274,11 +287,13 @@ test('probeRemoteClaude maps a non-zero ssh exit to CLAUDE_REMOTE_UNREACHABLE wi
   const fakeSsh = writeFakeSsh(dir);
   const env = { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, FAKE_SSH_EXIT_CODE: '255' };
   await assert.rejects(
-    () => probeRemoteClaude({ hostId: 'm1', env, timeoutMs: 4000 }),
+    () => probeRemoteClaude({ hostId: 'm1', env, timeoutMs: GENEROUS_PROBE_TIMEOUT_MS }),
     (err) => {
       assert.equal(err.code, 'CLAUDE_REMOTE_UNREACHABLE');
       assert.equal(err.details?.host, 'm1');
-      assert.equal(typeof err.details?.reason, 'string');
+      // Must be the genuine exit-error path, not a timeout masquerading as
+      // "some string reason" (see R4-FIX2 comment above).
+      assert.equal(err.details?.reason, 'exit-error');
       const serialized = JSON.stringify(err.details ?? {});
       assert.equal(serialized.includes('secret-host-should-not-leak'), false);
       assert.equal(serialized.includes('secret-user'), false);
@@ -291,10 +306,29 @@ test('probeRemoteClaude maps a non-zero ssh exit to CLAUDE_REMOTE_UNREACHABLE wi
 test('probeRemoteClaude maps a missing ssh binary to CLAUDE_REMOTE_UNREACHABLE reason ssh-not-installed', async () => {
   const env = { ...process.env, WEBMCP_AI_SSH_BIN: '/definitely/missing/ssh-binary-does-not-exist' };
   await assert.rejects(
-    () => probeRemoteClaude({ hostId: 'm1', env, timeoutMs: 4000 }),
+    () => probeRemoteClaude({ hostId: 'm1', env, timeoutMs: GENEROUS_PROBE_TIMEOUT_MS }),
     (err) => {
       assert.equal(err.code, 'CLAUDE_REMOTE_UNREACHABLE');
       assert.equal(err.details?.reason, 'ssh-not-installed');
+      assert.equal(err.details?.host, 'm1');
+      return true;
+    },
+  );
+});
+
+test('probeRemoteClaude maps a slow ssh call to CLAUDE_REMOTE_UNREACHABLE reason timeout', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'remote-probe-timeout-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const fakeSsh = writeFakeSsh(dir);
+  // Deliberately small probe budget (perCallTimeoutMs = 750ms) against a fake
+  // that sleeps well beyond it; runProcess kills the child at the per-call
+  // timeout, so this resolves in well under a second, not the full 3000ms.
+  const env = { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, FAKE_SSH_SLEEP_MS: '3000' };
+  await assert.rejects(
+    () => probeRemoteClaude({ hostId: 'm1', env, timeoutMs: 1500 }),
+    (err) => {
+      assert.equal(err.code, 'CLAUDE_REMOTE_UNREACHABLE');
+      assert.equal(err.details?.reason, 'timeout');
       assert.equal(err.details?.host, 'm1');
       return true;
     },
@@ -306,13 +340,16 @@ test('readRemoteClaudeState never throws: match/drift/missing/unreachable', asyn
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const fakeSsh = writeFakeSsh(dir);
 
-  const matched = await readRemoteClaudeState({ hostId: 'm1', env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh }, pin: '2.1.283' });
+  const matched = await readRemoteClaudeState({
+    hostId: 'm1', env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh }, pin: '2.1.283', timeoutMs: GENEROUS_PROBE_TIMEOUT_MS,
+  });
   assert.deepEqual(matched, { state: 'match', installedVersion: '2.1.283', transport: 'ssh' });
 
   const drifted = await readRemoteClaudeState({
     hostId: 'm1',
     env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, FAKE_SSH_VERSION: '2.1.200 (Claude Code)' },
     pin: '2.1.283',
+    timeoutMs: GENEROUS_PROBE_TIMEOUT_MS,
   });
   assert.equal(drifted.state, 'drift');
   assert.equal(drifted.installedVersion, '2.1.200');
@@ -322,6 +359,7 @@ test('readRemoteClaudeState never throws: match/drift/missing/unreachable', asyn
     hostId: 'm1',
     env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, FAKE_SSH_EXIT_CODE: '255' },
     pin: '2.1.283',
+    timeoutMs: GENEROUS_PROBE_TIMEOUT_MS,
   });
   assert.deepEqual(unreachable, { state: 'unreachable', installedVersion: null, transport: 'ssh' });
 
@@ -331,6 +369,7 @@ test('readRemoteClaudeState never throws: match/drift/missing/unreachable', asyn
     hostId: 'm1',
     env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, WEBMCP_AI_CLAUDE_SSH_ALIAS: 'bad host with spaces' },
     pin: '2.1.283',
+    timeoutMs: GENEROUS_PROBE_TIMEOUT_MS,
   });
   assert.deepEqual(configInvalid, { state: 'unreachable', installedVersion: null, transport: 'ssh' });
 });
@@ -341,10 +380,13 @@ test('probeRemoteClaude maps a help-call-only failure to CLAUDE_REMOTE_UNREACHAB
   const fakeSsh = writeFakeSsh(dir);
   const env = { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, FAKE_SSH_HELP_EXIT_CODE: '3' };
   await assert.rejects(
-    () => probeRemoteClaude({ hostId: 'm1', env, timeoutMs: 4000 }),
+    () => probeRemoteClaude({ hostId: 'm1', env, timeoutMs: GENEROUS_PROBE_TIMEOUT_MS }),
     (err) => {
       assert.equal(err.code, 'CLAUDE_REMOTE_UNREACHABLE');
       assert.equal(err.details?.host, 'm1');
+      // The version call succeeds; only the help call exits 3 -> exit-error,
+      // not a timeout masquerading as the intended failure mode.
+      assert.equal(err.details?.reason, 'exit-error');
       return true;
     },
   );
@@ -358,6 +400,7 @@ test('readRemoteClaudeState resolves state missing when the probed version has n
     hostId: 'm1',
     env: { ...process.env, WEBMCP_AI_SSH_BIN: fakeSsh, FAKE_SSH_VERSION: 'unknown build, no version token here' },
     pin: '2.1.283',
+    timeoutMs: GENEROUS_PROBE_TIMEOUT_MS,
   });
   assert.deepEqual(missing, { state: 'missing', installedVersion: null, transport: 'ssh' });
 });

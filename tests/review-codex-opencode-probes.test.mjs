@@ -9,6 +9,7 @@ import test from 'node:test';
 import { describeReviewDryRun, review } from '../src/review.mjs';
 import { handleToolCall, TOOL_PROTOCOL } from '../src/protocol.mjs';
 import { withV2Db } from './fixtures/opencode-v2-db.mjs';
+import { isolateTmpdir } from './helpers/isolated-tmpdir.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 
@@ -357,7 +358,8 @@ test('RED: opencode review with drifted help fails before model; good help reach
 });
 
 // ---- F2: review+compose-only fails before compose temp workspace; legacy preserved ----
-test('RED: review+compose-only fails TASK_INTENT_ACCESS_CONFLICT with no compose temp dir; legacy compose-only preserved', async () => {
+test('RED: review+compose-only fails TASK_INTENT_ACCESS_CONFLICT with no compose temp dir; legacy compose-only preserved', async (t) => {
+  isolateTmpdir(t);
   const { resolveTaskIntent } = await import('../src/task-intent.mjs');
   assert.throws(
     () => resolveTaskIntent({ taskIntent: 'review', accessProfile: 'compose-only' }),
@@ -404,7 +406,8 @@ test('RED: review+compose-only fails TASK_INTENT_ACCESS_CONFLICT with no compose
   }
 });
 
-test('RED: AGY vNext rejection does not leak compose or dry-run temp directories', async () => {
+test('RED: AGY vNext rejection does not leak compose or dry-run temp directories', async (t) => {
+  isolateTmpdir(t);
   const { generate, describeGenerateDryRun } = await import('../src/client.mjs');
   const prefixes = ['webmcp-ai-agy-compose-', 'webmcp-ai-dryrun-'];
   const snapshot = () => new Set(readdirSync(tmpdir()).filter((name) => prefixes.some((prefix) => name.startsWith(prefix))));

@@ -4,6 +4,42 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Codex native Git diff review (`reviewTarget`) and OpenCode v2 real-fixture
+  verification (R4, canary 2026-09-29):
+  - New optional review-only input `reviewTarget`: exactly one of
+    `{type:"uncommitted"}` / `{type:"base",ref}` / `{type:"commit",sha}`.
+    Codex-only (`UNSUPPORTED_CAPABILITY` on other providers); conflicts with
+    `sessionId` (`TASK_INTENT_ACCESS_CONFLICT`, resume scope is not provable
+    for a native diff review); an empty object/absent value keeps the
+    portable review lane byte-identical. `ref`/`sha` are validated against
+    `^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$` (never a leading `-`, no null
+    bytes) before any spawn. The workspace must be a Git repository (bounded
+    `git rev-parse --show-toplevel` probe; typed `REVIEW_TARGET_NOT_GIT`
+    otherwise). Exposed as `--review-target/--review-base/--review-commit`
+    on `webmcp-ai review` (typed rejection on `generate`/`ai.generate`).
+  - **Real-CLI finding that reshaped the design** (codex-cli 0.157.1):
+    `codex exec review --help` lists `--uncommitted`/`--base`/`--commit`, but
+    the installed binary hard-rejects combining any of them with a custom
+    `[PROMPT]` (clap conflict, exit 2, before any spawn) — including the `-`
+    stdin marker this wrapper needs for the JSON-contract instructions — and
+    even without a custom prompt, that built-in flow ignores
+    `--output-schema` entirely (free prose, never schema-shaped). The
+    adapter therefore never emits `--uncommitted`/`--base`/`--commit` as
+    argv; the diff scope is named in the prompt instead, and the model
+    gathers it itself via read-only `git diff`/`git show` inside
+    `-c sandbox_mode="read-only" -c approval_policy="never"`. Verified
+    end-to-end against the real CLI for both `uncommitted` and `base` scopes.
+  - `src/review-result.mjs` exports `REVIEW_RESULT_JSON_SCHEMA`, a JSON
+    Schema literal for `webmcp-ai-review-result/1`, used as the Codex
+    `--output-schema` file for the reviewTarget lane.
+  - OpenCode v2 JSONL classification/parsing is now proven against real
+    captured fixtures (`tests/fixtures/opencode-v2-jsonl/`) instead of
+    hand-constructed shapes: `text`/`tool_use`/`error` (top-level
+    `{"type":"error","error":{"type":"provider.no-route",...}}`, not
+    `session.error`). `classifyProviderLine` gained a `type === 'error'`
+    branch and no longer lets a bare `sessionID` on a real flat CLI event
+    (text/tool_use/step_start/step_finish/error all carry one) shadow its
+    specific classification.
 - AGY structured output, long-prompt stream-json lane, and two-layer effort
   metadata (canary 2026-09-29, AGY 1.2.13):
   - `agy` provider accepts `request.schema`, adding native

@@ -76,10 +76,15 @@ function classifyJsonEvent(event) {
   if (type === 'session.error') {
     return { state: 'blocked', summary: summarize(event?.error || event?.message || type) };
   }
-  if (type === 'session.created' || type === 'session.idle' || event?.sessionID) {
-    if (!type.startsWith('message.')) {
-      return { state: 'researching', summary: summarize(event?.sessionID ? `session ${event.sessionID}` : type) };
-    }
+  // Grounded shape (opencode v2.0.19, canary 2026-09-29): a routing/provider
+  // failure emits a top-level `{"type":"error","error":{"type":"provider.no-route",...}}`
+  // line rather than `session.error`. Prefer the nested error message/type.
+  if (type === 'error') {
+    const nested = event?.error && typeof event.error === 'object' ? event.error : null;
+    return { state: 'blocked', summary: summarize(nested?.message || nested?.type || event?.message || type) };
+  }
+  if (type === 'session.created' || type === 'session.idle') {
+    return { state: 'researching', summary: summarize(event?.sessionID ? `session ${event.sessionID}` : type) };
   }
   if (partType === 'tool' || type.includes('tool')) {
     const identity = toolIdentity(part) || toolIdentity(event) || summarize(JSON.stringify(event)).slice(0, 80);
@@ -92,6 +97,16 @@ function classifyJsonEvent(event) {
   // legacy `run --format json` text lines the provider parser already reads.
   if (partType === 'text' || partType === 'reasoning' || type === 'text' || type === 'reasoning') {
     return { state: 'researching', summary: summarize(partText(part)) };
+  }
+  // Fallback for a bare/unrecognized event that still carries a sessionID
+  // (e.g. a lone `{sessionID}` heartbeat). Grounded real shapes from
+  // `run --standalone --format json` (canary 2026-09-29 on opencode v2.0.19:
+  // text/tool_use/step_start/step_finish/error) all carry `sessionID` too,
+  // but they are classified by the specific branches above and never reach
+  // here. `message.*` server-event types are excluded because their payload
+  // lives in `part`, already handled above.
+  if (event?.sessionID && !type.startsWith('message.')) {
+    return { state: 'researching', summary: summarize(`session ${event.sessionID}`) };
   }
   if (type) {
     return { state: 'working', summary: summarize(`event ${type}`) };

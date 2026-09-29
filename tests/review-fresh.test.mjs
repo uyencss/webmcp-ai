@@ -10,6 +10,7 @@ import test from 'node:test';
 import { describeReviewDryRun, review } from '../src/review.mjs';
 import { handleToolCall, TOOL_PROTOCOL } from '../src/protocol.mjs';
 import { withV2Db } from './fixtures/opencode-v2-db.mjs';
+import { isolateTmpdir } from './helpers/isolated-tmpdir.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
 
@@ -408,10 +409,11 @@ test('F8: resumed review sets resumed:true; fresh review sets resumed:false', as
 // Scoped observation only: list tmpdir() filtered by the exact provider prefix;
 // never delete unrelated files — only the successful control invocation is
 // cleaned up via its own cleanup().
-test('Codex rejected vNext intents leave no temp directory', async () => {
+test('Codex rejected vNext intents leave no temp directory', async (t) => {
   const { getProvider } = await import('../src/providers/index.mjs');
   const PREFIX = 'webmcp-ai-codex-';
-  const snapshot = () => new Set(readdirSync(tmpdir()).filter((name) => name.startsWith(PREFIX)));
+  const isolatedTmp = isolateTmpdir(t, 'review-fresh-codex-tmpdir-');
+  const snapshot = () => new Set(readdirSync(isolatedTmp).filter((name) => name.startsWith(PREFIX)));
   const before = snapshot();
 
   const rejected = [

@@ -22,7 +22,7 @@ import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 import { validateAgyBoundedSupport } from './providers/agy.mjs';
 import { validateClaudeBoundedSupport, validateClaudeReviewSupport } from './providers/claude.mjs';
-import { validateCodexReviewSupport } from './providers/codex.mjs';
+import { resolveReviewTargetForRequest, validateCodexReviewSupport, validateCodexReviewTargetSupport } from './providers/codex.mjs';
 import {
   assertOpencodeV2DbReady,
   normalizeOpencodeProfile,
@@ -37,6 +37,7 @@ import { createHash } from 'node:crypto';
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const FULL_DEFAULT_MAX_OUTPUT_BYTES = 128 * 1024 * 1024;
+const DEFAULT_PROBE_TIMEOUT_MS = Number.parseInt(process.env.WEBMCP_AI_PROBE_TIMEOUT_MS || '', 10) || 15_000;
 
 // Backward-compat legacy mapping for toolPolicy values
 const TOOL_POLICIES = new Set(['provider-default', 'compose-only']);
@@ -120,6 +121,16 @@ function normalizeRequest(input) {
     taskIntent = resolved.taskIntent;
     effectiveAccessProfile = resolved.accessProfile;
   }
+  // reviewTarget (Codex native Git diff review) is validated before any
+  // capability/workspace work: non-empty target requires taskIntent review,
+  // provider codex, and no sessionId (resume scope is not provable for a
+  // native diff review). An absent/empty-object target resolves to null and
+  // leaves every other provider's portable review lane untouched.
+  const reviewTarget = resolveReviewTargetForRequest(input.reviewTarget ?? null, {
+    providerId: provider.id,
+    sessionId: input.sessionId || null,
+    taskIntent,
+  });
   // Review is a strictly read-only result-contract lane. Reject privileged
   // or write-capable fields before capability canonicalization so an invalid
   // request cannot even inspect/create a workspace-derived capability.
@@ -247,6 +258,7 @@ function normalizeRequest(input) {
       toolPolicy: effectiveToolPolicy,
       accessProfile: capability.accessProfile,
       taskIntent,
+      reviewTarget,
       workspace: capability.workspace,
       allowedReadRoots: capability.allowedReadRoots,
       allowedWriteRoots: capability.allowedWriteRoots,
@@ -276,7 +288,7 @@ async function ensureClaudeReviewSupport({ provider, env }) {
   let helpText = null;
   try {
     const help = await runProcess(command, ['--help'], {
-      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+      env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
     });
     helpText = `${help.stdout}\n${help.stderr}`;
   } catch (error) {
@@ -309,7 +321,7 @@ async function ensureHelpReviewSupport({ provider, env, label, validate, helpArg
   let helpText = null;
   try {
     const help = await runProcess(command, helpArgs, {
-      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+      env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
     });
     helpText = `${help.stdout}\n${help.stderr}`;
   } catch (error) {
@@ -340,7 +352,7 @@ async function ensureAgyBoundedSupport({ provider, env }) {
   let helpText = null;
   try {
     const help = await runProcess(command, ['--help'], {
-      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 256 * 1024,
+      env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
     });
     helpText = `${help.stdout}\n${help.stderr}`;
   } catch (error) {
@@ -359,6 +371,29 @@ async function ensureAgyBoundedSupport({ provider, env }) {
 }
 
 /**
+ * Bounded, read-only Git-repository probe for the Codex native reviewTarget
+ * lane. Runs `git rev-parse --show-toplevel` in the request workspace (no
+ * shell, safe env, 5s bound) before any `exec review` invocation is built.
+ * A missing `git` binary or a non-zero exit (not a repository, or a bare/
+ * corrupt one) both map to the same typed, workspace-path-free rejection:
+ * resume/diff scope against a non-repository is meaningless to Codex's
+ * native reviewer.
+ */
+async function ensureCodexReviewTargetGitRepo({ workspace, env }) {
+  const safeEnv = buildSafeChildEnv(env, {});
+  try {
+    await runProcess('git', ['rev-parse', '--show-toplevel'], {
+      cwd: workspace, env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 64 * 1024,
+    });
+  } catch {
+    throw new AiCliError('REVIEW_TARGET_NOT_GIT', 'reviewTarget requires the workspace to be a Git repository', {
+      exitCode: 2,
+      details: { capability: 'reviewTarget' },
+    });
+  }
+}
+
+/**
  * Bounded `<bin> --version` probe used once per opencode spawn to select the
  * adapter profile (v1 = 1.x argv/config, v2 = 2.x argv/config). Never spawns
  * a model. Missing binary maps to CLI_NOT_INSTALLED; probe failure or an
@@ -369,7 +404,7 @@ async function detectOpencodeProfile({ command, env }) {
   let output = null;
   try {
     const probe = await runProcess(command, ['--version'], {
-      env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 64 * 1024,
+      env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 64 * 1024,
     });
     output = `${probe.stdout}\n${probe.stderr}`;
   } catch (error) {
@@ -519,7 +554,24 @@ export async function generate(input) {
       throw error;
     }
   }
-  if (provider.id === 'codex' && request.taskIntent === 'review') {
+  if (provider.id === 'codex' && request.taskIntent === 'review' && request.reviewTarget) {
+    // Native Git diff review lane: prove the workspace is actually a Git
+    // repository (typed REVIEW_TARGET_NOT_GIT otherwise) and probe the
+    // `exec review --help` capability separately from the portable lane's
+    // `exec --help` probe above — the two subcommands expose different flag
+    // sets (no --sandbox/--color on `exec review`).
+    try {
+      await ensureCodexReviewTargetGitRepo({ workspace, env });
+      await ensureHelpReviewSupport({
+        provider, env, label: 'Codex', helpArgs: ['exec', 'review', '--help'],
+        validate: validateCodexReviewTargetSupport, capability: 'reviewTarget',
+      });
+    } catch (error) {
+      try { invocation.cleanup?.(); } catch {}
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      throw error;
+    }
+  } else if (provider.id === 'codex' && request.taskIntent === 'review') {
     try {
       await ensureHelpReviewSupport({ provider, env, label: 'Codex', helpArgs: ['exec', '--help'], validate: validateCodexReviewSupport });
     } catch (error) {
@@ -843,7 +895,7 @@ export async function probeProviders({ env = process.env } = {}) {
     }
     try {
       const safeEnv = buildSafeChildEnv(env, {});
-      const result = await runProcess(command, ['--version'], { env: safeEnv, timeoutMs: 5_000, maxOutputBytes: 64 * 1024 });
+      const result = await runProcess(command, ['--version'], { env: safeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
       return { ...metadata, command, available: true, version: result.stdout.trim() || result.stderr.trim() || null };
     } catch (error) {
       if (error.code === 'CLI_NOT_INSTALLED') return { ...metadata, command, available: false, version: null };

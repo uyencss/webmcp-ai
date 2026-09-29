@@ -217,12 +217,17 @@ function remoteVersionMatchesPin(output, pin) {
  * Non-throwing variant of probeRemoteClaude for the install manifest: never
  * rejects (a probe or config failure resolves to state 'unreachable' so a
  * `providers install --plan --host m1` never crashes), and `match` requires
- * the probed version to equal `pin`.
+ * the probed version to equal `pin`. `timeoutMs`, when provided, is forwarded
+ * verbatim to probeRemoteClaude (which still fails closed on any transport
+ * error, including timeout, into typed CLAUDE_REMOTE_UNREACHABLE caught
+ * below); omitting it keeps probeRemoteClaude's own default (8000ms).
  */
-export async function readRemoteClaudeState({ hostId, env = process.env, pin } = {}) {
+export async function readRemoteClaudeState({
+  hostId, env = process.env, pin, timeoutMs,
+} = {}) {
   let probe;
   try {
-    probe = await probeRemoteClaude({ hostId, env });
+    probe = await probeRemoteClaude({ hostId, env, timeoutMs });
   } catch (error) {
     if (error?.code === 'CLAUDE_REMOTE_UNREACHABLE' || error?.code === 'CLAUDE_REMOTE_CONFIG_INVALID') {
       return { state: 'unreachable', installedVersion: null, transport: 'ssh' };

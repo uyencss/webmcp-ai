@@ -22,6 +22,40 @@ export const REVIEW_FINDING_SEVERITIES = Object.freeze(['critical', 'high', 'med
 const VERDICT_SET = new Set(REVIEW_VERDICTS);
 const SEVERITY_SET = new Set(REVIEW_FINDING_SEVERITIES);
 
+// JSON Schema literal for the frozen webmcp-ai-review-result/1 contract, used
+// as the Codex `--output-schema` file for the native reviewTarget lane so the
+// model's structured response is constrained at generation time.
+// `validateReviewResult` below stays the authoritative runtime validator
+// (approve-with-actionable-findings, plan-only detection, alias handling);
+// this schema is a generation-time constraint only.
+export const REVIEW_RESULT_JSON_SCHEMA = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  required: ['schema', 'verdict', 'summary'],
+  properties: {
+    schema: { const: REVIEW_RESULT_SCHEMA },
+    verdict: { enum: [...REVIEW_VERDICTS] },
+    summary: { type: 'string', minLength: 1 },
+    blockedReason: { type: 'string', minLength: 1 },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'severity', 'message', 'recommendation'],
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          severity: { enum: [...REVIEW_FINDING_SEVERITIES] },
+          file: { type: 'string', minLength: 1 },
+          line: { type: 'integer', minimum: 1 },
+          message: { type: 'string', minLength: 1 },
+          recommendation: { type: 'string', minLength: 1 },
+        },
+      },
+    },
+  },
+});
+
 function incomplete(message, details) {
   return new AiCliError('REVIEW_RESULT_INCOMPLETE', message, {
     exitCode: 1,
