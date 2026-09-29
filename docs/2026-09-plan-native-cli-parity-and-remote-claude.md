@@ -152,3 +152,16 @@ end-to-end remote Claude model call remains unproven. Live evidence collected:
   (never falls back to a local run).
 
 Raw transcript: `temp/webmcp-ai-native-parity/receipts/R6-live-remote-canary.md`.
+
+### 6.2 Post-pre-accept hardening (R7/R8, 2026-09-29)
+
+Sol pre-accept over `f509063..03c8ec1` returned request-changes with three verified fail-open findings; all three were
+fixed in `91b0cf1` (R7, tests 658→662) and re-reviewed (claude-sonnet: approve):
+- F1 truncation: the remote transport now rejects truncated zero-exit runs with `PROVIDER_OUTPUT_LIMIT`;
+- F2 fingerprints: workspace verification fails closed (`reason: 'unverifiable-fingerprint'`) on null fingerprint
+  inputs instead of matching `null === null`;
+- F3 agy: the single-blob JSON lane requires `status === 'SUCCESS'`.
+
+R8 (`1168f2e`, tests 663) hardens the shared review-result parser (tolerant cosmetic fence/prose unwrapping with
+unchanged semantic validation) and retains a bounded `rawExcerpt` on `REVIEW_RESULT_INCOMPLETE`; acceptance includes
+one real wrapper review call returning approve. Gate record: `temp/webmcp-ai-native-parity/receipts/` (R7/R8 receipts).

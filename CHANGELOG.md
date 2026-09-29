@@ -4,6 +4,19 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Post-accept hardening (R7/R8, 2026-09-29):
+  - **Remote fail-closed fixes (R7)**: `runRemoteClaude` now rejects a zero-exit run whose worker reported truncated
+    stdout/stderr with typed `PROVIDER_OUTPUT_LIMIT` (previously capped output could be reported as success).
+    `verifyRemoteWorkspace` now fails closed with `CLAUDE_REMOTE_WORKSPACE_MISMATCH`
+    (`reason: 'unverifiable-fingerprint'`) when any fingerprint input cannot be computed on either side (untracked
+    file >1 MiB, failed git probe) instead of comparing `null === null` as a match; `.gitignore`d files remain
+    outside the fingerprint (documented). The AGY single-blob JSON lane now requires `status === 'SUCCESS'`,
+    mirroring the stream-json lane's typed `PROVIDER_EXIT_ERROR`.
+  - **Review-result parsing robustness & observability (R8)**: `tryParseJson` tolerates cosmetic wrapping (a single
+    ``` / ```json fence, or a JSON object embedded in surrounding prose) while every semantic validation rule stays
+    equally strict; each `REVIEW_RESULT_INCOMPLETE` raised from model text now carries a bounded `rawExcerpt`
+    (≤2000 chars, control chars normalized) so malformed provider output is diagnosable.
+
 - Remote Claude transport over SSH (R2, opt-in ssh, status `declared; live canary pending`):
   - **Opt-in host routing (`WEBMCP_AI_CLAUDE_HOST=m1`)**: dispatches Claude Code generation and review tasks to an operator-declared remote host over SSH (`mac-pro14`), avoiding developer machine quota exhaustion. Default unset/`local` keeps local execution untouched.
   - **Fail-closed transport & configuration**: config validation strictly rejects shell metacharacters and path traversals with typed `CLAUDE_REMOTE_CONFIG_INVALID` without leaking raw values. SSH failures map to typed `CLAUDE_REMOTE_UNREACHABLE` (never falls back silently to local binary). Remote CLI version drift from `2.1.283` raises `CLAUDE_REMOTE_VERSION_DRIFT`. Worker rejections (exit code 64) map to `CLAUDE_REMOTE_WORKER_ERROR`.
