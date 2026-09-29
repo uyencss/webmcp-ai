@@ -124,9 +124,31 @@ match the manifest.
 | P2-J explicit session fork | done+verified | `06f0c9e` (R5) | claude fork dry-run argv `--resume <session> --fork-session`; codex fork dry-run argv `exec fork -c sandbox_mode="read-only" … <session> -` while real runs fail closed `UNSUPPORTED_CAPABILITY` (`explicitFork: false`, reason in `src/client.mjs:654`); opencode `--session <id> --fork` (`explicitFork: true`); agy → `UNSUPPORTED_CAPABILITY`; review envelope frozen `{ id: null, resumable: false }` |
 | P2-K Claude extras (`--max-budget-usd`, `--bare`, `ultrareview`) | deferred | — | No adapter; per §1 items 5–6 (`--bare` needs a proven API-key lane, no `--continue`/`--last`). Unproven, still reported unsupported — no wrapper claim exists. |
 
-Residual unproven at closure: live remote-Claude run over SSH (host `m1`
-unreachable → `state: unreachable`); live AGY/Codex/OpenCode model canaries
-beyond the recorded 2026-09-29 receipts; operator-local `mac-m1` SSH alias in
-manual-fallback examples (no `Host mac*` entry in local `~/.ssh/config`;
-wrapper's declared alias remains `mac-pro14`, operator-overridable via
-`WEBMCP_AI_CLAUDE_SSH_ALIAS`).
+Residual unproven at closure: live remote-Claude run over SSH (host `m1`:
+declared alias `mac-pro14` unresolvable from the coordinator machine; the
+operator alias `mac-m1` is reachable but the host has no `claude` binary and
+no worker deployment at closure → `state: unreachable` fail-closed); live
+AGY/Codex/OpenCode model canaries beyond the recorded 2026-09-29 receipts;
+operator-local `mac-m1` SSH alias in manual-fallback examples (no `Host mac*`
+entry in local `~/.ssh/config`; wrapper's declared alias remains `mac-pro14`,
+operator-overridable via `WEBMCP_AI_CLAUDE_SSH_ALIAS`).
+
+### 6.1 Post-closure live remote check (2026-09-29, coordinator; after R6 commit `03c8ec1`)
+
+SSH to the operator's M1 (`uyenuyen@mac-m1`, used via `WEBMCP_AI_CLAUDE_SSH_ALIAS`)
+is reachable and the remote worker was deployed
+(`/Users/uyenuyen/.webmcp-ai/claude-remote-worker.mjs`, sha256 identical to
+`scripts/claude-remote-worker.mjs`). The host has **no `claude` binary**, so an
+end-to-end remote Claude model call remains unproven. Live evidence collected:
+
+- live worker selftest over ssh:
+  `{"ok":true,"node":"v24.19.0","claudeBin":"/Users/uyenuyen/.local/bin/claude","claudeVersion":null}`;
+- `providers inspect claude --task-intent review` with host `m1`:
+  `transport: ssh`, `remote.state: unreachable`, `CLAUDE_REMOTE_UNREACHABLE`,
+  `taskReady: false` — typed fail-closed over a real ssh connection;
+- `providers install --read-back --host m1`: claude `state: unreachable`,
+  `transport: ssh` (no local fallback);
+- a real remote `generate` fails closed with `CLAUDE_REMOTE_UNREACHABLE`
+  (never falls back to a local run).
+
+Raw transcript: `temp/webmcp-ai-native-parity/receipts/R6-live-remote-canary.md`.
