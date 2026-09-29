@@ -377,6 +377,94 @@ test('F4: no vNext intent implicitly selects native Plan mode', async () => {
   }
 });
 
+// ---- R8: review-result parse robustness + failure observability ----
+test('R8: tolerant cosmetic unwrapping keeps semantic validation strict + bounded rawExcerpt', async () => {
+  const mod = await import('../src/review-result.mjs');
+  const payload = { schema: 'webmcp-ai-review-result/1', verdict: 'approve', summary: 'looks good' };
+  const strictText = JSON.stringify(payload);
+  // Happy path unchanged: strict strategy, byte-identical result.
+  assert.equal(mod.tryParseJson(strictText).strategy, 'strict');
+  assert.deepEqual(mod.tryParseJson(strictText).value, payload);
+  assert.equal(mod.validateReviewResult(strictText).verdict, 'approve');
+  // Fenced variants (``` and ```json) parse to the same object.
+  for (const fenced of [
+    '```\n' + strictText + '\n```',
+    '```json\n' + strictText + '\n```',
+    '  ```json\n' + strictText + '\n```  ',
+  ]) {
+    const parsed = mod.tryParseJson(fenced);
+    assert.equal(parsed.strategy, 'fenced', fenced.slice(0, 20));
+    assert.deepEqual(parsed.value, payload);
+    assert.equal(mod.validateReviewResult(fenced).verdict, 'approve');
+  }
+  // Preamble + trailing prose parses via first-balanced-object extraction.
+  const prose = 'Here is my review:\n' + strictText + '\nHope that helps.';
+  const emb = mod.tryParseJson(prose);
+  assert.equal(emb.strategy, 'embedded');
+  assert.deepEqual(emb.value, payload);
+  assert.equal(mod.validateReviewResult(prose).verdict, 'approve');
+  // Braces inside strings do not break the scan.
+  const tricky = { ...payload, summary: 'looks } good { indeed' };
+  assert.equal(mod.validateReviewResult('Review: ' + JSON.stringify(tricky) + ' done.').summary, 'looks } good { indeed');
+  // Array-wrapped `[{...}]` still fails.
+  assert.throws(() => mod.validateReviewResult('[' + strictText + ']'), (e) => e.code === 'REVIEW_RESULT_INCOMPLETE');
+  // Garbage still fails malformed-json, now with a present bounded excerpt.
+  try {
+    mod.validateReviewResult('not json at all {{{');
+    assert.fail('must throw');
+  } catch (e) {
+    assert.equal(e.code, 'REVIEW_RESULT_INCOMPLETE');
+    assert.equal(e.details?.reason, 'malformed-json');
+    assert.equal(typeof e.details?.rawExcerpt, 'string');
+    assert.ok(e.details.rawExcerpt.length <= 2000);
+    assert.ok(e.details.rawExcerpt.includes('not json'));
+  }
+  // Schema-mismatch and invalid-verdict failures carry rawExcerpt too.
+  for (const bad of [
+    JSON.stringify({ schema: 'other/9', verdict: 'approve', summary: 'x' }),
+    JSON.stringify({ schema: 'webmcp-ai-review-result/1', verdict: 'maybe', summary: 'x' }),
+  ]) {
+    try {
+      mod.validateReviewResult(bad);
+      assert.fail('must throw: ' + bad);
+    } catch (e) {
+      assert.equal(e.code, 'REVIEW_RESULT_INCOMPLETE');
+      assert.ok(['schema-mismatch', 'invalid-verdict'].includes(e.details?.reason), e.details?.reason);
+      assert.equal(typeof e.details?.rawExcerpt, 'string');
+      assert.ok(e.details.rawExcerpt.length <= 2000);
+    }
+  }
+  // Semantic validation stays strict through cosmetic wrappers.
+  const badVerdictFenced = '```json\n' + JSON.stringify({ schema: 'webmcp-ai-review-result/1', verdict: 'maybe', summary: 'x' }) + '\n```';
+  assert.throws(
+    () => mod.validateReviewResult(badVerdictFenced),
+    (e) => e.code === 'REVIEW_RESULT_INCOMPLETE' && e.details?.reason === 'invalid-verdict' && typeof e.details?.rawExcerpt === 'string',
+  );
+  // Finding failures carry rawExcerpt too.
+  try {
+    mod.validateReviewResult(JSON.stringify({
+      schema: 'webmcp-ai-review-result/1', verdict: 'request-changes', summary: 'x',
+      findings: [{ id: '', severity: 'high', message: 'm', recommendation: 'r' }],
+    }));
+    assert.fail('must throw');
+  } catch (e) {
+    assert.equal(e.code, 'REVIEW_RESULT_INCOMPLETE');
+    assert.equal(typeof e.details?.rawExcerpt, 'string');
+    assert.ok(e.details.rawExcerpt.length <= 2000);
+  }
+  // Bound proof: 5000 chars of garbage -> excerpt is exactly 2000 chars.
+  assert.equal(mod.REVIEW_RAW_EXCERPT_LIMIT, 2000);
+  try {
+    mod.validateReviewResult('y'.repeat(5000));
+    assert.fail('must throw');
+  } catch (e) {
+    assert.equal(e.details?.reason, 'malformed-json');
+    assert.equal(e.details.rawExcerpt.length, 2000);
+  }
+  // Control characters are normalized for safe display.
+  assert.equal(mod.rawExcerpt('a\x00b\x07c').includes('\x00'), false);
+  assert.ok(mod.rawExcerpt('a\x00b\x07c').length <= 2000);
+});
 // ---- legacy compatibility ----
 test('RED: legacy generate, tool-call, agentMode and full stay compatible', async () => {
   const ws = mkdtempSync(join(tmpdir(), 'red-legacy-'));

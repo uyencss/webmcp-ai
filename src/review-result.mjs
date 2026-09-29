@@ -63,14 +63,80 @@ function incomplete(message, details) {
   });
 }
 
-function tryParseJson(text) {
-  const trimmed = String(text ?? '').trim();
-  if (!trimmed) return { ok: false, value: null, trimmed };
-  try {
-    return { ok: true, value: JSON.parse(trimmed), trimmed };
-  } catch {
-    return { ok: false, value: null, trimmed };
+// Bound for the raw model-text excerpt retained on review-result failures.
+// Failures must stay diagnosable without persisting unbounded provider text.
+export const REVIEW_RAW_EXCERPT_LIMIT = 2000;
+
+// Leading slice of model text with control characters normalized for safe
+// display. The replacement is 1:1, so the result never exceeds `limit`.
+export function rawExcerpt(text, limit = REVIEW_RAW_EXCERPT_LIMIT) {
+  return String(text ?? '')
+    .slice(0, limit)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ');
+}
+
+// Parse strategies, tried in order. The strategy flag is informational only:
+// every parsed value still passes the exact same downstream validation.
+export const REVIEW_PARSE_STRATEGIES = Object.freeze(['strict', 'fenced', 'embedded']);
+
+// A single ``` or ```json fence wrapping a JSON value; leading/trailing
+// whitespace around the whole block is allowed.
+const FENCED_JSON_RE = /^```(?:json)?[ \t]*\r?\n?([\s\S]*?)\s*```\s*$/;
+
+// First balanced `{...}` substring, with a string- and escape-aware brace
+// scan. Returns null when there is no balanced object. Never extracts an
+// object nested inside an array literal, so `[{...}]` stays a validation
+// failure instead of silently becoming its first element.
+function firstBalancedObject(text) {
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  if (text.slice(0, start).trimEnd().endsWith('[')) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
   }
+  return null;
+}
+
+export function tryParseJson(text) {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return { ok: false, value: null, trimmed, strategy: 'none' };
+  try {
+    return { ok: true, value: JSON.parse(trimmed), trimmed, strategy: 'strict' };
+  } catch {
+    // Cosmetic wrapping only; semantic validation downstream is unchanged.
+  }
+  const fence = trimmed.match(FENCED_JSON_RE);
+  if (fence) {
+    try {
+      return { ok: true, value: JSON.parse(fence[1].trim()), trimmed, strategy: 'fenced' };
+    } catch {
+      // Fall through to the embedded-object scan.
+    }
+  }
+  const embedded = firstBalancedObject(trimmed);
+  if (embedded) {
+    try {
+      return { ok: true, value: JSON.parse(embedded), trimmed, strategy: 'embedded' };
+    } catch {
+      // Unparseable even after extraction: malformed-json below.
+    }
+  }
+  return { ok: false, value: null, trimmed, strategy: 'none' };
 }
 
 function looksPlanOnly(value) {
@@ -183,78 +249,94 @@ function validateFinding(finding, index) {
  */
 export function validateReviewResult(input) {
   let value = input;
+  // Retain a bounded excerpt of the model text on every failure below so
+  // REVIEW_RESULT_INCOMPLETE stays diagnosable. Object inputs carry no text.
+  const excerpt = typeof input === 'string' ? rawExcerpt(input) : null;
+  const withExcerpt = (details) => (excerpt === null ? details : { ...details, rawExcerpt: excerpt });
   if (typeof input === 'string') {
     const parsed = tryParseJson(input);
     if (!parsed.ok) {
-      throw incomplete('Review result is not valid JSON', {
+      throw incomplete('Review result is not valid JSON', withExcerpt({
         schema: REVIEW_RESULT_SCHEMA,
         reason: 'malformed-json',
-      });
+      }));
     }
     value = parsed.value;
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw incomplete('Review result must be a JSON object', {
+    throw incomplete('Review result must be a JSON object', withExcerpt({
       schema: REVIEW_RESULT_SCHEMA,
       reason: 'malformed-result',
-    });
+    }));
   }
   if (looksPlanOnly(value)) {
-    throw incomplete('Review result is plan-only output without a verdict', {
+    throw incomplete('Review result is plan-only output without a verdict', withExcerpt({
       schema: REVIEW_RESULT_SCHEMA,
       reason: 'plan-only',
-    });
+    }));
   }
   const schema = value.schema;
   if (typeof schema !== 'string' || schema.trim() !== REVIEW_RESULT_SCHEMA) {
     const reason = schema === undefined || schema === null || schema === '' ? 'missing-schema' : 'schema-mismatch';
-    throw incomplete(`Review result schema must be ${REVIEW_RESULT_SCHEMA}`, {
+    throw incomplete(`Review result schema must be ${REVIEW_RESULT_SCHEMA}`, withExcerpt({
       schema: REVIEW_RESULT_SCHEMA,
       reason,
-    });
+    }));
   }
   const verdict = value.verdict;
   if (typeof verdict !== 'string' || !VERDICT_SET.has(verdict.trim())) {
     const reason = verdict === undefined || verdict === null || verdict === '' ? 'missing-verdict' : 'invalid-verdict';
-    throw incomplete(`Review result verdict must be one of ${REVIEW_VERDICTS.join('|')}`, {
+    throw incomplete(`Review result verdict must be one of ${REVIEW_VERDICTS.join('|')}`, withExcerpt({
       schema: REVIEW_RESULT_SCHEMA,
       reason,
-    });
+    }));
   }
   const normalizedVerdict = verdict.trim();
   const summary = value.summary ?? null;
   if (typeof summary !== 'string' || !summary.trim()) {
-    throw incomplete('Review result summary must be a non-empty string', {
+    throw incomplete('Review result summary must be a non-empty string', withExcerpt({
       schema: REVIEW_RESULT_SCHEMA,
       reason: 'missing-summary',
-    });
+    }));
   }
   let blockedReason = null;
   if (normalizedVerdict === 'blocked') {
     blockedReason = value.blockedReason ?? null;
     if (typeof blockedReason !== 'string' || !blockedReason.trim()) {
-      throw incomplete('Review result blocked verdict requires non-empty blockedReason', {
+      throw incomplete('Review result blocked verdict requires non-empty blockedReason', withExcerpt({
         schema: REVIEW_RESULT_SCHEMA,
         reason: 'missing-blockedReason',
-      });
+      }));
     }
     blockedReason = blockedReason.trim();
   }
   let findings = null;
   if (value.findings !== undefined && value.findings !== null) {
     if (!Array.isArray(value.findings)) {
-      throw incomplete('Review result findings must be an array', {
+      throw incomplete('Review result findings must be an array', withExcerpt({
         schema: REVIEW_RESULT_SCHEMA,
         reason: 'malformed-findings',
-      });
+      }));
     }
-    findings = value.findings.map((f, i) => validateFinding(f, i));
+    try {
+      findings = value.findings.map((f, i) => validateFinding(f, i));
+    } catch (error) {
+      if (
+        error?.code === 'REVIEW_RESULT_INCOMPLETE'
+        && excerpt !== null
+        && error.details
+        && !('rawExcerpt' in error.details)
+      ) {
+        error.details = { ...error.details, rawExcerpt: excerpt };
+      }
+      throw error;
+    }
   }
   if (normalizedVerdict === 'approve' && findings && findings.some((f) => f.severity === 'critical' || f.severity === 'high' || f.severity === 'medium')) {
-    throw incomplete('Review result approve must not carry actionable findings (critical/high/medium)', {
+    throw incomplete('Review result approve must not carry actionable findings (critical/high/medium)', withExcerpt({
       schema: REVIEW_RESULT_SCHEMA,
       reason: 'approve-with-actionable-findings',
-    });
+    }));
   }
   return {
     schema: REVIEW_RESULT_SCHEMA,
