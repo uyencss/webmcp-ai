@@ -97,6 +97,7 @@ export const agyProvider = {
     structuredOutput: true,
     stdinPrompt: false,
     explicitResume: true,
+    explicitFork: false,
     modelDiscovery: true,
     toolPolicies: ['provider-default', 'compose-only'],
     printModeGuards: ['--disable-slash-commands'],
@@ -120,6 +121,12 @@ export const agyProvider = {
     },
   },
   buildInvocation(request) {
+    if (request.sessionAction === 'fork') {
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', 'AGY does not support explicit session fork', {
+        exitCode: 2,
+        details: { capability: 'explicitFork' },
+      });
+    }
     // Portable vNext lane: AGY cannot prove preventive deny-write for a
     // review sandbox and has no proven non-Plan reviewer/compose mapping, so
     // every vNext taskIntent fails closed with UNSUPPORTED_CAPABILITY. This

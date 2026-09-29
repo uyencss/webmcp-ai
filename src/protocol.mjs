@@ -18,6 +18,7 @@ const GENERATE_INPUT_SCHEMA = {
     maxOutputBytes: { type: ['number', 'null'] },
     schema: { type: ['object', 'null'] },
     sessionId: { type: ['string', 'null'] },
+    sessionAction: { enum: ['resume', 'fork', null] },
     agentMode: { enum: ['plan', 'accept-edits', null] },
     agent: { type: ['string', 'null'] },
     toolPolicy: { enum: ['provider-default', 'compose-only', null] },
@@ -46,6 +47,7 @@ const REVIEW_INPUT_SCHEMA = {
     timeoutMs: { type: 'number', exclusiveMinimum: 0 },
     maxOutputBytes: { type: ['number', 'null'] },
     sessionId: { type: ['string', 'null'] },
+    sessionAction: { enum: ['resume', 'fork', null] },
     taskIntent: { enum: ['review', null] },
     accessProfile: { enum: ['review-readonly', null] },
     // Codex-only native Git diff review; validated in resolveReviewTargetForRequest.
@@ -89,12 +91,12 @@ export function describeTools() {
 // ergonomic alias that maps to `accessProfile: "full"` (see src/cli.mjs
 // generateInput); the tool-call protocol keeps the explicit canonical form.
 const ALLOWED_INPUT_FIELDS = new Set([
-  'provider', 'prompt', 'model', 'effort', 'opencodeProfile', 'timeoutMs', 'maxOutputBytes', 'schema', 'sessionId', 'agentMode', 'agent', 'toolPolicy',
+  'provider', 'prompt', 'model', 'effort', 'opencodeProfile', 'timeoutMs', 'maxOutputBytes', 'schema', 'sessionId', 'sessionAction', 'agentMode', 'agent', 'toolPolicy',
   'accessProfile', 'taskIntent', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions', 'gatewayCapabilityHandle', 'gatewayHandle', 'mcpConfig',
 ]);
 
 const REVIEW_ALLOWED_INPUT_FIELDS = new Set([
-  'provider', 'prompt', 'model', 'effort', 'opencodeProfile', 'timeoutMs', 'maxOutputBytes', 'sessionId', 'taskIntent',
+  'provider', 'prompt', 'model', 'effort', 'opencodeProfile', 'timeoutMs', 'maxOutputBytes', 'sessionId', 'sessionAction', 'taskIntent',
   'accessProfile', 'reviewTarget', 'workspace', 'allowedReadRoots', 'allowedWriteRoots', 'protectedPaths', 'projectId', 'storeRevisions',
 ]);
 
@@ -146,6 +148,9 @@ export async function handleToolCall(request, options = {}) {
   }
   if (request.input.taskIntent !== undefined && request.input.taskIntent !== null && typeof request.input.taskIntent !== 'string') {
     throw new AiCliError('INVALID_INPUT', 'taskIntent must be a string', { exitCode: 2 });
+  }
+  if (request.input.sessionAction !== undefined && request.input.sessionAction !== null && typeof request.input.sessionAction !== 'string') {
+    throw new AiCliError('INVALID_INPUT', 'sessionAction must be a string', { exitCode: 2, details: { field: 'sessionAction' } });
   }
   // Basic type checks for new fields (detailed canonicalization happens in capabilities)
   if (request.input.accessProfile !== undefined && request.input.accessProfile !== null && typeof request.input.accessProfile !== 'string') {
@@ -223,7 +228,10 @@ export async function handleToolCall(request, options = {}) {
     metadata: {
       provider: result.provider.id,
       model: result.model,
-      ...(result.review ? {} : { sessionId: result.session.id }),
+      ...(result.review ? {} : {
+        sessionId: result.session.id,
+        ...(result.session?.forkedFrom !== undefined ? { forkedFrom: result.session.forkedFrom } : {}),
+      }),
       elapsedMs: result.timing.elapsedMs,
       capability: {
         accessProfile: cap.accessProfile ?? null,

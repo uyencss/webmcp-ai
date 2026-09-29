@@ -354,3 +354,64 @@ test('CLI clogged stderr does not fail --stream and --events', async () => {
     rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test('CLI generate --session-action dry-run and rejections', () => {
+  // Claude fork dry-run
+  const claudeFork = run([
+    'generate', '--provider', 'claude', '--prompt', 'x', '--session-id', 'ses_x',
+    '--session-action', 'fork', '--dry-run', '--json',
+  ]);
+  assert.equal(claudeFork.status, 0, claudeFork.stderr);
+  const claudePayload = JSON.parse(claudeFork.stdout);
+  assert.equal(claudePayload.ok, true);
+  assert.equal(claudePayload.sessionAction, 'fork');
+  assert.equal(claudePayload.sessionId, '<resumed-session>');
+  assert.ok(claudePayload.args.includes('--fork-session'));
+
+  // Codex fork dry-run
+  const codexFork = run([
+    'generate', '--provider', 'codex', '--prompt', 'x', '--session-id', 'abc',
+    '--session-action', 'fork', '--dry-run', '--json',
+  ]);
+  assert.equal(codexFork.status, 0, codexFork.stderr);
+  const codexPayload = JSON.parse(codexFork.stdout);
+  assert.equal(codexPayload.ok, true);
+  assert.equal(codexPayload.sessionAction, 'fork');
+  assert.deepEqual(codexPayload.args.slice(0, 2), ['exec', 'fork']);
+  assert.ok(codexPayload.args.includes('<session>'));
+
+  // OpenCode fork dry-run
+  const opencodeFork = run([
+    'generate', '--provider', 'opencode', '--prompt', 'x', '--session-id', 'ses_x',
+    '--session-action', 'fork', '--dry-run', '--json',
+  ]);
+  assert.equal(opencodeFork.status, 0, opencodeFork.stderr);
+  const opencodePayload = JSON.parse(opencodeFork.stdout);
+  assert.equal(opencodePayload.ok, true);
+  assert.equal(opencodePayload.sessionAction, 'fork');
+  assert.ok(opencodePayload.args.includes('--session'));
+  assert.ok(opencodePayload.args.includes('--fork'));
+
+  // AGY fork rejection (typed UNSUPPORTED_CAPABILITY)
+  const agyFork = run([
+    'generate', '--provider', 'agy', '--prompt', 'x', '--session-id', 'cid',
+    '--session-action', 'fork', '--json',
+  ]);
+  assert.equal(agyFork.status, 2, agyFork.stderr);
+  const agyPayload = JSON.parse(agyFork.stdout);
+  assert.equal(agyPayload.ok, false);
+  assert.equal(agyPayload.error.code, 'UNSUPPORTED_CAPABILITY');
+  assert.equal(agyPayload.error.details?.capability, 'explicitFork');
+
+  // Fork without session-id rejection (typed INVALID_INPUT)
+  const noSessionFork = run([
+    'generate', '--provider', 'claude', '--prompt', 'x',
+    '--session-action', 'fork', '--json',
+  ]);
+  assert.equal(noSessionFork.status, 2, noSessionFork.stderr);
+  const noSessionPayload = JSON.parse(noSessionFork.stdout);
+  assert.equal(noSessionPayload.ok, false);
+  assert.equal(noSessionPayload.error.code, 'INVALID_INPUT');
+  assert.equal(noSessionPayload.error.details?.field, 'sessionAction');
+});
+

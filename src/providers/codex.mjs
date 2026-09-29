@@ -249,6 +249,7 @@ export const codexProvider = {
     structuredOutput: true,
     stdinPrompt: true,
     explicitResume: true,
+    explicitFork: false,
     modelDiscovery: false,
     toolPolicies: ['provider-default', 'compose-only'],
     // Machine-readable mirror of buildInvocation below: Codex has no AGY
@@ -394,9 +395,27 @@ export const codexProvider = {
       ...(request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []),
     ];
 
+    const isReview = taskIntent === 'review';
+    const wantsJson = !isReview && request.eventsRequested === true;
+    const resumeSupportsJson = Boolean(
+      request.codexResumeSupportsJson ||
+      (request.codexResumeHelpText && helpContainsToken(request.codexResumeHelpText, '--json'))
+    );
+    const jsonArgs = wantsJson && (!request.sessionId || resumeSupportsJson) ? ['--json'] : [];
+
+    const isFork = request.sessionId && request.sessionAction === 'fork';
+    if (isFork && request.codexForkHelpText !== undefined && request.codexForkHelpText !== null && !helpContainsToken(request.codexForkHelpText, 'fork')) {
+      throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed Codex CLI lacks fork', {
+        exitCode: 2,
+        details: { capability: 'explicitFork', missing: ['fork'] },
+      });
+    }
+
     const args = request.sessionId
-      ? ['exec', 'resume', '-c', `sandbox_mode="${sandboxMode}"`, ...shared, request.sessionId, '-']
-      : ['exec', '--sandbox', sandboxMode, ...shared, '--color', 'never', '-'];
+      ? (isFork
+          ? ['exec', 'fork', '-c', `sandbox_mode="${sandboxMode}"`, ...shared, ...jsonArgs, request.sessionId, '-']
+          : ['exec', 'resume', '-c', `sandbox_mode="${sandboxMode}"`, ...shared, ...jsonArgs, request.sessionId, '-'])
+      : ['exec', '--sandbox', sandboxMode, ...shared, ...jsonArgs, '--color', 'never', '-'];
 
     return {
       args,

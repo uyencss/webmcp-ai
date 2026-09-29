@@ -51,6 +51,9 @@ not expose a live supervision/control stream. With `--stream` (raw provider
 bytes) and `--events` (one advisory JSON object per line), progress appears
 live on stderr while stdout keeps one JSON envelope; both lanes are advisory
 telemetry only, never control/approval/cancellation/acceptance signals.
+On the Codex generate lane, `--events` activates native `--json` telemetry
+(and on `exec resume` when proved by help); the final answer continues to come from
+`--output-last-message`. The review lane never enables `--json`.
 When supervision needs provider-native events or
 controls, either own the selected installed CLI/server process directly and
 use only its documented interface, or create a Coordination in the runtime.
@@ -72,6 +75,15 @@ For structured output, pass a JSON Schema file with `--schema`. AGY 1.2.13
 supports it natively (`--output-format json --json-schema <file>`, or just
 `--json-schema` on its stream-json lane for a prompt above 128 KiB); opencode
 still does not expose structured output.
+
+### Session Resume & Fork (`sessionAction`)
+
+`generate` and `review` accept `--session-id <id>` with `--session-action <resume|fork>` (default: `resume`):
+- `resume`: resumes the target session thread.
+- `fork`: forks into an independent session on supported providers (`claude` via `--fork-session`, `opencode` via `--fork`). The resulting `generate` envelope carries `session: { id: <new_id>, resumable: true, forkedFrom: <source_id> }`.
+- `sessionAction` requires `sessionId`; passing `sessionAction` without `sessionId` fails with typed `INVALID_INPUT`.
+- On `agy` and `codex` (unproven within call budget), fork requests fail closed with typed `UNSUPPORTED_CAPABILITY` (never silently degrading to resume).
+- `review` retains the frozen `{ id: null, resumable: false }` envelope.
 
 For pure composition before browser/payment/publish actions, pass
 `toolPolicy: "compose-only"` in JSON input or `--tool-policy compose-only`.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import test from 'node:test';
 
 import { generate } from '../src/client.mjs';
 import {
+  classifyCodexEvent,
   classifyProviderLine,
   createLineSplitter,
   EVENT_STATES,
@@ -284,3 +285,104 @@ test('generate tolerates a throwing onEvent observer', async () => {
     rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test('classifyCodexEvent maps representative codex event shapes', () => {
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'thread.started', thread_id: 'th_123' }),
+    { state: 'researching', summary: 'thread th_123' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'thread.started' }),
+    { state: 'researching', summary: 'thread started' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'turn.started' }),
+    { state: 'working', summary: 'turn started' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'turn.completed', usage: {} }),
+    { state: 'verifying', summary: 'turn completed' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'turn.failed', error: 'context overflow' }),
+    { state: 'blocked', summary: 'context overflow' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.completed', item: { type: 'agent_message', text: 'HELLO WORLD' } }),
+    { state: 'researching', summary: 'HELLO WORLD' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.started', item: { type: 'reasoning', text: 'thinking step' } }),
+    { state: 'researching', summary: 'thinking step' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.completed', item: { type: 'command_execution', command: 'npm test -- --bail' } }),
+    { state: 'testing', summary: 'command: npm test -- --bail' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.completed', item: { type: 'command_execution', command: 'git status' } }),
+    { state: 'editing', summary: 'command: git status' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.completed', item: { type: 'file_change', path: 'src/events.mjs' } }),
+    { state: 'editing', summary: 'src/events.mjs' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.completed', item: { type: 'todo_list' } }),
+    { state: 'working', summary: 'todo list' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.completed', item: { type: 'error', message: 'disk full' } }),
+    { state: 'blocked', summary: 'disk full' },
+  );
+  assert.deepEqual(
+    classifyCodexEvent({ type: 'item.completed', item: { type: 'command_execution', command: 'foo', status: 'failed' } }),
+    { state: 'blocked', summary: 'item failed' },
+  );
+});
+
+test('classifyProviderLine routes codex JSON lines to codex classifier and text to text classifier', () => {
+  const line = JSON.stringify({ type: 'thread.started', thread_id: '01a0ebfe-ed37-7780-a546-d6e7fa9a95b1' });
+  assert.deepEqual(
+    classifyProviderLine('codex', line),
+    { state: 'researching', summary: 'thread 01a0ebfe-ed37-7780-a546-d6e7fa9a95b1' },
+  );
+  const textLine = classifyProviderLine('codex', 'All tests passed');
+  assert.equal(textLine.state, 'verifying');
+});
+
+test('codex fixture generate.jsonl lines classify to valid states', () => {
+  const fixturePath = fileURLToPath(new URL('./fixtures/codex-jsonl/generate.jsonl', import.meta.url));
+  const raw = readFileSync(fixturePath, 'utf8');
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  assert.equal(lines.length, 4);
+  const states = [];
+  for (const line of lines) {
+    const classified = classifyProviderLine('codex', line);
+    assert.ok(classified, `Line failed to classify: ${line}`);
+    assert.ok(EVENT_STATES.has(classified.state), `State not in EVENT_STATES: ${classified.state}`);
+    states.push(classified.state);
+  }
+  assert.deepEqual(states, ['researching', 'working', 'researching', 'verifying']);
+});
+
+test('codex synthetic defensive shapes classify to valid states', () => {
+  const fixturePath = fileURLToPath(new URL('./fixtures/codex-jsonl/generate.synthetic.jsonl', import.meta.url));
+  const raw = readFileSync(fixturePath, 'utf8');
+  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0 && !l.trim().startsWith('#') && !l.trim().startsWith('//'));
+  assert.equal(lines.length, 5);
+  const states = [];
+  for (const line of lines) {
+    const classified = classifyProviderLine('codex', line);
+    assert.ok(classified, `Line failed to classify: ${line}`);
+    assert.ok(EVENT_STATES.has(classified.state), `State not in EVENT_STATES: ${classified.state}`);
+    states.push(classified.state);
+  }
+  assert.deepEqual(states, ['researching', 'testing', 'editing', 'editing', 'working']);
+  assert.ok(states.includes('researching'));
+  assert.ok(states.includes('testing'));
+  assert.ok(states.includes('editing'));
+  assert.ok(states.includes('working'));
+});
+
+

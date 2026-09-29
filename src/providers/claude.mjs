@@ -96,6 +96,7 @@ export const claudeProvider = {
     structuredOutput: true,
     stdinPrompt: true,
     explicitResume: true,
+    explicitFork: true,
     modelDiscovery: false,
     toolPolicies: ['provider-default'],
     printModeGuards: ['--disable-slash-commands'],
@@ -130,6 +131,14 @@ export const claudeProvider = {
       throw new AiCliError('UNSUPPORTED_CAPABILITY', 'Claude does not support AGY custom agents', {
         exitCode: 2,
       });
+    }
+    if (request.sessionAction === 'fork') {
+      if (request.claudeHelpText !== undefined && request.claudeHelpText !== null && !helpContainsToken(request.claudeHelpText, '--fork-session')) {
+        throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed Claude CLI lacks --fork-session', {
+          exitCode: 2,
+          details: { capability: 'explicitFork', missing: ['--fork-session'] },
+        });
+      }
     }
     // Portable vNext intents. No vNext intent selects provider Plan mode
     // (Claude has none). `plan` is uniformly rejected until a separate
@@ -170,6 +179,10 @@ export const claudeProvider = {
       }
       // Fall through to full passthrough below.
     }
+    const sessionArgs = request.sessionId
+      ? (request.sessionAction === 'fork' ? ['--resume', request.sessionId, '--fork-session'] : ['--resume', request.sessionId])
+      : ['--no-session-persistence'];
+
     // Portable reviewer lane (taskIntent review only): the live spawn lane
     // (generate with taskIntent review, covering review()/ai.review/CLI
     // review) version-probes `claude --help` before spawn via
@@ -213,7 +226,7 @@ export const claudeProvider = {
         '--disable-slash-commands',
         '--permission-prompts', CLAUDE_REVIEW_ARGS.permissionPrompts,
         ...(wantsEvents ? ['--output-format', 'stream-json', '--verbose'] : ['--output-format', 'json']),
-        ...(request.sessionId ? ['--resume', request.sessionId] : ['--no-session-persistence']),
+        ...sessionArgs,
         ...(request.model ? ['--model', request.model] : []),
         ...(request.effort ? ['--effort', request.effort] : []),
         ...(request.schema ? ['--json-schema', JSON.stringify(request.schema)] : []),
@@ -231,7 +244,7 @@ export const claudeProvider = {
       ...(!isFull ? ['--disable-slash-commands'] : []),
       '--no-chrome',
       ...(wantsStream ? ['--output-format', 'stream-json', '--verbose'] : ['--output-format', 'json']),
-      ...(request.sessionId ? ['--resume', request.sessionId] : ['--no-session-persistence']),
+      ...sessionArgs,
       ...(request.model ? ['--model', request.model] : []),
       ...(request.effort ? ['--effort', request.effort] : []),
       ...(request.schema ? ['--json-schema', JSON.stringify(request.schema)] : []),

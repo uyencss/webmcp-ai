@@ -352,7 +352,18 @@ generic exits remain distinct failure classes.
   v1 binaries and explicit v1 overrides are refused with `PROVIDER_CAPABILITY_DRIFT`.
 - `compose-only`: empty temporary workspace; no task MCP/browser bridge or
   writable project data.
-- Resume requires an explicit session ID. There is no implicit “last session”.
+- Resume and explicit session fork require an explicit session ID (`--session-id <id>`).
+  There is no implicit “last session”. `sessionAction` defaults to `resume`;
+  specifying `fork` (`--session-action fork`) forks the session natively on
+  supported providers (`claude` via `--fork-session`, `opencode` via `--fork`),
+  returning `session: { id, resumable, forkedFrom }`. On `agy` and `codex` (unproven
+  within call budget), fork requests fail closed with typed `UNSUPPORTED_CAPABILITY`
+  rather than degrading silently to resume.
+- Review lane keeps the frozen `{ id: null, resumable: false }` envelope (no session
+  id or `forkedFrom` leakage).
+- Live progress events (`--events`) emit advisory JSON on stderr. On the Codex
+  generate lane, events enable native JSONL (`--json`); the final answer is always
+  read from `--output-last-message`. Review lane never enables `--json`.
 
 Override provider binaries with `AGY_BIN`, `CLAUDE_BIN`, `CODEX_BIN`, or
 `OPENCODE_BIN`.

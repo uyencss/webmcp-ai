@@ -423,6 +423,7 @@ export const opencodeProvider = {
     // line. Stdin prompts work on v2; no capability flip needed.
     stdinPrompt: true,
     explicitResume: true,
+    explicitFork: true,
     modelDiscovery: true,
     toolPolicies: ['provider-default', 'compose-only'],
     // Machine-readable mirror of buildVNextReviewInvocation below: legacy
@@ -480,6 +481,15 @@ export const opencodeProvider = {
       });
     }
 
+    if (request.sessionAction === 'fork') {
+      if (request.opencodeHelpText !== undefined && request.opencodeHelpText !== null && !helpContainsToken(request.opencodeHelpText, '--fork')) {
+        throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed opencode CLI lacks --fork', {
+          exitCode: 2,
+          details: { capability: 'explicitFork', missing: ['--fork'] },
+        });
+      }
+    }
+
     // Full passthrough (opt-in via --full, opencode only): behave like the
     // native CLI. No generated OPENCODE_CONFIG_CONTENT, no XDG isolation, no
     // mcp/plugin wipe — ambient operator config, tools, MCP, and web access
@@ -495,7 +505,10 @@ export const opencodeProvider = {
         ...(fullAuto ? ['--auto'] : []),
       ];
       pushModelEffortArgs(fullArgs, request);
-      if (request.sessionId) fullArgs.push('--session', request.sessionId);
+      if (request.sessionId) {
+        fullArgs.push('--session', request.sessionId);
+        if (request.sessionAction === 'fork') fullArgs.push('--fork');
+      }
       return {
         args: fullArgs,
         stdin: request.prompt,
@@ -543,7 +556,10 @@ export const opencodeProvider = {
       ...(auto ? ['--auto'] : []),
     ];
     pushModelEffortArgs(args, request);
-    if (request.sessionId) args.push('--session', request.sessionId);
+    if (request.sessionId) {
+      args.push('--session', request.sessionId);
+      if (request.sessionAction === 'fork') args.push('--fork');
+    }
 
     const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, 'v2');
     return {
@@ -589,6 +605,14 @@ function buildVNextReviewInvocation(request, taskIntent) {
       exitCode: 2,
       details: { taskIntent },
     });
+  }
+  if (request.sessionAction === 'fork') {
+    if (request.opencodeHelpText !== undefined && request.opencodeHelpText !== null && !helpContainsToken(request.opencodeHelpText, '--fork')) {
+      throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed opencode CLI lacks --fork', {
+        exitCode: 2,
+        details: { capability: 'explicitFork', missing: ['--fork'] },
+      });
+    }
   }
   // Review tool supports ONLY taskIntent review with review-readonly.
   // plan needs a separate plan-result contract; compose/implement are
@@ -637,7 +661,10 @@ function buildVNextReviewInvocation(request, taskIntent) {
       '--format', 'json', '--agent', agentName,
     ];
     pushModelEffortArgs(args, request);
-    if (request.sessionId) args.push('--session', request.sessionId);
+    if (request.sessionId) {
+      args.push('--session', request.sessionId);
+      if (request.sessionAction === 'fork') args.push('--fork');
+    }
     const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, 'v2');
     return {
       args,
@@ -663,7 +690,10 @@ function buildVNextReviewInvocation(request, taskIntent) {
         ...(fullAuto ? ['--auto'] : []),
       ];
       pushModelEffortArgs(fullArgs, request);
-      if (request.sessionId) fullArgs.push('--session', request.sessionId);
+      if (request.sessionId) {
+        fullArgs.push('--session', request.sessionId);
+        if (request.sessionAction === 'fork') fullArgs.push('--fork');
+      }
       return {
         args: fullArgs,
         stdin: request.prompt,
@@ -687,7 +717,10 @@ function buildVNextReviewInvocation(request, taskIntent) {
       '--format', 'json', '--agent', agentName, '--auto',
     ];
     pushModelEffortArgs(args, request);
-    if (request.sessionId) args.push('--session', request.sessionId);
+    if (request.sessionId) {
+      args.push('--session', request.sessionId);
+      if (request.sessionAction === 'fork') args.push('--fork');
+    }
     const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, 'v2');
     return {
       args,
@@ -734,7 +767,10 @@ function buildVNextReviewInvocation(request, taskIntent) {
       '--format', 'json', '--agent', 'build',
     ];
     pushModelEffortArgs(args, request);
-    if (request.sessionId) args.push('--session', request.sessionId);
+    if (request.sessionId) {
+      args.push('--session', request.sessionId);
+      if (request.sessionAction === 'fork') args.push('--fork');
+    }
     const { env: isolatedEnv, cleanup } = createIsolatedOpencodeRuntime(request, baseConfig, 'v2');
     return {
       args,

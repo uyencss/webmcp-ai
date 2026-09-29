@@ -35,8 +35,10 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
     --output-last-message "/path/to/response.md" \
     - < "/path/to/prompt.txt" > /path/to/events.jsonl 2> /path/to/stderr.log
   ```
-- **Quy tắc trích xuất**:
+- **Quy tắc trích xuất & Telemetry / Fork (R5)**:
   - Nội dung phản hồi hoàn chỉnh của model được lưu trực tiếp vào file chỉ định tại `--output-last-message`.
+  - Cờ `--json` xuất native stream telemetry JSONL (`thread.started`, `turn.started`, `item.completed`, `turn.completed`).
+  - Lệnh fork session: `codex exec fork [OPTIONS] <SESSION_ID> -`.
   - Stdout in stream telemetry JSONL; stderr chứa log chẩn đoán.
 
 ---
@@ -56,6 +58,8 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 - **Quy tắc trích xuất**:
   - Đọc trường `.result` từ file `out.json`.
   - Nếu `is_error: true`, đọc mã lỗi tại `.subtype`.
+- **Session Fork (R5)**:
+  - `claude --resume <SESSION_ID> --fork-session` phân nhánh session mới, output mang `session_id` mới.
 
 ---
 
@@ -78,6 +82,8 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 - **Lưu ý Database & Subscription**:
   - OpenCode v2 quản lý subscription và credentials trong bảng `credential` của database `~/.local/share/opencode/opencode.db`.
   - Khi chạy native, luôn để CLI tự kết nối database mặc định, không override biến `OPENCODE_DB` trừ khi đã đồng bộ bảng `credential`.
+- **Session Fork (R5)**:
+  - `opencode run --standalone --session <SESSION_ID> --fork` phân nhánh session mới, output mang `sessionID` mới.
 
 ---
 
@@ -85,7 +91,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 - **Đường dẫn binary**:
   - `/Users/ttcenter/Desktop/VIBE_CODE/webmcp-automation-kit/packages/webmcp-ai-cli/bin/webmcp-ai.mjs`
   - Hoặc alias toàn cục: `webmcp-ai`
-- **Mẫu lệnh 1-Shot**:
+- **Mẫu lệnh 1-Shot & Session Fork**:
   ```bash
   # 1. Gọi DeepSeek qua OpenCode:
   node "$AI_CLI" generate \
@@ -96,7 +102,15 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
     --agent-mode plan \
     --json > out.json
 
-  # 2. Gọi Codex qua wrapper:
+  # 2. Fork một session hiện có trên Claude:
+  node "$AI_CLI" generate \
+    --provider claude \
+    --session-id "source-session-id" \
+    --session-action fork \
+    --prompt "Tiếp tục công việc trên nhánh mới" \
+    --json > out.json
+
+  # 3. Gọi Codex qua wrapper:
   node "$AI_CLI" generate \
     --provider codex \
     --model gpt-6-sol \
@@ -104,7 +118,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
     --prompt-file "/path/to/prompt.txt" \
     --json > out.json
 
-  # 3. Gọi Gemini Flash qua AGY:
+  # 4. Gọi Gemini Flash qua AGY:
   node "$AI_CLI" generate \
     --provider agy \
     --model gemini-3.8-flash-high \
@@ -114,7 +128,8 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
   ```
 - **Quy tắc trích xuất**:
   - Kiểm tra `ok: true` $\rightarrow$ lấy nội dung tại `response.text`.
-  - Nếu `ok: false` $\rightarrow$ đọc mã lỗi tại `error.code` (ví dụ: `PROVIDER_AUTH_FAILED`, `PROVIDER_NO_ROUTE`, `RATE_LIMIT_EXCEEDED`).
+  - Nếu fork thành công, `session` chứa `{ id, resumable: true, forkedFrom }`.
+  - Nếu `ok: false` $\rightarrow$ đọc mã lỗi tại `error.code` (ví dụ: `PROVIDER_AUTH_FAILED`, `PROVIDER_NO_ROUTE`, `RATE_LIMIT_EXCEEDED`, `UNSUPPORTED_CAPABILITY`).
 
 ---
 

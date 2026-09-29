@@ -1,0 +1,6 @@
+# DEFENSIVE: Synthetic shapes for documented-but-unobserved Codex events (not observed on 0.157.1)
+{"type":"item.started","item":{"id":"item_1","type":"reasoning","text":"Analyzing the request"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"npm test","status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"cat package.json","status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"file_change","path":"src/events.mjs"}}
+{"type":"item.completed","item":{"id":"item_5","type":"todo_list"}}

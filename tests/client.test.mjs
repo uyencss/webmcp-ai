@@ -420,3 +420,151 @@ test('generate maps a non-SUCCESS AGY stream-json result status to a typed failu
       && error.details.provider === 'agy' && error.details.status === 'FAILED',
   );
 });
+
+test('generate validates sessionAction contract', async () => {
+  // sessionAction without sessionId fails with typed INVALID_INPUT
+  await assert.rejects(
+    generate({
+      provider: 'claude',
+      prompt: 'hello',
+      sessionAction: 'fork',
+      env: { ...process.env, CLAUDE_BIN: fakeBin },
+    }),
+    (error) => error.code === 'INVALID_INPUT' && error.details?.field === 'sessionAction',
+  );
+
+  // Unknown sessionAction value fails with typed INVALID_INPUT
+  await assert.rejects(
+    generate({
+      provider: 'claude',
+      prompt: 'hello',
+      sessionId: 'ses_1',
+      sessionAction: 'branch',
+      env: { ...process.env, CLAUDE_BIN: fakeBin },
+    }),
+    (error) => error.code === 'INVALID_INPUT' && error.details?.field === 'sessionAction',
+  );
+
+  // Non-string sessionAction fails with typed INVALID_INPUT
+  await assert.rejects(
+    generate({
+      provider: 'claude',
+      prompt: 'hello',
+      sessionId: 'ses_1',
+      sessionAction: 123,
+      env: { ...process.env, CLAUDE_BIN: fakeBin },
+    }),
+    (error) => error.code === 'INVALID_INPUT' && error.details?.field === 'sessionAction',
+  );
+});
+
+test('generate dry-run exposes sessionAction and redacts session IDs for fork', () => {
+  const ws = mkdtempSync(join(tmpdir(), 'gen-dry-fork-'));
+  try {
+    const previewFork = describeGenerateDryRun({
+      provider: 'claude',
+      prompt: 'preview',
+      workspace: ws,
+      sessionId: 'ses_private_123',
+      sessionAction: 'fork',
+      env: {},
+    });
+    assert.equal(previewFork.sessionAction, 'fork');
+    assert.equal(previewFork.sessionId, '<resumed-session>');
+    assert.ok(previewFork.args.includes('--resume'));
+    assert.ok(previewFork.args.includes('<session>'));
+    assert.ok(previewFork.args.includes('--fork-session'));
+    assert.equal(JSON.stringify(previewFork).includes('ses_private_123'), false);
+
+    const previewCodexFork = describeGenerateDryRun({
+      provider: 'codex',
+      prompt: 'preview',
+      workspace: ws,
+      sessionId: 'ses_private_456',
+      sessionAction: 'fork',
+      env: {},
+    });
+    assert.equal(previewCodexFork.sessionAction, 'fork');
+    assert.deepEqual(previewCodexFork.args.slice(0, 2), ['exec', 'fork']);
+    assert.ok(previewCodexFork.args.includes('<session>'));
+    assert.equal(JSON.stringify(previewCodexFork).includes('ses_private_456'), false);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('generate with Claude fork populates forkedFrom envelope', async () => {
+  const result = await generate({
+    provider: 'claude',
+    prompt: 'hello',
+    sessionId: 'source_ses_1',
+    sessionAction: 'fork',
+    env: { ...process.env, CLAUDE_BIN: fakeBin, FAKE_PROVIDER: 'claude' },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.session.id, 'claude-forked-session');
+  assert.equal(result.session.resumable, true);
+  assert.equal(result.session.forkedFrom, 'source_ses_1');
+});
+
+test('generate with Claude resume does not populate forkedFrom envelope', async () => {
+  const result = await generate({
+    provider: 'claude',
+    prompt: 'hello',
+    sessionId: 'source_ses_2',
+    sessionAction: 'resume',
+    env: { ...process.env, CLAUDE_BIN: fakeBin, FAKE_PROVIDER: 'claude' },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.session.id, 'claude-resumed-session');
+  assert.equal(result.session.resumable, true);
+  assert.equal(result.session.forkedFrom, undefined);
+});
+
+test('generate with OpenCode fork populates forkedFrom envelope', async () => {
+  const ws = mkdtempSync(join(tmpdir(), 'gen-opencode-fork-'));
+  try {
+    const result = await generate({
+      provider: 'opencode',
+      prompt: 'hello',
+      sessionId: 'ses_opencode_source',
+      sessionAction: 'fork',
+      workspace: ws,
+      accessProfile: 'full',
+      env: withV2Db({ ...process.env, OPENCODE_BIN: fakeBin, FAKE_PROVIDER: 'opencode' }),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.session.id, 'opencode-forked-session');
+    assert.equal(result.session.resumable, true);
+    assert.equal(result.session.forkedFrom, 'ses_opencode_source');
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test('generate with Codex fork fails closed with typed UNSUPPORTED_CAPABILITY', async () => {
+  await assert.rejects(
+    generate({
+      provider: 'codex',
+      prompt: 'hello',
+      sessionId: 'source_codex_1',
+      sessionAction: 'fork',
+      env: { ...process.env, CODEX_BIN: fakeBin, FAKE_PROVIDER: 'codex' },
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY' && error.details?.capability === 'explicitFork',
+  );
+});
+
+test('generate with AGY fork fails closed with typed UNSUPPORTED_CAPABILITY', async () => {
+  await assert.rejects(
+    generate({
+      provider: 'agy',
+      prompt: 'hello',
+      sessionId: 'source_agy_1',
+      sessionAction: 'fork',
+      env: { ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy' },
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY' && error.details?.capability === 'explicitFork',
+  );
+});
+

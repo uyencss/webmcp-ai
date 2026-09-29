@@ -397,3 +397,57 @@ test('RED: legacy generate, tool-call, agentMode and full stay compatible', asyn
     rmSync(ws, { recursive: true, force: true });
   }
 });
+
+test('protocol and review lane sessionAction contract', async () => {
+  const tools = describeTools();
+  const genTool = tools.tools.find((t) => t.id === 'ai.generate');
+  const revTool = tools.tools.find((t) => t.id === 'ai.review');
+  assert.ok(genTool.inputSchema.properties.sessionAction);
+  assert.deepEqual(genTool.inputSchema.properties.sessionAction.enum, ['resume', 'fork', null]);
+  assert.ok(revTool.inputSchema.properties.sessionAction);
+  assert.deepEqual(revTool.inputSchema.properties.sessionAction.enum, ['resume', 'fork', null]);
+
+  // handleToolCall validates sessionAction
+  const env = { ...process.env, CLAUDE_BIN: fakeBin, FAKE_PROVIDER: 'claude' };
+  await assert.rejects(
+    handleToolCall({
+      protocol: TOOL_PROTOCOL,
+      requestId: 'req-sa-1',
+      tool: 'ai.generate',
+      input: { provider: 'claude', prompt: 'hi', sessionAction: 'fork' },
+    }, { env }),
+    (error) => error.code === 'INVALID_INPUT' && error.details?.field === 'sessionAction',
+  );
+
+  // handleToolCall for fork populates metadata.forkedFrom
+  const forkToolRes = await handleToolCall({
+    protocol: TOOL_PROTOCOL,
+    requestId: 'req-sa-2',
+    tool: 'ai.generate',
+    input: { provider: 'claude', prompt: 'hi', sessionId: 'source_1', sessionAction: 'fork' },
+  }, { env });
+  assert.equal(forkToolRes.ok, true);
+  assert.equal(forkToolRes.metadata.sessionId, 'claude-forked-session');
+  assert.equal(forkToolRes.metadata.forkedFrom, 'source_1');
+
+  // review lane retains frozen { id: null, resumable: false } envelope even with sessionAction: 'fork'
+  const { review } = await import('../src/review.mjs');
+  const validVerdictJson = JSON.stringify({
+    schema: 'webmcp-ai-review-result/1',
+    verdict: 'approve',
+    summary: 'Looks good',
+  });
+  const reviewEnv = { ...process.env, CLAUDE_BIN: fakeBin, FAKE_PROVIDER: 'claude', FAKE_REPLY: validVerdictJson };
+  const revResult = await review({
+    provider: 'claude',
+    prompt: 'review this',
+    sessionId: 'rev_source_1',
+    sessionAction: 'fork',
+    env: reviewEnv,
+  });
+  assert.equal(revResult.ok, true);
+  assert.deepEqual(revResult.session, { id: null, resumable: false });
+  assert.equal(revResult.resumed, true);
+  assert.equal(revResult.session?.forkedFrom, undefined);
+});
+

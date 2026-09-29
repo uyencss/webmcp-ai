@@ -174,6 +174,7 @@ Generate options:
   --opencode-profile <v1|v2>  Explicit OpenCode adapter profile (dry-run; no binary probe)
   --schema <path>         JSON Schema for structured output
   --session-id <id>       Resume only this explicit provider session
+  --session-action <resume|fork>  Session resume or fork action (requires --session-id; default: resume)
   --agent-mode <mode>     (Deprecated: prefer --task-intent) AGY/opencode only: plan (default) or accept-edits
   --agent <name>          AGY/opencode only: select a discovered custom agent
   --tool-policy <policy>  provider-default (default) or compose-only (legacy)
@@ -210,6 +211,7 @@ Review options (portable one-shot reviewer; reuses the ai.review resolver; read-
   --effort <level>        Provider reasoning/effort override
   --opencode-profile <v1|v2>  Explicit OpenCode adapter profile for preview/dispatch
   --session-id <id>       Resume only this explicit provider session (resumed results set resumed:true and are not fresh final-auditor evidence; omit for a fresh audit)
+  --session-action <resume|fork>  Session resume or fork action (requires --session-id; default: resume)
   --workspace <path>      Trusted working directory for the provider (defaults to cwd for compatibility; read-only, never written; prefer explicit)
   --allowed-read-root <path>   Repeatable: additional readable root (absolute)
   --protected-path <path>      Repeatable: protected path inside workspace
@@ -370,6 +372,7 @@ function generateInput(options) {
     opencodeProfile: options['opencode-profile'] ?? fromJson.opencodeProfile,
     schema,
     sessionId: options['session-id'] ?? fromJson.sessionId,
+    sessionAction: options['session-action'] ?? fromJson.sessionAction,
     agentMode: options['agent-mode'] ?? fromJson.agentMode,
     agent: options.agent ?? fromJson.agent,
     toolPolicy: options['tool-policy'] ?? fromJson.toolPolicy,
@@ -473,6 +476,7 @@ function reviewInput(options) {
     effort: options.effort ?? fromJson.effort,
     opencodeProfile: options['opencode-profile'] ?? fromJson.opencodeProfile,
     sessionId: options['session-id'] ?? fromJson.sessionId,
+    sessionAction: options['session-action'] ?? fromJson.sessionAction,
     taskIntent: options['task-intent'] ?? fromJson.taskIntent,
     accessProfile: options['access-profile'] ?? fromJson.accessProfile,
     reviewTarget: reviewTargetFromOptions(options, fromJson),

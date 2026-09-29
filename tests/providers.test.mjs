@@ -498,3 +498,145 @@ test('Claude and Codex include optional structured-output and resume flags', () 
   assert.ok(codex.args.includes('model_reasoning_effort="high"'));
   codex.cleanup();
 });
+
+test('Codex adds --json on fresh path when eventsRequested is true, and omits it otherwise', () => {
+  const withEvents = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, eventsRequested: true,
+  });
+  assert.ok(withEvents.args.includes('--json'));
+  withEvents.cleanup();
+
+  const noEvents = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, eventsRequested: false,
+  });
+  assert.equal(noEvents.args.includes('--json'), false);
+  noEvents.cleanup();
+});
+
+test('Codex resume path adds --json only when subcommand help proves --json', () => {
+  const provenResume = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, sessionId: 'ses-1', eventsRequested: true,
+    codexResumeSupportsJson: true,
+  });
+  assert.ok(provenResume.args.includes('--json'));
+  provenResume.cleanup();
+
+  const unprovenResume = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, sessionId: 'ses-1', eventsRequested: true,
+    codexResumeSupportsJson: false,
+  });
+  assert.equal(unprovenResume.args.includes('--json'), false);
+  unprovenResume.cleanup();
+});
+
+test('Codex review lane never enables --json even when eventsRequested', () => {
+  const reviewFresh = getProvider('codex').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, taskIntent: 'review', eventsRequested: true,
+  });
+  assert.equal(reviewFresh.args.includes('--json'), false);
+  reviewFresh.cleanup();
+});
+
+test('Codex parseOutput regression: JSONL on stdout does not affect parsed answer from output file', () => {
+  const jsonlStdout = [
+    '{"type":"thread.started","thread_id":"01a0ebfe-ed37-7780-a546-d6e7fa9a95b1"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"HELLO"}}',
+    '{"type":"turn.completed"}',
+  ].join('\n');
+
+  const invocation = {
+    readOutput: () => 'The final verified answer from output file',
+  };
+
+  const parsed = getProvider('codex').parseOutput({
+    stdout: jsonlStdout,
+    invocation,
+  });
+
+  assert.equal(parsed.text, 'The final verified answer from output file');
+  assert.equal(parsed.structured, null);
+});
+
+test('providers declare truthful explicitFork capability flags', () => {
+  assert.equal(getProvider('claude').capabilities?.explicitFork, true);
+  assert.equal(getProvider('opencode').capabilities?.explicitFork, true);
+  assert.equal(getProvider('codex').capabilities?.explicitFork, false);
+  assert.equal(getProvider('agy').capabilities?.explicitFork, false);
+});
+
+test('Claude buildInvocation maps sessionAction fork to --resume and --fork-session', () => {
+  const invocation = getProvider('claude').buildInvocation({
+    prompt: 'x',
+    timeoutMs: 1000,
+    sessionId: 'ses-123',
+    sessionAction: 'fork',
+  });
+  assert.ok(invocation.args.includes('--resume'));
+  assert.equal(invocation.args[invocation.args.indexOf('--resume') + 1], 'ses-123');
+  assert.ok(invocation.args.includes('--fork-session'));
+
+  // Missing --fork-session in help throws PROVIDER_CAPABILITY_DRIFT
+  assert.throws(
+    () => getProvider('claude').buildInvocation({
+      prompt: 'x',
+      timeoutMs: 1000,
+      sessionId: 'ses-123',
+      sessionAction: 'fork',
+      claudeHelpText: '--resume --no-fork',
+    }),
+    (error) => error.code === 'PROVIDER_CAPABILITY_DRIFT' && error.details?.capability === 'explicitFork',
+  );
+});
+
+test('OpenCode buildInvocation maps sessionAction fork to --session and --fork', () => {
+  const invocation = getProvider('opencode').buildInvocation({
+    prompt: 'x',
+    timeoutMs: 1000,
+    sessionId: 'ses-123',
+    sessionAction: 'fork',
+    workspace: '/ws',
+  });
+  assert.ok(invocation.args.includes('--session'));
+  assert.equal(invocation.args[invocation.args.indexOf('--session') + 1], 'ses-123');
+  assert.ok(invocation.args.includes('--fork'));
+  invocation.cleanup?.();
+
+  // Missing --fork in help throws PROVIDER_CAPABILITY_DRIFT
+  assert.throws(
+    () => getProvider('opencode').buildInvocation({
+      prompt: 'x',
+      timeoutMs: 1000,
+      sessionId: 'ses-123',
+      sessionAction: 'fork',
+      opencodeHelpText: '--session --no-fork',
+      workspace: '/ws',
+    }),
+    (error) => error.code === 'PROVIDER_CAPABILITY_DRIFT' && error.details?.capability === 'explicitFork',
+  );
+});
+
+test('Codex buildInvocation maps sessionAction fork to exec fork', () => {
+  const invocation = getProvider('codex').buildInvocation({
+    prompt: 'x',
+    timeoutMs: 1000,
+    sessionId: 'ses-123',
+    sessionAction: 'fork',
+  });
+  assert.deepEqual(invocation.args.slice(0, 2), ['exec', 'fork']);
+  assert.ok(invocation.args.includes('ses-123'));
+  invocation.cleanup();
+});
+
+test('AGY buildInvocation rejects sessionAction fork with typed UNSUPPORTED_CAPABILITY', () => {
+  assert.throws(
+    () => getProvider('agy').buildInvocation({
+      prompt: 'x',
+      timeoutMs: 1000,
+      sessionId: 'ses-123',
+      sessionAction: 'fork',
+    }),
+    (error) => error.code === 'UNSUPPORTED_CAPABILITY' && error.details?.capability === 'explicitFork',
+  );
+});
+

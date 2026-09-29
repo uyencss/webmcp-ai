@@ -4,6 +4,21 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- Codex native JSONL telemetry and explicit session fork (R5, canary 2026-09-29):
+  - **Codex native JSONL telemetry (`--json`)**: on the generate lane, when `--events` is requested (`eventsRequested: true`), Codex `exec` argv includes `--json` on the fresh path; `exec resume` includes `--json` only when proved by `exec resume --help`. Telemetry stays strictly advisory: the final response text continues to be read from the `--output-last-message` file; regression tests prove that stdout JSONL never corrupts the parsed output or structured envelope. Review lane (`taskIntent === 'review'`) remains unchanged without `--json`.
+  - `src/events.mjs`: added `classifyCodexEvent` and routed `classifyProviderLine('codex', line)` to it for JSONL lines. Canary-proven shapes from Codex 0.157.1 map conservatively: `thread.started` -> `researching`, `turn.started` -> `working`, `item.completed(agent_message)` -> `researching`, and `turn.completed` -> `verifying`. Added defensive branches for documented-but-unobserved shapes: `turn.failed` -> `blocked`, and item lifecycle events (`item.started`, `reasoning` -> `researching`, `command_execution` -> `testing` for test/build commands else `editing`, `file_change` -> `editing`, `todo_list` -> `working`, error items -> `blocked`).
+  - **Explicit session fork (`sessionAction: 'resume' | 'fork'`)**: new input `sessionAction`, default `'resume'`, valid only with `sessionId`. Requests without `sessionId` or with unknown values fail with typed `INVALID_INPUT` (`details: { field: 'sessionAction' }`). `'resume'` remains byte-identical to prior behavior across all providers.
+  - **Provider mapping & capability truth**:
+    - `claude`: `--resume <id> --fork-session` when `sessionAction: 'fork'`. Probed for `--fork-session` before spawn; missing flag raises `PROVIDER_CAPABILITY_DRIFT`. Advertises `explicitFork: true` (canary-proven).
+    - `opencode`: `--session <id> --fork` when `sessionAction: 'fork'`. Probed for `--fork` before spawn; missing flag raises `PROVIDER_CAPABILITY_DRIFT`. Advertises `explicitFork: true` (canary-proven).
+    - `codex`: maps to `exec fork <SESSION_ID> ...` with shared flags and prompt via `-`. Under strict quota guard, `capabilities.explicitFork` is truthfully declared `false` (`reason: "fork works but the new session id is not surfaced within the codex call budget"`), and real runs fail closed with typed `UNSUPPORTED_CAPABILITY`. Dry-run reflects `exec fork` args.
+    - `agy`: session fork is not native -> fails closed with typed `UNSUPPORTED_CAPABILITY` (`capability: 'explicitFork'`).
+  - **Envelope & CLI**:
+    - Generate envelope returns `session: { id: <new_id|null>, resumable: <bool>, forkedFrom: <source_id|null> }` (`forkedFrom` included only when `sessionAction === 'fork'`). The new session id comes from provider output (Claude JSON `session_id`, OpenCode JSONL `sessionID`), never invented.
+    - Review lane retains the frozen `{ id: null, resumable: false }` envelope (no leakage of session id or `forkedFrom`).
+    - CLI adds `--session-action <resume|fork>` for both `generate` and `review`. Dry-run outputs `sessionAction` and redacts session IDs to `<session>`.
+    - `webmcp-tool-v1` schema includes `sessionAction` in `ai.generate` and `ai.review`.
+
 - Codex native Git diff review (`reviewTarget`) and OpenCode v2 real-fixture
   verification (R4, canary 2026-09-29):
   - New optional review-only input `reviewTarget`: exactly one of

@@ -114,6 +114,54 @@ function classifyJsonEvent(event) {
   return { state: 'working', summary: summarize(JSON.stringify(event)) };
 }
 
+export function classifyCodexEvent(event) {
+  const type = typeof event?.type === 'string' ? event.type : '';
+  if (type === 'thread.started') {
+    return { state: 'researching', summary: summarize(event.thread_id ? `thread ${event.thread_id}` : 'thread started') };
+  }
+  if (type === 'turn.started') {
+    return { state: 'working', summary: summarize('turn started') };
+  }
+  if (type === 'turn.completed') {
+    return { state: 'verifying', summary: summarize('turn completed') };
+  }
+  if (type === 'turn.failed') {
+    return { state: 'blocked', summary: summarize(event.error?.message || event.error || event.message || 'turn failed') };
+  }
+  const item = event?.item && typeof event.item === 'object' ? event.item : null;
+  if (item || type.startsWith('item.')) {
+    const itemObj = item || event;
+    const itemType = typeof itemObj.type === 'string' ? itemObj.type : '';
+    if (itemObj.status === 'failed' || itemObj.status === 'error' || itemType === 'error') {
+      return { state: 'blocked', summary: summarize(itemObj.message || itemObj.error || itemObj.text || 'item failed') };
+    }
+    if (itemType === 'command_execution') {
+      const command = typeof itemObj.command === 'string' ? itemObj.command : (typeof itemObj.cmd === 'string' ? itemObj.cmd : (typeof itemObj.text === 'string' ? itemObj.text : ''));
+      if (TEST_TOOL_PATTERN.test(command)) {
+        return { state: 'testing', summary: summarize(`command: ${command}`) };
+      }
+      return { state: 'editing', summary: summarize(`command: ${command}`) };
+    }
+    if (itemType === 'file_change') {
+      const path = typeof itemObj.path === 'string' ? itemObj.path : (typeof itemObj.file === 'string' ? itemObj.file : 'file change');
+      return { state: 'editing', summary: summarize(path) };
+    }
+    if (itemType === 'agent_message') {
+      return { state: 'researching', summary: summarize(itemObj.text ?? '') };
+    }
+    if (itemType === 'reasoning') {
+      return { state: 'researching', summary: summarize(itemObj.text ?? '') };
+    }
+    if (itemType === 'todo_list') {
+      return { state: 'working', summary: summarize('todo list') };
+    }
+    if (itemType) {
+      return { state: 'working', summary: summarize(`item ${itemType}`) };
+    }
+  }
+  return classifyJsonEvent(event);
+}
+
 function classifyTextLine(line) {
   if (QUESTION_PATTERN.test(line)) {
     return { state: 'question', summary: summarize(line) };
@@ -142,6 +190,9 @@ export function classifyProviderLine(provider, line) {
     }
   }
   if (parsed && typeof parsed === 'object') {
+    if (provider === 'codex') {
+      return classifyCodexEvent(parsed);
+    }
     return classifyJsonEvent(parsed);
   }
   return classifyTextLine(text);

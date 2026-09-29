@@ -201,6 +201,21 @@ export function resolveReviewRequest(input = {}) {
     sessionId: input.sessionId || null,
     taskIntent: resolvedIntent.taskIntent,
   });
+  let sessionAction = input.sessionAction ?? (input.sessionId ? 'resume' : null);
+  if (sessionAction !== null && sessionAction !== undefined) {
+    if (sessionAction !== 'resume' && sessionAction !== 'fork') {
+      throw new AiCliError('INVALID_INPUT', "sessionAction must be 'resume' or 'fork'", {
+        exitCode: 2,
+        details: { field: 'sessionAction' },
+      });
+    }
+    if (!input.sessionId) {
+      throw new AiCliError('INVALID_INPUT', 'sessionAction requires sessionId', {
+        exitCode: 2,
+        details: { field: 'sessionAction' },
+      });
+    }
+  }
   const prompt = requireNonEmptyPrompt(input.prompt);
   const timeoutMs = input.timeoutMs ?? undefined;
   if (timeoutMs !== undefined) {
@@ -249,6 +264,7 @@ export function resolveReviewRequest(input = {}) {
     effort: input.effort || null,
     schema: null,
     sessionId: input.sessionId || null,
+    sessionAction: sessionAction ?? null,
     agentMode: null,
     agent: null,
     toolPolicy: 'provider-default',
@@ -294,6 +310,7 @@ export function resolveReviewRequest(input = {}) {
     model: input.model || null,
     effort: input.effort || null,
     sessionId: input.sessionId || null,
+    sessionAction: sessionAction ?? null,
     agentMode: null,
     agent: null,
     timeoutMs: timeoutMs !== undefined ? Number(timeoutMs) : undefined,
@@ -358,6 +375,7 @@ export function describeReviewDryRun(input = {}) {
     // provider session identifier is a resumable capability and must not enter
     // a sanitized preview envelope or argv echo.
     sessionId: resumed ? '<resumed-session>' : null,
+    sessionAction: resolved.sessionAction ?? (resolved.sessionId ? 'resume' : null),
     resumed,
     args: sanitizeDryRunArgs(resolved.previewArgs, resolved.capability, resolved.sessionId),
     capability: resolved.digests,
@@ -407,6 +425,7 @@ export async function review(input = {}) {
     effort: input.effort || null,
     opencodeProfile: resolved.opencodeProfile,
     sessionId: resolved.sessionId || null,
+    sessionAction: resolved.sessionAction || null,
     agentMode: null,
     agent: null,
     toolPolicy: undefined,

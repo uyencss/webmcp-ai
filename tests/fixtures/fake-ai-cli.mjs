@@ -27,16 +27,16 @@ if (args.includes('--version') || args.includes('-V') || args.includes('-v')) {
 
 if (args.includes('--help')) {
   if (provider === 'codex') {
-    process.stdout.write('codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --output-last-message resume -c sandbox_mode model_reasoning_effort\n');
+    process.stdout.write('codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --output-last-message resume fork --json -c sandbox_mode model_reasoning_effort\n');
   } else if (provider === 'opencode') {
     const help = String(version).startsWith('2.')
-      ? 'opencode run --standalone --format json --agent build --model sonnet#effort'
-      : 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort';
+      ? 'opencode run --standalone --format json --agent build --model sonnet#effort --session --fork'
+      : 'opencode run --format json --agent build --dir /ws --model sonnet --variant effort --session --fork';
     process.stdout.write(`${help}\n`);
   } else if (provider === 'agy') {
     process.stdout.write('--sandbox --mode --print-timeout --agent --model --effort --conversation --disable-slash-commands\n');
   } else {
-    process.stdout.write('--permission-mode --tools --disallowedTools --safe-mode --no-chrome --no-session-persistence --disable-slash-commands --permission-prompts none\n');
+    process.stdout.write('-p --permission-mode --tools --disallowedTools --safe-mode --no-chrome --output-format json stream-json --verbose --no-session-persistence --disable-slash-commands --permission-prompts none --resume --fork-session --model --effort\n');
   }
   process.exit(0);
 }
@@ -163,7 +163,13 @@ if (!agyHandled) {
     writeFileSync(args[outputIndex + 1], reply);
     process.stdout.write('{"type":"completed"}\n');
   } else if (provider === 'claude') {
-    process.stdout.write(JSON.stringify({ result: reply, session_id: 'claude-session' }));
+    const isFork = args.includes('--fork-session');
+    const sessionId = isFork ? 'claude-forked-session' : (args.includes('--resume') ? 'claude-resumed-session' : 'claude-session');
+    const resText = process.env.FAKE_REPLY || reply;
+    process.stdout.write(JSON.stringify({ result: resText, session_id: sessionId }));
+  } else if (provider === 'opencode' && (args.includes('--fork') || process.env.FAKE_OPENCODE_JSONL === '1')) {
+    const sessionId = args.includes('--fork') ? 'opencode-forked-session' : 'opencode-session';
+    process.stdout.write(`${JSON.stringify({ sessionID: sessionId, type: 'text', part: { text: reply } })}\n`);
   } else {
     process.stdout.write(reply);
   }

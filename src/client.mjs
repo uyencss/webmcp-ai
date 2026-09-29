@@ -106,6 +106,21 @@ function normalizeRequest(input) {
   if (!prompt.trim()) {
     throw new AiCliError('INVALID_INPUT', 'prompt must be a non-empty string', { exitCode: 2 });
   }
+  let sessionAction = input.sessionAction ?? (input.sessionId ? 'resume' : null);
+  if (sessionAction !== null && sessionAction !== undefined) {
+    if (sessionAction !== 'resume' && sessionAction !== 'fork') {
+      throw new AiCliError('INVALID_INPUT', "sessionAction must be 'resume' or 'fork'", {
+        exitCode: 2,
+        details: { field: 'sessionAction' },
+      });
+    }
+    if (!input.sessionId) {
+      throw new AiCliError('INVALID_INPUT', 'sessionAction requires sessionId', {
+        exitCode: 2,
+        details: { field: 'sessionAction' },
+      });
+    }
+  }
   // Strict portable taskIntent validation. When taskIntent is present the
   // pair is validated (including defaulting and contradiction checks)
   // BEFORE any capability work or provider spawn. Legacy callers without
@@ -253,6 +268,7 @@ function normalizeRequest(input) {
       effort: input.effort || null,
       schema: input.schema || null,
       sessionId: input.sessionId || null,
+      sessionAction: sessionAction ?? null,
       agentMode: input.agentMode || null,
       agent: input.agent || null,
       toolPolicy: effectiveToolPolicy,
@@ -516,15 +532,93 @@ export async function generate(input) {
   // agentMode/agent on a portable compose). Clean the disposable compose
   // workspace before rethrow: the generic try/finally below only starts
   // after invocation construction.
+  let codexResumeSupportsJson = false;
+  if (provider.id === 'codex' && eventsRequested && request.sessionId) {
+    if (typeof input.codexResumeSupportsJson === 'boolean') {
+      codexResumeSupportsJson = input.codexResumeSupportsJson;
+    } else if (input.codexResumeHelpText) {
+      codexResumeSupportsJson = String(input.codexResumeHelpText).includes('--json');
+    } else {
+      try {
+        const probeSafeEnv = buildSafeChildEnv(env, {});
+        const probe = await runProcess(command, ['exec', 'resume', '--help'], {
+          env: probeSafeEnv, timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
+        });
+        codexResumeSupportsJson = `${probe.stdout}\n${probe.stderr}`.includes('--json');
+      } catch {
+        codexResumeSupportsJson = false;
+      }
+    }
+  }
+
   let invocation;
   try {
     invocation = provider.buildInvocation({
       ...request, workspace, env, allowedReadRoots: capability.allowedReadRoots, allowedWriteRoots: capability.allowedWriteRoots, protectedPaths: capability.protectedPaths, projectId: capability.projectId, storeRevisions: capability.storeRevisions,
       eventsRequested,
+      codexResumeSupportsJson,
+      codexResumeHelpText: input.codexResumeHelpText ?? null,
     });
   } catch (error) {
     if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
     throw error;
+  }
+
+  // Explicit session fork capability check and probes
+  if (request.sessionAction === 'fork') {
+    if (!provider.capabilities?.explicitFork) {
+      try { invocation.cleanup?.(); } catch {}
+      if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+      const reason = provider.id === 'codex'
+        ? 'fork works but the new session id is not surfaced within the codex call budget'
+        : `${provider.name} does not support explicit session fork`;
+      throw new AiCliError('UNSUPPORTED_CAPABILITY', `${provider.name} does not support explicit session fork: ${reason}`, {
+        exitCode: 2,
+        details: { capability: 'explicitFork' },
+      });
+    }
+    if (provider.id === 'claude') {
+      try {
+        const help = await runProcess(command, ['--help'], {
+          env: buildSafeChildEnv(env, {}), timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
+        });
+        if (!`${help.stdout}\n${help.stderr}`.includes('--fork-session')) {
+          throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed Claude CLI lacks --fork-session', {
+            exitCode: 2,
+            details: { capability: 'explicitFork', missing: ['--fork-session'] },
+          });
+        }
+      } catch (error) {
+        try { invocation.cleanup?.(); } catch {}
+        if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+        if (error instanceof AiCliError) throw error;
+        throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Claude fork probe failed: ${error?.code || 'failed'}`, {
+          exitCode: 2,
+          details: { capability: 'explicitFork', missing: ['--fork-session'] },
+        });
+      }
+    }
+    if (provider.id === 'opencode') {
+      try {
+        const help = await runProcess(command, ['run', '--help'], {
+          env: buildSafeChildEnv(env, {}), timeoutMs: DEFAULT_PROBE_TIMEOUT_MS, maxOutputBytes: 256 * 1024,
+        });
+        if (!`${help.stdout}\n${help.stderr}`.includes('--fork')) {
+          throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', 'Installed opencode CLI lacks --fork', {
+            exitCode: 2,
+            details: { capability: 'explicitFork', missing: ['--fork'] },
+          });
+        }
+      } catch (error) {
+        try { invocation.cleanup?.(); } catch {}
+        if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+        if (error instanceof AiCliError) throw error;
+        throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `OpenCode fork probe failed: ${error?.code || 'failed'}`, {
+          exitCode: 2,
+          details: { capability: 'explicitFork', missing: ['--fork'] },
+        });
+      }
+    }
   }
 
   // Reviewer spawn-lane probes: before any model spawn, validate the
@@ -732,7 +826,11 @@ export async function generate(input) {
       // its existing resumable session identity behavior.
       session: request.taskIntent === 'review'
         ? { id: null, resumable: false }
-        : { id: parsed.sessionId, resumable: Boolean(parsed.sessionId) },
+        : {
+            id: parsed.sessionId,
+            resumable: Boolean(parsed.sessionId),
+            ...(request.sessionAction === 'fork' ? { forkedFrom: request.sessionId } : {}),
+          },
       timing: { elapsedMs: Date.now() - startedAt },
       capability: digests,
     };
@@ -872,6 +970,7 @@ export function describeGenerateDryRun(input = {}) {
     } : {}),
     model: request.model,
     sessionId: request.sessionId ? '<resumed-session>' : null,
+    sessionAction: request.sessionAction ?? (request.sessionId ? 'resume' : null),
     args,
     capability: computeCapabilityDigests({
       workspace: capability.workspace,
