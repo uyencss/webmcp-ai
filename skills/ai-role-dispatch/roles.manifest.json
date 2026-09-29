@@ -1,7 +1,7 @@
 {
   "schema": "webmcp-role-manifest/1",
-  "version": 8,
-  "lastUpdated": "2026-09-23",
+  "version": 10,
+  "lastUpdated": "2026-09-29",
   "description": "Role-based AI model dispatch matrix and fallback rules for WebMCP AI Orchestration",
   "invariants": {
     "opencodeExclusivity": {
@@ -68,6 +68,63 @@
     },
     "quotaPreflightEndpoint": "http://127.0.0.1:8421/api/quotas?all=1",
     "lineageHonesty": "Receipts và logs phải ghi đúng lineage thực tế, không được dán nhãn OpenCode alias là native Sol/Luna."
+  },
+  "escalationPolicy": {
+    "scope": "Quick independent Layer 1 code review, direct implementation writer, or escalation final fixer; never default coordinator or Layer 2 final acceptance",
+    "retryCountDefinition": "Number of failed task-solving attempts for the same task and root cause, starting at 0 before the first attempt; changing worker does not reset it; quota/network/model-ID route failures do not count",
+    "directDispatch": {
+      "retryCount": 0,
+      "requires": [
+        "clearScope",
+        "writeSet",
+        "acceptanceCriteria",
+        "atLeastOneDirectFit"
+      ],
+      "directFits": [
+        "hard_bug_requiring_codebase_investigation",
+        "scoped_cross_module_implementation_or_refactor",
+        "multi_component_integration",
+        "long_multi_step_cli_work",
+        "frontend_or_ui_with_high_design_and_verification_bar"
+      ],
+      "exclude": "Trivial or deterministic task; open-ended architecture without an agreed plan",
+      "reasonMustBeRecorded": true
+    },
+    "normalRoute": {
+      "maxRetryCount": 1,
+      "minConfidence": 0.65,
+      "condition": "Task does not meet direct dispatch criteria and has a supported root-cause hypothesis; use ordinary writer route"
+    },
+    "sonnet55Triggers": {
+      "minRetryCount": 2,
+      "immediateFailureTypes": [
+        "hard_business_logic",
+        "cross_component_integration",
+        "hard_dependency_or_cycle"
+      ],
+      "confidenceBelow": 0.65,
+      "nontrivialTaskRequiredForLowConfidence": true,
+      "confidenceRequiresEvidence": true,
+      "multipleWorkersFailedOrConflicted": true
+    },
+    "sonnet55Route": {
+      "route": "claude-cli",
+      "model": "claude-sonnet-5-5",
+      "node": "ATLAS",
+      "command": "claude -p --model claude-sonnet-5-5",
+      "requireModelAndQuotaPreflight": true,
+      "requireHandoff": [
+        "acceptanceCriteria",
+        "writeSet",
+        "retryCount",
+        "routingReason",
+        "failureType",
+        "attemptsAndEvidence",
+        "currentDiff"
+      ]
+    },
+    "reviewSeparation": "Sonnet 5.5 High reviews clear-scope diffs only, read-only and without spawning agents or editing code; if Sonnet wrote the diff, use Muse/Gemini for Layer 1. Escalate complex logic, architecture conflict, worker disagreement, unclear root cause, or retryCount >= 2 to Sol High as Layer 2/final arbiter.",
+    "stopCondition": "After one Sonnet 5.5 attempt fails acceptance criteria, stop automatic retries and return evidence to coordinator for re-plan"
   },
   "roles": {
     "orchestrator": {
@@ -161,16 +218,28 @@
     "reviewer_l1": {
       "id": "reviewer_l1",
       "name": "Reviewer Layer 1 (Pre-acceptance / Hygiene / Review phụ / Tests)",
-      "description": "Đánh giá sơ bộ diffs, kiểm tra cú pháp, convention, unit/integration test, schema invariants và lint. Sonnet và Gemini Flash đóng vai trò reviewer phụ tại lớp này.",
-      "swapRule": "TUYỆT ĐỐI KHÔNG để model writer tự review chính diff của mình (No self-review). Nếu Writer là Muse -> Reviewer L1 pre-accept / review phụ là AGY Gemini Flash / Claude Sonnet (swap lineage). Nếu Writer là AGY (fallback) -> Reviewer L1 pre-accept / review phụ là Muse 1.3 (tuân swapRule). Sonnet chỉ làm reviewer phụ, không làm reviewer chính final gate.",
+      "description": "Review nhanh diff, test completeness, regression/API contract, cú pháp và convention; chỉ đọc, không spawn agent hoặc sửa code.",
+      "swapRule": "Không tự review diff cùng lineage. Writer Muse -> ưu tiên Claude Code Sonnet 5.5 High, Gemini/Claude 4.6 là route phụ. Writer AGY hoặc Direct Claude Code Sonnet 5.5 -> Muse 1.3 (hoặc Gemini nếu Writer là Claude). Sonnet chỉ làm reviewer L1; Sol High là final arbiter khi logic/architecture phức tạp, worker bất đồng, root cause chưa rõ hoặc retryCount >= 2.",
       "dispatch": {
         "primary": {
-          "route": "agy",
-          "model": "gemini-3.8-flash-high",
-          "effort": "high",
+          "route": "claude-cli",
+          "model": "claude-sonnet-5-5",
+          "reasoningEffort": "high",
           "node": "ATLAS",
-          "condition": "Primary pre-accept & review phụ lane (lineage swap khi Writer là Muse 1.3)",
-          "note": "Reviewer phụ & pre-acceptance chính qua AGY Gemini Flash High (tuân swapRule)."
+          "condition": "Normal/quick code or diff review with clear scope; Writer is Muse (lineage swap)",
+          "reviewScope": [
+            "code_diff",
+            "test_completeness",
+            "regression",
+            "api_contract"
+          ],
+          "permissions": {
+            "readOnly": true,
+            "canSpawnAgents": false,
+            "canEditCode": false
+          },
+          "command": "claude -p --model claude-sonnet-5-5 --effort high --permission-mode plan --tools \"Read,Glob,Grep\" --disallowedTools \"mcp__*\"",
+          "note": "Prompt supplies the diff, scope and review criteria. Layer 1 only; final acceptance remains Layer 2."
         },
         "parallelLanes": [
           {
@@ -186,7 +255,7 @@
         "fallbacks": [
           {
             "priority": 1,
-            "trigger": "Writer was Muse (lineage swap) or mechanical test closure",
+            "trigger": "Sonnet route unavailable and Writer was Muse, or Writer was Claude and a separate lineage is needed",
             "route": "agy",
             "model": "gemini-3.8-flash-high",
             "effort": "high",
@@ -194,7 +263,7 @@
           },
           {
             "priority": 2,
-            "trigger": "Reviewer phụ kiến trúc / Deep architectural secondary review",
+            "trigger": "Secondary Layer 1 review when Writer is Muse and Sonnet/Gemini unavailable",
             "route": "agy",
             "model": "claude-sonnet-4-6",
             "effort": null,
@@ -212,6 +281,18 @@
             "note": "Không kèm --effort (model-capabilities: supportsEffort false). Receipt ghi 'opencode → 9router/claude-opus-4-6-thinking'."
           }
         ]
+      },
+      "reviewEscalation": {
+        "trigger": [
+          "complex_logic",
+          "architecture_conflict",
+          "worker_disagreement",
+          "unclear_root_cause",
+          "retryCount >= 2"
+        ],
+        "route": "reviewer_l2",
+        "model": "gpt-6-sol",
+        "reasoningEffort": "high"
       }
     },
     "reviewer_l2": {
