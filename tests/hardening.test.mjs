@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import { resolveAgyArtifacts } from '../src/artifacts.mjs';
 import { describeGenerateDryRun } from '../src/client.mjs';
-import { describeModel, effortRejection } from '../src/model-capabilities.mjs';
+import { describeModel, describeProviderEffort, effortRejection } from '../src/model-capabilities.mjs';
 import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const bin = fileURLToPath(new URL('../bin/webmcp-ai.mjs', import.meta.url));
@@ -42,7 +42,7 @@ function runRaw(args, { env = {} } = {}) {
 test('describeModel surfaces provider limits and per-model effort support', () => {
   const opus = describeModel('agy', 'claude-opus-4-6-thinking');
   assert.equal(opus.supportsEffort, false);
-  assert.equal(opus.maxPromptBytes, 128 * 1024);
+  assert.equal(opus.maxPromptBytes, 4 * 1024 * 1024);
   assert.equal(opus.artifacts, 'brain-fallback');
   assert.deepEqual(opus.effortValues, []);
 
@@ -100,12 +100,89 @@ test('generate dry-run rejects a known unsupported --effort before spawn', () =>
   }
 });
 
+test('describeProviderEffort exposes the closed set only for agy/claude', () => {
+  assert.deepEqual(describeProviderEffort('agy'), { values: ['low', 'medium', 'high', 'max'] });
+  assert.deepEqual(describeProviderEffort('claude'), { values: ['low', 'medium', 'high', 'xhigh', 'max'] });
+  assert.equal(describeProviderEffort('codex'), null);
+  assert.equal(describeProviderEffort('opencode'), null);
+  assert.equal(describeProviderEffort('nope'), null);
+});
+
+test('effortRejection layers a provider-level closed set under the model-level override', () => {
+  // Layer 2 (provider): a value outside the provider's documented set fails
+  // even for a model with no per-model evidence at all.
+  assert.deepEqual(effortRejection({ providerId: 'agy', modelId: null, effort: 'xhigh' }), {
+    allowedEfforts: ['low', 'medium', 'high', 'max'], note: null,
+  });
+  assert.equal(effortRejection({ providerId: 'agy', modelId: null, effort: 'max' }), null);
+  assert.equal(effortRejection({ providerId: 'claude', modelId: null, effort: 'xhigh' }), null);
+  assert.equal(effortRejection({ providerId: 'claude', modelId: null, effort: 'max' }), null);
+  assert.deepEqual(effortRejection({ providerId: 'claude', modelId: null, effort: 'none' }), {
+    allowedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], note: null,
+  });
+  // Layer 1 (model) still wins: a model positively known to reject --effort
+  // is rejected for every value, even one the provider's own list allows.
+  const opusReject = effortRejection({ providerId: 'agy', modelId: 'claude-opus-4-6-thinking', effort: 'max' });
+  assert.ok(opusReject);
+  assert.deepEqual(opusReject.allowedEfforts, []);
+  // codex/opencode have no documented provider closed set: an unknown model
+  // still fails open regardless of the effort string.
+  assert.equal(effortRejection({ providerId: 'codex', modelId: null, effort: 'xhigh' }), null);
+  assert.equal(effortRejection({ providerId: 'opencode', modelId: 'opencode-go/unknown', effort: 'nonsense' }), null);
+});
+
+test('generate dry-run enforces the agy/claude provider-level effort closed set before spawn', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'webmcp-ai-provider-effort-'));
+  try {
+    assert.throws(
+      () => describeGenerateDryRun({
+        provider: 'agy', prompt: 'x', effort: 'xhigh', workspace, env: {},
+      }),
+      (error) => error.code === 'UNSUPPORTED_EFFORT' && error.details.provider === 'agy',
+    );
+    const agyMax = describeGenerateDryRun({
+      provider: 'agy', prompt: 'x', effort: 'max', workspace, env: {},
+    });
+    assert.equal(agyMax.dryRun, true);
+    const claudeXhigh = describeGenerateDryRun({
+      provider: 'claude', prompt: 'x', effort: 'xhigh', workspace, env: {},
+    });
+    assert.equal(claudeXhigh.dryRun, true);
+    const claudeMax = describeGenerateDryRun({
+      provider: 'claude', prompt: 'x', effort: 'max', workspace, env: {},
+    });
+    assert.equal(claudeMax.dryRun, true);
+    assert.throws(
+      () => describeGenerateDryRun({
+        provider: 'claude', prompt: 'x', effort: 'none', workspace, env: {},
+      }),
+      (error) => error.code === 'UNSUPPORTED_EFFORT' && error.details.provider === 'claude',
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('providers list and models inspect expose provider-level effort values for agy/claude only', () => {
+  const providers = run(['providers', 'list', '--json']);
+  assert.equal(providers.status, 0, providers.stderr);
+  const list = JSON.parse(providers.stdout).providers;
+  assert.deepEqual(list.find((p) => p.id === 'agy').capabilities.effort, { values: ['low', 'medium', 'high', 'max'] });
+  assert.deepEqual(list.find((p) => p.id === 'claude').capabilities.effort, { values: ['low', 'medium', 'high', 'xhigh', 'max'] });
+  assert.equal(list.find((p) => p.id === 'codex').capabilities.effort, undefined);
+  assert.equal(list.find((p) => p.id === 'opencode').capabilities.effort, undefined);
+
+  const inspect = run(['models', 'inspect', '--provider', 'agy', '--json']);
+  assert.equal(inspect.status, 0, inspect.stderr);
+  assert.deepEqual(JSON.parse(inspect.stdout).capabilities.effort, { values: ['low', 'medium', 'high', 'max'] });
+});
+
 test('models inspect exposes the per-model surface', () => {
   const result = run(['models', 'inspect', '--provider', 'agy', '--model', 'claude-opus-4-6-thinking', '--json']);
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.supportsEffort, false);
-  assert.equal(payload.maxPromptBytes, 128 * 1024);
+  assert.equal(payload.maxPromptBytes, 4 * 1024 * 1024);
   assert.equal(payload.capabilities.modelDiscovery, true);
 });
 

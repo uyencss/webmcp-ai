@@ -99,6 +99,11 @@ export const claudeProvider = {
     modelDiscovery: false,
     toolPolicies: ['provider-default'],
     printModeGuards: ['--disable-slash-commands'],
+    // Verified via `claude --help` (2.1.283): --effort accepts exactly this
+    // closed set. Provider-level layer only; codex/opencode omit this field
+    // because neither CLI documents a closed set (see model-capabilities.mjs
+    // PROVIDER_EFFORT and effortRejection).
+    effort: { values: ['low', 'medium', 'high', 'xhigh', 'max'] },
     // Machine-readable mirror of buildInvocation below: no AGY agentMode;
     // review/compose/implement are supported vNext intents (review needs the
     // installed help probe); plan needs a separate contract and is rejected.

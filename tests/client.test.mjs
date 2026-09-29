@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   describeGenerateDryRun, generate, listAgents, listModels, probeProviders,
 } from '../src/client.mjs';
+import { MAX_PROMPT_ARG_BYTES } from '../src/providers/agy.mjs';
 import { v2DbPath, withV2Db } from './fixtures/opencode-v2-db.mjs';
 
 const fakeBin = fileURLToPath(new URL('./fixtures/fake-ai-cli.mjs', import.meta.url));
@@ -26,6 +27,25 @@ test('generate dry-run redacts resumable session identifiers', () => {
     const text = JSON.stringify(preview);
     assert.equal(preview.sessionId, '<resumed-session>');
     assert.equal(text.includes('ses_generate_private'), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('generate dry-run redacts the AGY schema temp file path', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'webmcp-ai-agy-schema-dryrun-'));
+  try {
+    const preview = describeGenerateDryRun({
+      provider: 'agy',
+      prompt: 'preview',
+      schema: { type: 'object' },
+      workspace,
+      env: {},
+    });
+    const text = JSON.stringify(preview);
+    assert.equal(text.includes(tmpdir()), false);
+    assert.ok(preview.args.includes('<tmp>'));
+    assert.ok(preview.args.includes('--json-schema'));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -300,4 +320,103 @@ test('task prompt text cannot select the OpenCode database path', async (t) => {
 
   assert.equal(generated.response.text, `db=${expectedDb}`);
   assert.ok(expectedDb.endsWith('opencode.db'));
+});
+
+test('generate returns AGY structured output from the json envelope lane', async () => {
+  const result = await generate({
+    provider: 'agy',
+    prompt: 'hello',
+    schema: { type: 'object' },
+    env: { ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy' },
+  });
+  assert.equal(result.response.text, 'reply:agy:hello');
+  assert.deepEqual(result.response.structured, { ok: true });
+  assert.equal(result.session.id, 'agy-json-conv');
+  assert.equal(result.session.resumable, true);
+});
+
+test('generate rejects an AGY json envelope missing structured_output when a schema was requested', async () => {
+  await assert.rejects(
+    generate({
+      provider: 'agy',
+      prompt: 'hello',
+      schema: { type: 'object' },
+      env: {
+        ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy', FAKE_AGY_OMIT_STRUCTURED: '1',
+      },
+    }),
+    (error) => error.code === 'PROVIDER_STRUCTURED_OUTPUT_MISSING'
+      && error.details.provider === 'agy' && error.details.capability === 'structuredOutput',
+  );
+});
+
+test('generate classifies an AGY malformed --json-schema exit as typed PROVIDER_SCHEMA_INVALID', async () => {
+  await assert.rejects(
+    generate({
+      provider: 'agy',
+      prompt: 'hello',
+      schema: { type: 'object' },
+      env: {
+        ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy', FAKE_AGY_SCHEMA_INVALID: '1',
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'PROVIDER_SCHEMA_INVALID');
+      assert.equal(error.retryable, false);
+      assert.doesNotMatch(error.message, /unexpected end of JSON input/);
+      return true;
+    },
+  );
+});
+
+test('generate reads the AGY stream-json lane for a prompt above the argv cap', async () => {
+  const bigPrompt = `héllo\nworld\n${'x'.repeat(MAX_PROMPT_ARG_BYTES + 2048)}`;
+  const result = await generate({
+    provider: 'agy',
+    prompt: bigPrompt,
+    env: { ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy' },
+  });
+  assert.equal(result.response.text, `reply:agy:${bigPrompt}`);
+  assert.equal(result.session.id, 'agy-stream-conv');
+});
+
+test('generate reads structured_output from the AGY stream-json lane', async () => {
+  const bigPrompt = 'x'.repeat(MAX_PROMPT_ARG_BYTES + 2048);
+  const result = await generate({
+    provider: 'agy',
+    prompt: bigPrompt,
+    schema: { type: 'object' },
+    env: { ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy' },
+  });
+  assert.deepEqual(result.response.structured, { ok: true });
+});
+
+test('generate maps a missing AGY stream-json result event to a typed failure', async () => {
+  const bigPrompt = 'x'.repeat(MAX_PROMPT_ARG_BYTES + 2048);
+  await assert.rejects(
+    generate({
+      provider: 'agy',
+      prompt: bigPrompt,
+      env: {
+        ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy', FAKE_AGY_STREAM_NO_RESULT: '1',
+      },
+    }),
+    (error) => error.code === 'PROVIDER_EXIT_ERROR'
+      && error.details.provider === 'agy' && error.details.status === null,
+  );
+});
+
+test('generate maps a non-SUCCESS AGY stream-json result status to a typed failure', async () => {
+  const bigPrompt = 'x'.repeat(MAX_PROMPT_ARG_BYTES + 2048);
+  await assert.rejects(
+    generate({
+      provider: 'agy',
+      prompt: bigPrompt,
+      env: {
+        ...process.env, AGY_BIN: fakeBin, FAKE_PROVIDER: 'agy', FAKE_AGY_STREAM_STATUS: 'FAILED',
+      },
+    }),
+    (error) => error.code === 'PROVIDER_EXIT_ERROR'
+      && error.details.provider === 'agy' && error.details.status === 'FAILED',
+  );
 });

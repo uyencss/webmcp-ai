@@ -68,9 +68,10 @@ webmcp-ai generate \
   --json
 ```
 
-For structured output, pass a JSON Schema file with `--schema`. AGY 1.1.1 and
-opencode do not expose structured output; choose Claude or Codex for
-schema-constrained work.
+For structured output, pass a JSON Schema file with `--schema`. AGY 1.2.13
+supports it natively (`--output-format json --json-schema <file>`, or just
+`--json-schema` on its stream-json lane for a prompt above 128 KiB); opencode
+still does not expose structured output.
 
 For pure composition before browser/payment/publish actions, pass
 `toolPolicy: "compose-only"` in JSON input or `--tool-policy compose-only`.

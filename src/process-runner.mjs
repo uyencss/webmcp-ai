@@ -54,6 +54,17 @@ function classifyProviderExit({ stdout, stderr, exitCode, exitSignal }) {
       details,
     });
   }
+  // AGY rejects a malformed --json-schema file before spawn with exit 1 and
+  // a stable stderr message (canary 2026-09-29 on AGY 1.2.13: "Error:
+  // invalid --json-schema: schema is not valid JSON: ..."). Not retryable;
+  // details stay bounded (never echo the raw stderr, which could carry a
+  // path or schema fragment).
+  if (/invalid --json-schema/.test(text)) {
+    return new AiCliError('PROVIDER_SCHEMA_INVALID', 'Provider rejected --json-schema as invalid', {
+      retryable: false,
+      details,
+    });
+  }
   if (/\b(quota|credit|credits|usage limit|billing limit|insufficient credits|out of credits|resource exhausted)\b/.test(text)
     || /\b429\b/.test(text) && /\b(quota|credit|usage)\b/.test(text)) {
     return new AiCliError('PROVIDER_QUOTA_EXHAUSTED', 'Provider quota or credits are exhausted', {

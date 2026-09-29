@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
+import {
+  existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import { resolveOpencodeCliDb } from '../src/providers/opencode.mjs';
 import { getProvider, listProviders } from '../src/providers/index.mjs';
+import { MAX_PROMPT_ARG_BYTES, MAX_STREAM_PROMPT_BYTES } from '../src/providers/agy.mjs';
 
 test('provider registry exposes agy, claude, codex, and opencode', () => {
   assert.deepEqual(listProviders().map((provider) => provider.id), ['agy', 'claude', 'codex', 'opencode']);
@@ -79,6 +85,138 @@ test('AGY permits only an explicit supervised accept-edits mode', () => {
       prompt: 'x', timeoutMs: 1_000, agent: '../unsafe',
     }),
     (error) => error.code === 'INVALID_INPUT',
+  );
+});
+
+test('AGY structured output adds --output-format json --json-schema and cleans up its temp dir', () => {
+  const invocation = getProvider('agy').buildInvocation({
+    prompt: 'x', timeoutMs: 1000, schema: { type: 'object' },
+  });
+  const outputFormatAt = invocation.args.indexOf('--output-format');
+  assert.equal(invocation.args[outputFormatAt + 1], 'json');
+  const schemaAt = invocation.args.indexOf('--json-schema');
+  assert.ok(schemaAt >= 0);
+  const schemaFile = invocation.args[schemaAt + 1];
+  assert.ok(existsSync(schemaFile));
+  assert.deepEqual(JSON.parse(readFileSync(schemaFile, 'utf8')), { type: 'object' });
+  const schemaDir = dirname(schemaFile);
+  invocation.cleanup();
+  assert.equal(existsSync(schemaDir), false);
+});
+
+test('AGY schema temp dir is cleaned up even when a later validation step throws', () => {
+  // Use a plain file (not a directory) as the compose-only workspace so
+  // installComposeOnlyGuard's mkdirSync throws AFTER the schema temp dir has
+  // already been allocated (schema allocation runs before the compose-only
+  // guard install in buildInvocation).
+  const scratch = mkdtempSync(join(tmpdir(), 'webmcp-ai-scratch-ws-'));
+  const notADir = join(scratch, 'not-a-dir');
+  writeFileSync(notADir, '');
+  try {
+    const before = readdirSync(tmpdir()).filter((n) => n.startsWith('webmcp-ai-agy-'));
+    assert.throws(
+      () => getProvider('agy').buildInvocation({
+        prompt: 'x', timeoutMs: 1000, schema: { type: 'object' }, toolPolicy: 'compose-only', workspace: notADir,
+      }),
+    );
+    const after = readdirSync(tmpdir()).filter((n) => n.startsWith('webmcp-ai-agy-'));
+    assert.deepEqual(after, before);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('AGY schema serialization failure (circular) throws before any temp dir is allocated', () => {
+  const circular = {};
+  circular.self = circular;
+  const before = readdirSync(tmpdir()).filter((n) => n.startsWith('webmcp-ai-agy-'));
+  assert.throws(
+    () => getProvider('agy').buildInvocation({ prompt: 'x', timeoutMs: 1000, schema: circular }),
+    /circular/i,
+  );
+  const after = readdirSync(tmpdir()).filter((n) => n.startsWith('webmcp-ai-agy-'));
+  assert.deepEqual(after, before);
+});
+
+test('AGY moves a prompt above the argv cap to the stream-json lane with no prompt in argv', () => {
+  const bigPrompt = `héllo\nworld\n${'x'.repeat(MAX_PROMPT_ARG_BYTES + 1024)}`;
+  const invocation = getProvider('agy').buildInvocation({
+    prompt: bigPrompt, timeoutMs: 45_000,
+  });
+  assert.deepEqual(invocation.args.slice(0, 4), ['--input-format', 'stream-json', '--output-format', 'stream-json']);
+  assert.equal(invocation.args.some((a) => typeof a === 'string' && a.includes(bigPrompt)), false);
+  assert.equal(invocation.args.includes('-p'), false);
+  const lines = invocation.stdin.split('\n').filter(Boolean);
+  assert.equal(lines.length, 1);
+  const event = JSON.parse(lines[0]);
+  assert.deepEqual(event, { event: 'user', message: { role: 'user', content: bigPrompt } });
+  assert.ok(invocation.stdin.endsWith('\n'));
+});
+
+test('AGY stream lane carries only --json-schema (output-format stays stream-json)', () => {
+  const bigPrompt = 'x'.repeat(MAX_PROMPT_ARG_BYTES + 10);
+  const invocation = getProvider('agy').buildInvocation({
+    prompt: bigPrompt, timeoutMs: 45_000, schema: { type: 'object' },
+  });
+  assert.equal(invocation.args.filter((a) => a === '--output-format').length, 1);
+  assert.equal(invocation.args[invocation.args.indexOf('--output-format') + 1], 'stream-json');
+  assert.ok(invocation.args.includes('--json-schema'));
+  invocation.cleanup();
+});
+
+test('AGY rejects a prompt above the stream-json cap with typed PROMPT_TOO_LARGE', () => {
+  assert.throws(
+    () => getProvider('agy').buildInvocation({
+      prompt: 'x'.repeat(MAX_STREAM_PROMPT_BYTES + 1), timeoutMs: 1000,
+    }),
+    (error) => error.code === 'PROMPT_TOO_LARGE' && error.details.maxPromptBytes === MAX_STREAM_PROMPT_BYTES,
+  );
+});
+
+test('AGY parseOutput reads the json envelope, requires structured_output when schema was requested, and reads the stream result', () => {
+  const envelope = JSON.stringify({
+    conversation_id: 'conv-1', status: 'SUCCESS', response: ' hi \n', structured_output: { ok: true },
+  });
+  assert.deepEqual(getProvider('agy').parseOutput({ stdout: envelope, request: { schema: { type: 'object' } } }), {
+    text: 'hi', structured: { ok: true }, sessionId: 'conv-1',
+  });
+
+  const envelopeNoStructured = JSON.stringify({ conversation_id: 'conv-2', status: 'SUCCESS', response: 'hi' });
+  assert.throws(
+    () => getProvider('agy').parseOutput({ stdout: envelopeNoStructured, request: { schema: { type: 'object' } } }),
+    (error) => error.code === 'PROVIDER_STRUCTURED_OUTPUT_MISSING'
+      && error.details.provider === 'agy' && error.details.capability === 'structuredOutput',
+  );
+  // No schema requested: a missing structured_output is not an error.
+  assert.deepEqual(getProvider('agy').parseOutput({ stdout: envelopeNoStructured, request: {} }), {
+    text: 'hi', structured: null, sessionId: 'conv-2',
+  });
+
+  const streamOutput = [
+    JSON.stringify({ event: 'init', conversation_id: 'conv-3' }),
+    JSON.stringify({ event: 'step_update', step: 1 }),
+    JSON.stringify({ event: 'result', result: { conversation_id: 'conv-3', status: 'SUCCESS', response: 'OK\n' } }),
+  ].join('\n');
+  assert.deepEqual(getProvider('agy').parseOutput({ stdout: streamOutput, request: {} }), {
+    text: 'OK', structured: null, sessionId: 'conv-3',
+  });
+
+  const streamNoResult = [
+    JSON.stringify({ event: 'init', conversation_id: 'conv-4' }),
+    JSON.stringify({ event: 'step_update', step: 1 }),
+  ].join('\n');
+  assert.throws(
+    () => getProvider('agy').parseOutput({ stdout: streamNoResult, request: {} }),
+    (error) => error.code === 'PROVIDER_EXIT_ERROR' && error.details.provider === 'agy' && error.details.status === null,
+  );
+
+  const streamFailedStatus = [
+    JSON.stringify({ event: 'init', conversation_id: 'conv-5' }),
+    JSON.stringify({ event: 'result', result: { conversation_id: 'conv-5', status: 'FAILED', response: '' } }),
+  ].join('\n');
+  assert.throws(
+    () => getProvider('agy').parseOutput({ stdout: streamFailedStatus, request: {} }),
+    (error) => error.code === 'PROVIDER_EXIT_ERROR' && error.details.status === 'FAILED',
   );
 });
 
@@ -216,13 +354,13 @@ test('provider parsers normalize native output', () => {
 });
 
 test('provider-specific capabilities fail closed', () => {
+  // A prompt above the 128 KiB `-p` argv cap but at or below the 4 MiB
+  // stream-json cap now succeeds via the stream lane (see the AGY
+  // structured-output/stream-lane tests below); only a prompt above the
+  // stream cap fails closed.
   assert.throws(
-    () => getProvider('agy').buildInvocation({ prompt: 'x', schema: {}, timeoutMs: 1000 }),
-    (error) => error.code === 'UNSUPPORTED_CAPABILITY',
-  );
-  assert.throws(
-    () => getProvider('agy').buildInvocation({ prompt: 'x'.repeat(129 * 1024), timeoutMs: 1000 }),
-    (error) => error.code === 'PROMPT_TOO_LARGE',
+    () => getProvider('agy').buildInvocation({ prompt: 'x'.repeat(4 * 1024 * 1024 + 1), timeoutMs: 1000 }),
+    (error) => error.code === 'PROMPT_TOO_LARGE' && error.details.maxPromptBytes === 4 * 1024 * 1024,
   );
 });
 

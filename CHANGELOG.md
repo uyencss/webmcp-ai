@@ -4,6 +4,31 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- AGY structured output, long-prompt stream-json lane, and two-layer effort
+  metadata (canary 2026-09-29, AGY 1.2.13):
+  - `agy` provider accepts `request.schema`, adding native
+    `--output-format json --json-schema <file>` (bounded and `full`, argv
+    lane), or just `--json-schema` on the stream-json lane (output format is
+    already `stream-json` there). The schema is written to a bounded
+    `webmcp-ai-agy-*` temp dir (mode `0o600`) always removed via the
+    invocation cleanup hook, including on a later `buildInvocation` failure.
+    A response missing `structured_output` when a schema was requested is
+    typed `PROVIDER_STRUCTURED_OUTPUT_MISSING`; a malformed `--json-schema`
+    file classifies as typed `PROVIDER_SCHEMA_INVALID`.
+  - A prompt above the existing 128 KiB `-p` argv cap (`MAX_PROMPT_ARG_BYTES`)
+    and at or below a new 4 MiB cap (`MAX_STREAM_PROMPT_BYTES`) now moves to
+    the `--input-format stream-json --output-format stream-json` lane: one
+    `{"event":"user",...}` NDJSON line on stdin, never in argv. Above the
+    stream cap it is typed `PROMPT_TOO_LARGE`. `model-capabilities.mjs`
+    publishes the bounded 4 MiB AGY prompt cap (never unbounded).
+  - Provider-level effort closed sets, verified via each installed CLI's own
+    `--help`: agy `low|medium|high|max`, claude `low|medium|high|xhigh|max`
+    (codex/opencode omit the field; no documented closed set). An effort
+    outside the provider's set fails before spawn with the existing typed
+    `UNSUPPORTED_EFFORT`; a model-level `MODEL_OVERRIDES` entry that
+    positively rejects `--effort` still wins over the provider list. Exposed
+    via `providers list`/`providers inspect`/`models inspect`
+    (`capabilities.effort`).
 - Add `src/remote.mjs`: a declared, code-only registry of remote Claude hosts
   (host `m1`, SSH alias `mac-pro14`) with strictly validated operator env
   overrides (`WEBMCP_AI_CLAUDE_SSH_ALIAS`, `WEBMCP_AI_CLAUDE_REMOTE_BIN`,

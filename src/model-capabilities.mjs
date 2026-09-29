@@ -8,14 +8,40 @@
  * released model is never blocked by a stale table.
  */
 
-import { MAX_PROMPT_ARG_BYTES } from './providers/agy.mjs';
+import { MAX_STREAM_PROMPT_BYTES } from './providers/agy.mjs';
 
 const PROVIDER_SURFACE = Object.freeze({
-  agy: { maxPromptBytes: MAX_PROMPT_ARG_BYTES, artifacts: 'brain-fallback' },
+  // Above MAX_PROMPT_ARG_BYTES (128 KiB) AGY moves from the `-p` argv lane to
+  // the stream-json lane; MAX_STREAM_PROMPT_BYTES (4 MiB) is the true bound,
+  // verified on AGY 1.2.13 via the canary run on 2026-09-29 (large stream-json
+  // prompt, exit 0, single result event). Never publish an unbounded (null)
+  // AGY prompt cap; both lanes are still bounded.
+  agy: { maxPromptBytes: MAX_STREAM_PROMPT_BYTES, artifacts: 'brain-fallback' },
   claude: { maxPromptBytes: null, artifacts: 'inline' },
   codex: { maxPromptBytes: null, artifacts: 'inline' },
   opencode: { maxPromptBytes: null, artifacts: 'inline' },
 });
+
+// Provider-level effort closed set, documented in the installed CLI's own
+// `--help` output. This is the coarse layer: an effort value outside it fails
+// before spawn regardless of model. codex/opencode are deliberately omitted —
+// neither CLI documents a closed set, so the per-model MODEL_OVERRIDES table
+// below remains the sole authority for those providers.
+const PROVIDER_EFFORT = Object.freeze({
+  // Verified via `agy --help` (1.2.13, canary 2026-09-29).
+  agy: { values: ['low', 'medium', 'high', 'max'] },
+  // Verified via `claude --help` (2.1.283).
+  claude: { values: ['low', 'medium', 'high', 'xhigh', 'max'] },
+});
+
+/**
+ * Provider-level effort surface (the coarse layer). Returns null for a
+ * provider that documents no closed set (codex, opencode) or is unknown.
+ */
+export function describeProviderEffort(providerId) {
+  const provider = String(providerId || '').trim().toLowerCase();
+  return PROVIDER_EFFORT[provider] ?? null;
+}
 
 const MODEL_OVERRIDES = Object.freeze({
   'agy:claude-opus-4-6-thinking': {
@@ -104,12 +130,31 @@ export function describeModel(providerId, modelId) {
 }
 
 /**
- * Returns rejection details when a model is positively known to reject
- * `--effort`; returns null for an unknown model or a model that accepts it.
+ * Two-layer effort validation. Layer 1 (model): a model positively known to
+ * reject `--effort` (MODEL_OVERRIDES supportsEffort: false) is rejected
+ * regardless of the provider's closed set — the model override always wins.
+ * Layer 2 (provider): when the model layer does not reject, an effort value
+ * outside the provider's own documented closed set (PROVIDER_EFFORT) is
+ * rejected, unless a model-level override positively lists that exact value
+ * (evidence-based per-model set taking precedence over the coarser provider
+ * list). Providers with no documented closed set (codex, opencode) skip
+ * layer 2 entirely, so an unknown model there fails open as before.
+ * Returns null for an unknown model/allowed value.
  */
 export function effortRejection({ providerId, modelId, effort }) {
   if (effort === undefined || effort === null || effort === '') return null;
   const described = describeModel(providerId, modelId);
-  if (!described || described.supportsEffort !== false) return null;
-  return { allowedEfforts: described.effortValues ?? [], note: described.note };
+  if (described && described.supportsEffort === false) {
+    return { allowedEfforts: described.effortValues ?? [], note: described.note };
+  }
+  const providerEffort = describeProviderEffort(providerId);
+  if (providerEffort && !providerEffort.values.includes(effort)) {
+    const modelOverrideAllows = described
+      && described.supportsEffort === true
+      && Array.isArray(described.effortValues)
+      && described.effortValues.includes(effort);
+    if (modelOverrideAllows) return null;
+    return { allowedEfforts: providerEffort.values, note: described?.note ?? null };
+  }
+  return null;
 }

@@ -87,11 +87,20 @@ other effort values. Keep the historical
 `opencode-go/muse-spark-1.3-contributor` route unchanged and never use the bare
 `openrouter/muse-spark-1.3-contributor` form.
 
-AGY print mode has a 128 KiB prompt cap (`PROMPT_TOO_LARGE` above it) and can
-return only a summary while writing the full answer under its brain directory.
-Pass `--resolve-artifacts` (optionally `--agy-brain-dir <path>`) to recover the
+AGY has two prompt lanes: a prompt at or below 128 KiB uses the `-p` argv
+lane; above that it moves transparently to the `--input-format stream-json`
+lane (a single NDJSON line on stdin, never in argv) up to a 4 MiB cap
+(`PROMPT_TOO_LARGE` above it). AGY print mode can also return only a summary
+while writing the full answer under its brain directory. Pass
+`--resolve-artifacts` (optionally `--agy-brain-dir <path>`) to recover the
 full text; the envelope then carries `artifacts` (`name`/`bytes`/`digest`, no
 machine path) and `artifactsResolved`.
+
+AGY (1.2.13+) supports structured output: pass `--schema <path>` and AGY adds
+`--output-format json --json-schema <file>` (or, on the stream lane, just
+`--json-schema`) natively. A missing `structured_output` in the response when
+a schema was requested is a typed `PROVIDER_STRUCTURED_OUTPUT_MISSING`
+failure, not a silent success.
 
 A concurrent `--provider opencode` run can hit the shared SQLite database with
 `database is locked`. The wrapper classifies this as retryable
