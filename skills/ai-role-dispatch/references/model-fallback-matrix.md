@@ -14,14 +14,14 @@ Tài liệu tham chiếu chi tiết về luồng rẽ nhánh và kích hoạt Fa
 | Kiểm tra Quota ATLAS Sol 5h    |
 +-------------------------------+
          |
-    (5h > 0% & Quota OK) ----> [Dispatch Native Codex Sol (gpt-6-sol) trên ATLAS]
+    (5h > 0% & Quota OK) ----> [Dispatch Native Codex Sol (gpt-6.1-sol) trên ATLAS]
          |
          v (5h = 0% hoặc Route Blocked)
 +-------------------------------+
 | Probe node ORBIT (Mac M1)     |
 +-------------------------------+
          |
-    (ORBIT Sol OK) ------------> [Dispatch gpt-6-sol qua Tailscale SSH mac-m1]
+    (ORBIT Sol OK) ------------> [Dispatch gpt-6.1-sol qua Tailscale SSH mac-m1]
          |
          v (ORBIT không khả dụng hoặc hết quota)
 +-------------------------------+

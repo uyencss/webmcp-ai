@@ -83,11 +83,11 @@ OPENCODE_BIN="$OPENCODE_BIN" node "$AI_CLI" generate \
 
 Exact model id must exist in `models list`: `opencode-go/muse-spark-1.3-contributor`.
 
-## Lane D3 — native Codex Sol (GPT-6-Sol)
+## Lane D3 — native Codex Sol (GPT-6.1-Sol)
 
 ```bash
 cd "$ROOT/lanes/codex"
-"$CODEX_BIN" exec --model gpt-6-sol --sandbox read-only --ephemeral --json \
+"$CODEX_BIN" exec --model gpt-6.1-sol --sandbox read-only --ephemeral --json \
   --skip-git-repo-check --output-last-message "$OUT/codex.md" \
   -c model_reasoning_effort=high -c approval_policy=never - \
   < "$PROMPT" > codex.events.jsonl 2> stderr.log

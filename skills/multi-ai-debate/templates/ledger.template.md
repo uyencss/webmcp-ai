@@ -17,7 +17,7 @@ Cast lấy từ `debate.config.json`; bảng dưới là mặc định khi khôn
 | --- | --- | --- | --- |
 | agy-claude (D1) | WebMCP AI CLI -> AGY -> `claude-opus-4-6-thinking` | <ver> | Debater 1 |
 | claude-cli (D2) | direct `<claude> -p --model claude-opus-5-5 --effort high --restricted` | <ver> | Debater 2 |
-| codex (D3) | native `codex exec --model gpt-6-sol --sandbox read-only` | <ver> | Debater 3 |
+| codex (D3) | native `codex exec --model gpt-6.1-sol --sandbox read-only` | <ver> | Debater 3 |
 | agy-flash (D4) | WebMCP AI CLI -> AGY -> `gemini-3.8-flash-high` | <ver> | Debater 4 |
 | muse (D5) | WebMCP AI CLI -> OpenCode -> `opencode-go/muse-spark-1.3-contributor` | <ver> | Debater 5 |
 

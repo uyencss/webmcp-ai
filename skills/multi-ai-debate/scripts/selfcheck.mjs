@@ -23,7 +23,7 @@ try {
   const cfg = JSON.parse(readFileSync(join(root, 'debate.config.json'), 'utf8'));
   ok(cfg.strategy === 'cross-exam', 'default strategy is cross-exam');
   ok(cfg.debaters.length === 5, 'default has 5 debaters');
-  ok(cfg.debaters[2].model === 'gpt-6-sol' && cfg.debaters[2].effort === 'high', 'D3 = codex gpt-6-sol high');
+  ok(cfg.debaters[2].model === 'gpt-6.1-sol' && cfg.debaters[2].effort === 'high', 'D3 = codex gpt-6.1-sol high');
   ok(existsSync(join(root, 'r3', 'out')), 'round-3 out dir scaffolded');
 
   run('assemble-round.mjs', root, '1');
@@ -37,7 +37,7 @@ try {
 
   // 2. Custom roles + red-team strategy via inline flags
   run('debate-init.mjs', 'custom-run', '--dir', base, '--strategy', 'red-team',
-    '--debaters', 'codex:gpt-6-sol:high;agy:gemini-3.8-flash-high:high');
+    '--debaters', 'codex:gpt-6.1-sol:high;agy:gemini-3.8-flash-high:high');
   const croot = join(base, 'custom-run');
   const ccfg = JSON.parse(readFileSync(join(croot, 'debate.config.json'), 'utf8'));
   ok(ccfg.debaters.length === 2, 'custom has 2 debaters');

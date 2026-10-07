@@ -20,7 +20,7 @@ II. CHỦ ĐỀ TRANH LUẬN
 III. PHÂN VAI
 phân vai chính (dùng khi còn quota):
 - host/trọng tài: bạn — coordinator đang chủ trì phiên
-- debator 1: codex sol (gpt-6-sol)
+- debator 1: codex sol (gpt-6.1-sol)
 - debator 2: claude opus 5.5 (claude -p --model claude-opus-5-5)
 
 dự bị — CHỈ dùng khi đã hết quota cả codex lẫn claude:

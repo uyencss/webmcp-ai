@@ -56,7 +56,7 @@ flag inline, hoặc (b) ghi một `roles.json` từng phần và truyền `--rol
 # (a) inline: mỗi spec là route:model:effort:lane (bỏ qua trường bằng '-'/để trống)
 node scripts/debate-init.mjs <slug> --strategy red-team \
   --moderator coordinator \
-  --debaters "codex:gpt-6-sol:high;agy:claude-opus-4-6-thinking:-;claude-cli:claude-opus-5-5:high;agy:gemini-3.8-flash-high:high"
+  --debaters "codex:gpt-6.1-sol:high;agy:claude-opus-4-6-thinking:-;claude-cli:claude-opus-5-5:high;agy:gemini-3.8-flash-high:high"
 
 # (b) file override (partial merge): { "moderator": {...}, "debaters": [...], "strategy": "..." }
 node scripts/debate-init.mjs <slug> --roles /path/roles.json
@@ -105,7 +105,7 @@ II. CHỦ ĐỀ TRANH LUẬN
 III. PHÂN VAI
 phân vai chính (dùng khi còn quota):
 - host/trọng tài: bạn — coordinator đang chủ trì phiên
-- debator 1: codex sol (gpt-6-sol)
+- debator 1: codex sol (gpt-6.1-sol)
 - debator 2: claude opus 5.5 (claude -p --model claude-opus-5-5)
 
 dự bị — CHỈ dùng khi đã hết quota cả codex lẫn claude:
@@ -125,9 +125,9 @@ hãy triển khai thảo luận 2 vòng và báo cáo kết quả cuối cùng c
    ```bash
    node "$SKILL/scripts/debate-init.mjs" <program-slug> --strategy cross-exam \
      --moderator "coordinator:-:-:moderator" \
-     --debaters "codex:gpt-6-sol:high:codex;claude-cli:claude-opus-5-5:-:claude"
+     --debaters "codex:gpt-6.1-sol:high:codex;claude-cli:claude-opus-5-5:-:claude"
    ```
-   *(Phân vai chính: Host là coordinator đang chủ trì phiên, hai debator là `codex:gpt-6-sol` và
+   *(Phân vai chính: Host là coordinator đang chủ trì phiên, hai debator là `codex:gpt-6.1-sol` và
    `claude-cli:claude-opus-5-5`. **Chỉ khi đã hết quota cả codex lẫn claude** mới đổi `--debaters`
    sang tier dự bị: `agy:claude-opus-4-6-thinking:-:agy-claude;agy:gemini-3.8-flash-high:high:agy-flash;opencode:opencode-go/muse-spark-1.3-contributor:xhigh:muse`
    — và nếu cần host AI thì dùng đúng `opencode-go/deepseek-v4.1-flash`; TUYỆT ĐỐI CẤM bản
@@ -149,7 +149,7 @@ hãy triển khai thảo luận 2 vòng và báo cáo kết quả cuối cùng c
      --topic "<Chủ đề tranh luận chi tiết>" \
      --strategy cross-exam \
      --moderator "coordinator" \
-     --debaters "agy:claude-opus-4-6-thinking:-:agy-claude;agy:gemini-3.8-flash-high:high:agy-flash;codex:gpt-6-sol:high:codex;opencode:opencode-go/muse-spark-1.3-contributor:xhigh:muse" \
+     --debaters "agy:claude-opus-4-6-thinking:-:agy-claude;agy:gemini-3.8-flash-high:high:agy-flash;codex:gpt-6.1-sol:high:codex;opencode:opencode-go/muse-spark-1.3-contributor:xhigh:muse" \
      --lenses "ponytail,speckit" \
      --refs "<đường_dẫn_tham_khảo_1>,<đường_dẫn_2>"
    ```

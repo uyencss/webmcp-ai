@@ -1,7 +1,7 @@
 {
   "schema": "webmcp-role-manifest/1",
-  "version": 10,
-  "lastUpdated": "2026-09-29",
+  "version": 11,
+  "lastUpdated": "2026-10-07",
   "description": "Role-based AI model dispatch matrix and fallback rules for WebMCP AI Orchestration",
   "invariants": {
     "opencodeExclusivity": {
@@ -291,7 +291,7 @@
           "retryCount >= 2"
         ],
         "route": "reviewer_l2",
-        "model": "gpt-6-sol",
+        "model": "gpt-6.1-sol",
         "reasoningEffort": "high"
       }
     },
@@ -302,22 +302,22 @@
       "dispatch": {
         "primary": {
           "route": "codex",
-          "model": "gpt-6-sol",
+          "model": "gpt-6.1-sol",
           "reasoningEffort": "high",
           "node": "ATLAS",
-          "command": "codex exec --model gpt-6-sol --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never",
-          "note": "Reviewer chính (primary final acceptance) qua Native Codex GPT-6-Sol trên ATLAS."
+          "command": "codex exec --model gpt-6.1-sol --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never",
+          "note": "Reviewer chính (primary final acceptance) qua Native Codex GPT-6.1-Sol trên ATLAS."
         },
         "fallbacks": [
           {
             "priority": 1,
             "trigger": "ATLAS Codex 5h quota = 0% -> Chuyển sang node ORBIT qua SSH",
             "route": "codex",
-            "model": "gpt-6-sol",
+            "model": "gpt-6.1-sol",
             "reasoningEffort": "high",
             "node": "ORBIT (Mac M1 via Tailscale)",
-            "command": "ssh mac-m1 'codex exec --model gpt-6-sol --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never'",
-            "note": "Reviewer chính dự phòng node ORBIT: GPT-6-Sol qua Codex CLI v0.155.0."
+            "command": "ssh mac-m1 'codex exec --model gpt-6.1-sol --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never'",
+            "note": "Reviewer chính dự phòng node ORBIT: GPT-6.1-Sol qua Codex CLI v0.155.0."
           },
           {
             "priority": 2,
@@ -362,7 +362,7 @@
             "priority": 1,
             "trigger": "High-complexity reasoning audit via Sol",
             "route": "codex",
-            "model": "gpt-6-sol",
+            "model": "gpt-6.1-sol",
             "reasoningEffort": "high",
             "node": "ATLAS",
             "options": {

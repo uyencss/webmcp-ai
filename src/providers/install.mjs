@@ -282,7 +282,7 @@ const m1Host = Object.freeze({
 
 const manifestBase = {
   schema: 'webmcp-ai-provider-install-manifest/1',
-  updated: '2026-09-29',
+  updated: '2026-10-07',
   hashAlgorithm: 'sha256',
   pinDigestAlgorithm: 'sha256',
   hosts: Object.freeze({
@@ -298,11 +298,11 @@ const manifestBase = {
       discoveredBy: 'opencode models',
     }),
     sol: Object.freeze({
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       provider: 'codex',
       host: 'local',
       source: 'app-bundled:ChatGPT.app',
-      discoveredAt: '2026-09-23',
+      discoveredAt: '2026-10-07',
     }),
   }),
   auth: 'separate',

@@ -289,7 +289,7 @@ Bảng tra cứu cú pháp gọi 1-shot headless và quy tắc trích xuất cho
 
 | Provider | Model Chủ Lực | CLI Command (Headless 1-Shot) | Input Prompt | Trích Xuất Kết Quả | Lưu Ý Sống Còn |
 |---|---|---|---|---|---|
-| **Codex** | `gpt-6-sol`<br>`gpt-5.6-luna` | `codex exec --model <m> --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never --output-last-message <f.md> - < <prompt>` | Stdin + `-` | File `<f.md>` (văn bản sạch) | **BẮT BUỘC** `--skip-git-repo-check` trên Codex 0.155.0+. Thiếu `-` ở cuối sẽ bị treo prompt. |
+| **Codex** | `gpt-6.1-sol`<br>`gpt-5.6-luna` | `codex exec --model <m> --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never --output-last-message <f.md> - < <prompt>` | Stdin + `-` | File `<f.md>` (văn bản sạch) | **BẮT BUỘC** `--skip-git-repo-check` trên Codex 0.155.0+. Thiếu `-` ở cuối sẽ bị treo prompt. |
 | **Claude** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude -p --model <m> --effort high --output-format json --restricted < <prompt> > out.json` | Stdin `< prompt` | JSON `.result` | **BẮT BUỘC** `-p` để tránh interactive TUI. `--restricted` tắt tools can thiệp shell/code. |
 | **OpenCode** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode run --standalone --format json --agent plan --model <m> < <prompt> > out.json` | Stdin `< prompt` hoặc đối số chuỗi | Stdout text hoặc JSON | **KHÔNG** ép biến `OPENCODE_DB` sang file DB rỗng/chưa sync vì sẽ mất quyền subscription Go models. |
 | **AGY** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | `node "$AI_CLI" generate --provider agy --model <m> [--effort high] --prompt "..." --json` | `--prompt` hoặc stdin | JSON `response.text` | Claude Opus 4.6 **KHÔNG** hỗ trợ `--effort` (exits 1). Flash hỗ trợ `--effort high`. |
@@ -299,9 +299,9 @@ Bảng tra cứu cú pháp gọi 1-shot headless và quy tắc trích xuất cho
 
 #### A. Codex CLI (Native)
 ```bash
-# Model: gpt-6-sol (primary reviewer/reasoner) hoặc gpt-5.6-luna (orchestrator)
+# Model: gpt-6.1-sol (primary reviewer/reasoner) hoặc gpt-5.6-luna (orchestrator)
 codex exec \
-  --model gpt-6-sol \
+  --model gpt-6.1-sol \
   --sandbox read-only \
   --ephemeral \
   --skip-git-repo-check \
@@ -341,8 +341,8 @@ opencode run --standalone --format json --agent plan --model opencode-go/deepsee
 # DeepSeek v4.1 Flash:
 node "$AI_CLI" generate --provider opencode --model opencode-go/deepseek-v4.1-flash --prompt-file "/path/prompt.txt" --workspace "$PWD" --agent-mode plan --json
 
-# Codex gpt-6-sol:
-node "$AI_CLI" generate --provider codex --model gpt-6-sol --effort high --prompt-file "/path/prompt.txt" --json
+# Codex gpt-6.1-sol:
+node "$AI_CLI" generate --provider codex --model gpt-6.1-sol --effort high --prompt-file "/path/prompt.txt" --json
 
 # Gemini 3.8 Flash (AGY):
 node "$AI_CLI" generate --provider agy --model gemini-3.8-flash-high --effort high --prompt-file "/path/prompt.txt" --json

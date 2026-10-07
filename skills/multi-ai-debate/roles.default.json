@@ -39,11 +39,11 @@
       "label": "Phản biện 3",
       "lane": "codex",
       "route": "codex",
-      "model": "gpt-6-sol",
+      "model": "gpt-6.1-sol",
       "effort": "high",
       "options": { "sandbox": "read-only", "ephemeral": true, "skipGitRepoCheck": true },
       "stance": "neutral",
-      "note": "Native Codex Sol với GPT-6-Sol (gpt-6-sol, reasoning effort high)."
+      "note": "Native Codex Sol với GPT-6.1-Sol (gpt-6.1-sol, reasoning effort high)."
     },
     {
       "id": "D4",

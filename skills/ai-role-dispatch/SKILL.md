@@ -21,7 +21,7 @@ Tài liệu đặc tả và kỹ năng điều phối phân vai model AI cho Web
    - Nếu Writer là Muse $\rightarrow$ ưu tiên **Claude Code Sonnet 5.5 High** cho review nhanh, scope rõ; AGY Gemini Flash (`gemini-3.8-flash-high`, `high`) hoặc AGY Claude Sonnet (`claude-sonnet-4-6`) là lựa chọn phụ. Sonnet chỉ làm reviewer L1, không làm final acceptance gate.
    - Nếu Writer là AGY (fallback) $\rightarrow$ Reviewer L1 pre-accept / review phụ PHẢI ĐỔI sang Muse 1.3 (cấm tự review).
    - Nếu Writer là Direct Claude Code Sonnet 5.5 $\rightarrow$ Reviewer L1 dùng Muse hoặc Gemini, không dùng Claude cùng lineage.
-4. **Reviewer Lớp 2 (Milestone & Final Acceptance Gate - Reviewer chính)**: Độc lập đánh giá logic nghiệp vụ, tính an toàn, hồi quy. Quyết định pass/fail cuối cùng trước khi promote. Reviewer chính ưu tiên Native Codex **`gpt-6-sol`** trên ATLAS / ORBIT, hoặc **Claude Code Opus 5.5** (`claude-opus-5-5` / alias `opus`).
+4. **Reviewer Lớp 2 (Milestone & Final Acceptance Gate - Reviewer chính)**: Độc lập đánh giá logic nghiệp vụ, tính an toàn, hồi quy. Quyết định pass/fail cuối cùng trước khi promote. Reviewer chính ưu tiên Native Codex **`gpt-6.1-sol`** trên ATLAS / ORBIT, hoặc **Claude Code Opus 5.5** (`claude-opus-5-5` / alias `opus`).
 5. **Auditor / Red Team**: Độc lập tìm kiếm lỗ hổng, anti-pattern, over-engineering (kết hợp `ponytail-review`).
 
 ---
@@ -35,8 +35,8 @@ Dữ liệu chuẩn hóa máy đọc được định nghĩa tại [`roles.manif
 | **🎯 Orchestrator** | **Native Codex Sol/Luna**<br>`gpt-5.6-luna` (reasoning `max`) trên ATLAS | **OpenCode DeepSeek**<br>`opencode-go/deepseek-v4.1-flash` (khi Codex 5h = 0%) | **Interactive Coordinator**<br>Agent IDE/CLI đang chủ trì phiên |
 | **✍️ Primary Writer**<br>*(⛔ CẤM DeepSeek & GLM)* | **OpenCode Muse Contributor**<br>`opencode-go/muse-spark-1.3-contributor` (`xhigh`) | **AGY Gemini**<br>`gemini-3.8-flash-high` (`high`) | **AGY Claude** (`claude-sonnet-4-6`)<br>**Direct / escalation lane:** Claude Code Sonnet 5.5 (`claude-sonnet-5-5`) theo mục 2.1 |
 | **🔍 Reviewer Lớp 1**<br>*(Pre-acceptance / Review phụ)* | **Claude Code Sonnet 5.5 High**<br>`claude-sonnet-5-5` (`high`)<br>*(review nhanh khi Writer là Muse)* | **OpenCode Muse Contributor**<br>`opencode-go/muse-spark-1.3-contributor`<br>*(khi Writer là AGY/Claude)* | **AGY Gemini Flash High** (`gemini-3.8-flash-high`)<br>hoặc AGY Claude Sonnet (`claude-sonnet-4-6`), tuân swap rule |
-| **🛡️ Reviewer Lớp 2**<br>*(Reviewer chính / Final Gate)* | **Native Codex Sol (ATLAS)**<br>`gpt-6-sol` (reasoning `high`) | **Native Codex Sol (ORBIT / Mac M1)**<br>`ssh mac-m1 'codex exec --model gpt-6-sol ...'`<br>*(khi ATLAS hết quota 5h)* | **Claude Code CLI Opus 5.5** (`claude-opus-5-5` / `opus`) hoặc **OpenCode DeepSeek** (`opencode-go/deepseek-v4.1-flash`) |
-| **⚖️ Auditor / Red Team** | **AGY Claude Thinking**<br>`claude-opus-4-6-thinking` (`plan`) | **Native Codex Sol**<br>`gpt-6-sol` (ephemeral sandbox `read-only`) | **AGY Gemini Flash**<br>`gemini-3.8-flash-high` (`high`) |
+| **🛡️ Reviewer Lớp 2**<br>*(Reviewer chính / Final Gate)* | **Native Codex Sol (ATLAS)**<br>`gpt-6.1-sol` (reasoning `high`) | **Native Codex Sol (ORBIT / Mac M1)**<br>`ssh mac-m1 'codex exec --model gpt-6.1-sol ...'`<br>*(khi ATLAS hết quota 5h)* | **Claude Code CLI Opus 5.5** (`claude-opus-5-5` / `opus`) hoặc **OpenCode DeepSeek** (`opencode-go/deepseek-v4.1-flash`) |
+| **⚖️ Auditor / Red Team** | **AGY Claude Thinking**<br>`claude-opus-4-6-thinking` (`plan`) | **Native Codex Sol**<br>`gpt-6.1-sol` (ephemeral sandbox `read-only`) | **AGY Gemini Flash**<br>`gemini-3.8-flash-high` (`high`) |
 
 ---
 
@@ -78,8 +78,9 @@ Trước khi dispatch Sonnet, xác nhận CLI/model khả dụng và quota theo 
 > 4. **Ràng buộc chi phí DeepSeek**:
 >    - Khi kích hoạt DeepSeek cho Orchestrator/Reviewer L2, **BẮT BUỘC PHẢI DÙNG ĐÚNG** `opencode-go/deepseek-v4.1-flash`.
 >    - **TUYỆT ĐỐI KHÔNG DÙNG** `opencode-go/deepseek-v4-flash`, `deepseek-v4-pro` hay các bản `v4` cũ vì chi phí token cực kỳ đắt đỏ.
-> 5. **Trạng thái Stealth Union Alpha**:
->    - Model `opencode-go/union-alpha` / `union-stealth` đã bị off và retired hoàn toàn khỏi vòng xoay writer và reviewer. Cấm gọi hoặc định tuyến vào model này.
+> 5. **Lane retired & lane miễn phí**:
+>    - `opencode-go/union-alpha` / `union-stealth` đã bị off và retired hoàn toàn; agent entry cũng đã **xoá khỏi `opencode.jsonc` (2026-09-30)**. Cấm gọi hoặc định tuyến vào model này.
+>    - **Space Bunny** (`opencode-go/space-bunny-free`, agent `space-bunny-reader`): lane **đọc nhanh miễn phí**; chất lượng không được bảo đảm — chỉ dùng cho quick read/lookup, **KHÔNG dùng** cho writer, acceptance hay review verdict.
 > 6. **Toàn vẹn Lineage**:
 >    - Tất cả model Claude, Sol (OpenAI) và Gemini bắt buộc spawn qua CLI gốc trên máy (`codex`, `claude`, `agy`) hoặc WebMCP AI CLI wrapper (`--provider agy`, `--provider codex`, `--provider claude`).
 >    - Biên nhận (Receipt) phải ghi đúng model thực tế, không được dán nhãn OpenCode alias là native Sol/Luna.
@@ -97,7 +98,7 @@ Trước khi kích hoạt writer nặng hoặc chạy review:
    ```
 2. **Luật kích hoạt Fallback theo Quota**:
    - **Nếu ATLAS Codex 5h window = 0%**:
-     - Thử route sang node **ORBIT** (Mac M1 qua Tailscale): `ssh mac-m1 'codex exec --model gpt-6-sol ...'`.
+     - Thử route sang node **ORBIT** (Mac M1 qua Tailscale): `ssh mac-m1 'codex exec --model gpt-6.1-sol ...'`.
      - Nếu ORBIT cũng cạn: Chuyển Reviewer L2 sang Direct Claude Code CLI (nếu Weekly $\ge 20\%$) hoặc kích hoạt fallback `opencode-go/deepseek-v4.1-flash`.
    - **Nếu Claude Code Weekly < 20%**:
      - Khóa Direct Claude Code CLI để bảo tồn quota khẩn cấp.
@@ -135,7 +136,7 @@ AGY_BIN="${AGY_BIN:-$HOME/.local/bin/agy}" node "$AI_CLI" generate \
 ### 🛡️ Reviewer Lớp 2: Native Codex Sol trên ATLAS (Reviewer chính / Primary Acceptance)
 ```bash
 "${CODEX_BIN:-$HOME/.local/bin/codex}" exec \
-  --model gpt-6-sol --sandbox read-only --ephemeral --json \
+  --model gpt-6.1-sol --sandbox read-only --ephemeral --json \
   --skip-git-repo-check --output-last-message "$OUT/sol.md" \
   -c model_reasoning_effort=high -c approval_policy=never - \
   < "$PROMPT_PATH" > sol.events.jsonl 2> stderr.log
@@ -144,7 +145,7 @@ AGY_BIN="${AGY_BIN:-$HOME/.local/bin/agy}" node "$AI_CLI" generate \
 ### 🛡️ Reviewer Lớp 2: Remote Codex Sol trên ORBIT (Fallback 1 khi ATLAS hết quota)
 ```bash
 ssh mac-m1 "codex exec \
-  --model gpt-6-sol --sandbox read-only --ephemeral --json \
+  --model gpt-6.1-sol --sandbox read-only --ephemeral --json \
   --skip-git-repo-check \
   --output-last-message '$REMOTE_OUT/sol.md' \
   -c model_reasoning_effort=high -c approval_policy=never -" \
@@ -196,7 +197,7 @@ Mọi lần dispatch review/writer phải lưu receipt kèm thông tin lineage t
 - **Timestamp**: <YYYY-MM-DD HH:mm:ss>
 - **Role**: <orchestrator | writer | reviewer_l1 | reviewer_l2 | auditor>
 - **Dispatched Route**: <codex | agy | opencode | claude-cli>
-- **Exact Model ID**: <vd: opencode-go/deepseek-v4.1-flash | gpt-6-sol>
+- **Exact Model ID**: <vd: opencode-go/deepseek-v4.1-flash | gpt-6.1-sol>
 - **Routing Reason**: <ordinary | direct Sonnet 5.5: task characteristics | escalation: retryCount>=2 | escalation: hard logic/integration/dependency | fallback: quota/route>
 - **Retry Count / Failure Type / Confidence**: <số lần thất bại / loại lỗi / mức tin cậy cùng bằng chứng>
 - **Node**: <ATLAS | ORBIT>

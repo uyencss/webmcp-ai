@@ -9,7 +9,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 
 | Provider | Model Chủ Lực | CLI Binary | Cờ Headless Bắt Buộc | Input Prompt | Trích Xuất Kết Quả | Lưu Ý Sống Còn |
 |---|---|---|---|---|---|---|
-| **Codex CLI** | `gpt-6-sol`<br>`gpt-5.6-luna` | `codex` | `exec --sandbox read-only --ephemeral --skip-git-repo-check -c approval_policy=never` | Stdin + dấu `-` cuối lệnh | `--output-last-message <f.md>` (hoặc parse stream JSONL) | **BẮT BUỘC** `--skip-git-repo-check` trên Codex 0.155.0+. Thiếu `-` ở cuối sẽ bị treo prompt. |
+| **Codex CLI** | `gpt-6.1-sol`<br>`gpt-5.6-luna` | `codex` | `exec --sandbox read-only --ephemeral --skip-git-repo-check -c approval_policy=never` | Stdin + dấu `-` cuối lệnh | `--output-last-message <f.md>` (hoặc parse stream JSONL) | **BẮT BUỘC** `--skip-git-repo-check` trên Codex 0.155.0+. Thiếu `-` ở cuối sẽ bị treo prompt. |
 | **Claude Code** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude` | `-p --output-format json --restricted` | `< prompt.txt` (stdin) | Thuộc tính `.result` trong stdout JSON | **BẮT BUỘC** `-p` để tránh mở UI TUI interactive. `--restricted` tắt tools can thiệp shell/code. |
 | **Claude Code (Remote M1)** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude` (remote) | Qua SSH worker: `WEBMCP_AI_CLAUDE_HOST=m1` | Stdin `< prompt.txt` (qua JSON payload) | Thuộc tính `.result` trong response JSON | **Fail-closed**: Không fallback về local; git fingerprint verification trước khi spawn; không chuyển giao credentials. |
 | **OpenCode (v2)** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode` | `run --standalone` | Đối số chuỗi hoặc stdin `< prompt.txt` | Text trực tiếp trên stdout hoặc parse NDJSON | **KHÔNG** ép biến `OPENCODE_DB` sang file DB rỗng/chưa sync vì sẽ mất quyền subscription Go models. |
@@ -27,7 +27,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 - **Mẫu lệnh Headless 1-Shot**:
   ```bash
   codex exec \
-    --model gpt-6-sol \
+    --model gpt-6.1-sol \
     --sandbox read-only \
     --ephemeral \
     --skip-git-repo-check \
@@ -118,7 +118,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
   # 3. Gọi Codex qua wrapper:
   node "$AI_CLI" generate \
     --provider codex \
-    --model gpt-6-sol \
+    --model gpt-6.1-sol \
     --effort high \
     --prompt-file "/path/to/prompt.txt" \
     --json > out.json

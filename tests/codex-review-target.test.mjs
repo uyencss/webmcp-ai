@@ -148,7 +148,7 @@ test('codex adapter: reviewTarget never emits --uncommitted/--base/--commit; arg
   const argvFor = (target) => {
     const inv = getProvider('codex').buildInvocation({
       prompt: 'x', taskIntent: 'review', accessProfile: 'review-readonly', reviewTarget: target,
-      model: 'gpt-6-sol', effort: 'low',
+      model: 'gpt-6.1-sol', effort: 'low',
     });
     const stripped = inv.args.map((a) => (typeof a === 'string' && a.includes(tmpdir()) ? '<tmp>' : a));
     inv.cleanup?.();
@@ -170,7 +170,7 @@ test('codex adapter: reviewTarget never emits --uncommitted/--base/--commit; arg
     assert.ok(args.includes('--output-schema'));
     assert.ok(args.includes('--output-last-message'));
     assert.ok(args.includes('-m'));
-    assert.equal(args[args.indexOf('-m') + 1], 'gpt-6-sol');
+    assert.equal(args[args.indexOf('-m') + 1], 'gpt-6.1-sol');
     assert.ok(args.includes('model_reasoning_effort="low"'));
     assert.equal(args.at(-1), '-');
     assert.equal(args.includes('--sandbox'), false);
