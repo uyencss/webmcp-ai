@@ -385,5 +385,5 @@ test('opencode grounded step_start, step_finish, reasoning, and tool events', ()
   const toolWithCmd = classifyProviderLine('opencode', JSON.stringify({
     type: 'tool_use', sessionID: 'ses_123', part: { type: 'tool', tool: 'shell', state: { input: { command: 'git status' } } },
   }));
-  assert.deepEqual(toolWithCmd, { state: 'editing', summary: 'Lệnh: git status' });
+  assert.deepEqual(toolWithCmd, { state: 'editing', summary: 'shell: git status' });
 });

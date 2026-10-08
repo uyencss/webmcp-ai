@@ -101,15 +101,13 @@ function classifyJsonEvent(event) {
     return { state: 'verifying', summary: reason ? `Hoàn tất bước (${reason})` : 'Hoàn tất bước xử lý' };
   }
   if (partType === 'tool' || type === 'tool_use' || type.includes('tool')) {
-    const cmd = part?.state?.input?.command || event?.input?.command || '';
-    if (cmd) {
-      return { state: 'editing', summary: summarize(`Lệnh: ${cmd}`) };
-    }
     const identity = toolIdentity(part) || toolIdentity(event) || summarize(JSON.stringify(event)).slice(0, 80);
-    if (TEST_TOOL_PATTERN.test(identity) || TEST_TOOL_PATTERN.test(JSON.stringify(event))) {
-      return { state: 'testing', summary: summarize(`test tool: ${identity}`) };
+    const cmd = part?.state?.input?.command || event?.input?.command || '';
+    const desc = cmd ? (identity ? `${identity}: ${cmd}` : `Lệnh: ${cmd}`) : `tool: ${identity}`;
+    if (TEST_TOOL_PATTERN.test(identity) || TEST_TOOL_PATTERN.test(cmd) || TEST_TOOL_PATTERN.test(JSON.stringify(event))) {
+      return { state: 'testing', summary: summarize(`test tool: ${desc}`) };
     }
-    return { state: 'editing', summary: summarize(`tool: ${identity}`) };
+    return { state: 'editing', summary: summarize(desc) };
   }
   // Text lives in part.type for server events but in event.type for the
   // legacy `run --format json` text lines the provider parser already reads.
