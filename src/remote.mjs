@@ -19,7 +19,7 @@ const CLAUDE_REMOTE_HOSTS = Object.freeze({
     binary: '/Users/ttcenter/.local/bin/claude',
     worker: '/Users/ttcenter/.webmcp-ai/claude-remote-worker.mjs',
     workspaceRoot: '/Users/ttcenter/Desktop/VIBE_CODE',
-    nodeBin: 'node',
+    nodeBin: '/Users/ttcenter/.local/bin/node',
   }),
 });
 
@@ -300,6 +300,10 @@ export function mapWorkspaceToRemote({ hostId, env = process.env, localWorkspace
   if (override !== undefined && override !== null && override !== '') {
     pairs.push(validateMappingPair(override, 'WEBMCP_AI_CLAUDE_REMOTE_MAP'));
   }
+  pairs.push({
+    local: '/Users/uyenuyen/Desktop/VIBE_CODE',
+    remote: '/Users/ttcenter/Desktop/VIBE_CODE',
+  });
   pairs.push({
     local: '/Users/ttcenter/Desktop/VIBE_CODE',
     remote: '/Users/uyenuyen/Desktop/VIBE_CODE',

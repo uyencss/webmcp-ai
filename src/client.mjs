@@ -550,9 +550,10 @@ export async function generate(input) {
       throw err;
     }
 
-    const expectedPin = PROVIDER_INSTALL_MANIFEST.hosts?.[claudeHost]?.providers?.claude?.version || '2.1.283';
+    const expectedPin = env.WEBMCP_AI_CLAUDE_PIN || PROVIDER_INSTALL_MANIFEST.hosts?.[claudeHost]?.providers?.claude?.version || '2.1.283';
     const actualVersion = extractSemverToken(remoteProbe.version);
-    if (!actualVersion || !versionMatchesPin(remoteProbe.version, expectedPin)) {
+    const allowDrift = env.WEBMCP_AI_CLAUDE_ALLOW_DRIFT === '1' || env.WEBMCP_AI_CLAUDE_ALLOW_DRIFT === 'true';
+    if (!actualVersion || (!versionMatchesPin(remoteProbe.version, expectedPin) && !allowDrift)) {
       if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
       throw new AiCliError('CLAUDE_REMOTE_VERSION_DRIFT', 'Remote Claude CLI version drifted from expected pin', {
         exitCode: 2,
