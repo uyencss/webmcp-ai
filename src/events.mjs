@@ -39,10 +39,17 @@ function summarize(value) {
   return text.length > SUMMARY_MAX_LENGTH ? `${text.slice(0, SUMMARY_MAX_LENGTH)}…` : text;
 }
 
-function partText(part) {
-  if (!part || typeof part !== 'object') return '';
-  if (typeof part.text === 'string') return part.text;
-  if (typeof part.data?.text === 'string') return part.data.text;
+function partText(part, event) {
+  if (part && typeof part === 'object') {
+    if (typeof part.text === 'string' && part.text.trim()) return part.text.trim();
+    if (typeof part.reasoning === 'string' && part.reasoning.trim()) return part.reasoning.trim();
+    if (typeof part.data?.text === 'string' && part.data.text.trim()) return part.data.text.trim();
+    if (typeof part.data?.reasoning === 'string' && part.data.reasoning.trim()) return part.data.reasoning.trim();
+  }
+  if (event && typeof event === 'object') {
+    if (typeof event.text === 'string' && event.text.trim()) return event.text.trim();
+    if (typeof event.reasoning === 'string' && event.reasoning.trim()) return event.reasoning.trim();
+  }
   return '';
 }
 
@@ -86,7 +93,18 @@ function classifyJsonEvent(event) {
   if (type === 'session.created' || type === 'session.idle') {
     return { state: 'researching', summary: summarize(event?.sessionID ? `session ${event.sessionID}` : type) };
   }
-  if (partType === 'tool' || type.includes('tool')) {
+  if (type === 'step_start' || partType === 'step-start') {
+    return { state: 'planning', summary: 'Đang bắt đầu bước xử lý...' };
+  }
+  if (type === 'step_finish' || partType === 'step-finish') {
+    const reason = part?.reason || event?.reason || '';
+    return { state: 'verifying', summary: reason ? `Hoàn tất bước (${reason})` : 'Hoàn tất bước xử lý' };
+  }
+  if (partType === 'tool' || type === 'tool_use' || type.includes('tool')) {
+    const cmd = part?.state?.input?.command || event?.input?.command || '';
+    if (cmd) {
+      return { state: 'editing', summary: summarize(`Lệnh: ${cmd}`) };
+    }
     const identity = toolIdentity(part) || toolIdentity(event) || summarize(JSON.stringify(event)).slice(0, 80);
     if (TEST_TOOL_PATTERN.test(identity) || TEST_TOOL_PATTERN.test(JSON.stringify(event))) {
       return { state: 'testing', summary: summarize(`test tool: ${identity}`) };
@@ -96,7 +114,7 @@ function classifyJsonEvent(event) {
   // Text lives in part.type for server events but in event.type for the
   // legacy `run --format json` text lines the provider parser already reads.
   if (partType === 'text' || partType === 'reasoning' || type === 'text' || type === 'reasoning') {
-    return { state: 'researching', summary: summarize(partText(part)) };
+    return { state: 'researching', summary: summarize(partText(part, event)) };
   }
   // Fallback for a bare/unrecognized event that still carries a sessionID
   // (e.g. a lone `{sessionID}` heartbeat). Grounded real shapes from

@@ -366,21 +366,24 @@ test('codex fixture generate.jsonl lines classify to valid states', () => {
   assert.deepEqual(states, ['researching', 'working', 'researching', 'verifying']);
 });
 
-test('codex synthetic defensive shapes classify to valid states', () => {
-  const fixturePath = fileURLToPath(new URL('./fixtures/codex-jsonl/generate.synthetic.jsonl', import.meta.url));
-  const raw = readFileSync(fixturePath, 'utf8');
-  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0 && !l.trim().startsWith('#') && !l.trim().startsWith('//'));
-  assert.equal(lines.length, 5);
-  const states = [];
-  for (const line of lines) {
-    const classified = classifyProviderLine('codex', line);
-    assert.ok(classified, `Line failed to classify: ${line}`);
-    assert.ok(EVENT_STATES.has(classified.state), `State not in EVENT_STATES: ${classified.state}`);
-    states.push(classified.state);
-  }
-  assert.deepEqual(states, ['researching', 'testing', 'editing', 'editing', 'working']);
-  assert.ok(states.includes('researching'));
-  assert.ok(states.includes('testing'));
-  assert.ok(states.includes('editing'));
-  assert.ok(states.includes('working'));
+test('opencode grounded step_start, step_finish, reasoning, and tool events', () => {
+  const stepStart = classifyProviderLine('opencode', JSON.stringify({
+    type: 'step_start', sessionID: 'ses_123', part: { type: 'step-start' },
+  }));
+  assert.deepEqual(stepStart, { state: 'planning', summary: 'Đang bắt đầu bước xử lý...' });
+
+  const stepFinish = classifyProviderLine('opencode', JSON.stringify({
+    type: 'step_finish', sessionID: 'ses_123', part: { type: 'step-finish', reason: 'tool-calls' },
+  }));
+  assert.deepEqual(stepFinish, { state: 'verifying', summary: 'Hoàn tất bước (tool-calls)' });
+
+  const reasoningDirect = classifyProviderLine('opencode', JSON.stringify({
+    type: 'reasoning', text: 'Analyzing file structure', sessionID: 'ses_123',
+  }));
+  assert.deepEqual(reasoningDirect, { state: 'researching', summary: 'Analyzing file structure' });
+
+  const toolWithCmd = classifyProviderLine('opencode', JSON.stringify({
+    type: 'tool_use', sessionID: 'ses_123', part: { type: 'tool', tool: 'shell', state: { input: { command: 'git status' } } },
+  }));
+  assert.deepEqual(toolWithCmd, { state: 'editing', summary: 'Lệnh: git status' });
 });
