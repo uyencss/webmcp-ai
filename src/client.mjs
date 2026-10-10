@@ -101,12 +101,15 @@ function normalizeRequest(input) {
   const provider = getProvider(input.provider);
   const rejectedEffort = effortRejection({ providerId: provider.id, modelId: input.model, effort: input.effort });
   if (rejectedEffort) {
-    throw new AiCliError('UNSUPPORTED_EFFORT', `${provider.name} model ${input.model} does not accept --effort`, {
+    const message = rejectedEffort.missingEffort
+      ? `${provider.name} model ${input.model} requires --effort (${rejectedEffort.allowedEfforts.join(', ')})`
+      : `${provider.name} model ${input.model} does not accept --effort`;
+    throw new AiCliError('UNSUPPORTED_EFFORT', message, {
       exitCode: 2,
       details: {
         provider: provider.id,
         model: input.model,
-        effort: input.effort,
+        effort: input.effort ?? null,
         allowedEfforts: rejectedEffort.allowedEfforts,
         note: rejectedEffort.note ?? null,
       },
@@ -394,6 +397,59 @@ async function ensureAgyBoundedSupport({ provider, env }) {
     });
   }
   validateAgyBoundedSupport(helpText);
+}
+
+const AGY_MODELS_CACHE_TTL_MS = 60_000;
+let agyModelsCache = { fetchedAt: 0, models: null };
+
+export function resetAgyModelsCache() {
+  agyModelsCache = { fetchedAt: 0, models: null };
+}
+
+export async function fetchAgyAvailableModels({ provider, env = process.env } = {}) {
+  const now = Date.now();
+  if (agyModelsCache.models && now - agyModelsCache.fetchedAt < AGY_MODELS_CACHE_TTL_MS) {
+    return agyModelsCache.models;
+  }
+  const lines = await listModels(provider?.id || 'agy', { env });
+  const modelIds = new Set(
+    lines
+      .map((line) => line.split(/\s+/)[0]?.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  agyModelsCache = { fetchedAt: now, models: modelIds };
+  return modelIds;
+}
+
+export async function ensureAgyModelAvailable({ provider, model, env }) {
+  let available;
+  try {
+    available = await fetchAgyAvailableModels({ provider, env });
+  } catch (error) {
+    if (error instanceof AiCliError) throw error;
+    throw new AiCliError('PROVIDER_CAPABILITY_DRIFT', `Failed to probe AGY available models: ${error?.message || error}`, {
+      exitCode: 2,
+      details: { capability: 'modelDiscovery', provider: 'agy' },
+    });
+  }
+  const normalizedModel = String(model || '').trim().toLowerCase();
+  if (available.has(normalizedModel)) return true;
+
+  const hasMatchingPrefix = Array.from(available).some((m) => m.startsWith(`${normalizedModel}-`));
+  if (hasMatchingPrefix) return true;
+
+  throw new AiCliError(
+    'MODEL_UNAVAILABLE',
+    `AGY model '${model}' is currently unavailable from the Antigravity backend. Claude 5.5 models are dynamic; check available models via 'agy models' or 'webmcp-ai models list --provider agy'.`,
+    {
+      exitCode: 2,
+      details: {
+        provider: provider.id,
+        model,
+        availableModels: Array.from(available),
+      },
+    }
+  );
 }
 
 /**
@@ -782,6 +838,20 @@ export async function generate(input) {
       try { invocation.cleanup?.(); } catch {}
       if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
       throw error;
+    }
+  }
+
+  // Dynamic model availability probe (e.g. AGY Claude 5.5 models)
+  if (provider.id === 'agy' && request.model) {
+    const described = describeModel('agy', request.model);
+    if (described?.dynamicAvailability) {
+      try {
+        await ensureAgyModelAvailable({ provider, model: request.model, env });
+      } catch (error) {
+        try { invocation.cleanup?.(); } catch {}
+        if (policyWorkspace) { try { rmSync(policyWorkspace, { recursive: true, force: true }); } catch {} }
+        throw error;
+      }
     }
   }
 

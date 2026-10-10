@@ -292,7 +292,7 @@ Bảng tra cứu cú pháp gọi 1-shot headless và quy tắc trích xuất cho
 | **Codex** | `gpt-6.1-sol`<br>`gpt-5.6-luna` | `codex exec --model <m> --sandbox read-only --ephemeral --skip-git-repo-check -c model_reasoning_effort=high -c approval_policy=never --output-last-message <f.md> - < <prompt>` | Stdin + `-` | File `<f.md>` (văn bản sạch) | **BẮT BUỘC** `--skip-git-repo-check` trên Codex 0.155.0+. Thiếu `-` ở cuối sẽ bị treo prompt. |
 | **Claude** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude -p --model <m> --effort high --output-format json --restricted < <prompt> > out.json` | Stdin `< prompt` | JSON `.result` | **BẮT BUỘC** `-p` để tránh interactive TUI. `--restricted` tắt tools can thiệp shell/code. |
 | **OpenCode** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode run --standalone --format json --agent plan --model <m> < <prompt> > out.json` | Stdin `< prompt` hoặc đối số chuỗi | Stdout text hoặc JSON | **KHÔNG** ép biến `OPENCODE_DB` sang file DB rỗng/chưa sync vì sẽ mất quyền subscription Go models. |
-| **AGY** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | `node "$AI_CLI" generate --provider agy --model <m> [--effort high] --prompt "..." --json` | `--prompt` hoặc stdin | JSON `response.text` | Claude Opus 4.6 **KHÔNG** hỗ trợ `--effort` (exits 1). Flash hỗ trợ `--effort high`. |
+| **AGY** | `gemini-3.8-flash-high`<br>`claude-sonnet-5-5-medium`<br>`claude-opus-5-5-medium` | `node "$AI_CLI" generate --provider agy --model <m> [--effort high] --prompt "..." --json` | `--prompt` hoặc stdin | JSON `response.text` | Claude Sonnet/Opus 5.5 hỗ trợ `--effort` (hoặc chọn sẵn qua suffix `-low`, `-medium`, `-high`). **LƯU Ý**: 2 model Claude 5.5 là dynamic, backend có thể tắt/hết quota tùy thời điểm nên wrapper tự động kiểm tra availability qua `agy models` trước khi dispatch. |
 | **WebMCP AI** | Mọi model trên | `node "$AI_CLI" generate --provider <p> --model <m> --prompt-file <f> --json` | `--prompt-file` | JSON `response.text` | Wrapper thống nhất tự động cô lập workspace, chuẩn hóa `error.code` (không sync credentials — installer không login/copy auth). |
 
 ### 2. Mẫu Lệnh Headless 1-Shot Chi Tiết
@@ -346,14 +346,21 @@ node "$AI_CLI" generate --provider codex --model gpt-6.1-sol --effort high --pro
 
 # Gemini 3.8 Flash (AGY):
 node "$AI_CLI" generate --provider agy --model gemini-3.8-flash-high --effort high --prompt-file "/path/prompt.txt" --json
+
+# Claude Sonnet 5.5 / Opus 5.5 qua AGY (tự động validate availability trước khi dispatch):
+node "$AI_CLI" generate --provider agy --model claude-sonnet-5-5-medium --prompt-file "/path/prompt.txt" --json
+node "$AI_CLI" generate --provider agy --model claude-opus-5-5 --effort high --prompt-file "/path/prompt.txt" --json
 ```
 
 ### 3. Preflight & Fallback Rules Cho Agent
 1. **Kiểm tra Quota**: `node $VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`
-2. **Fallback khi hết Quota**:
+2. **Kiểm tra Availability của Dynamic Models (AGY Claude 5.5)**:
+   - Chạy `node "$AI_CLI" models list --provider agy --json` hoặc `agy models` để kiểm tra các model Claude 5.5 có trong danh sách khả dụng hiện thời không.
+   - Nếu backend trả thiếu `claude-sonnet-5-5` hoặc `claude-opus-5-5`, fallback sang `gemini-3.8-flash-high` (`high`) hoặc Claude Code Native (`claude-sonnet-5-5`).
+3. **Fallback khi hết Quota**:
    - Codex ATLAS 5h = 0% $\rightarrow$ Route sang Mac M1 (SSH alias do operator tự khai báo, ví dụ `ssh mac-m1 'codex exec ...'` — khác với alias `mac-pro14` mà wrapper dùng cho host `m1`) hoặc đổi Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
    - Claude Weekly < 20% $\rightarrow$ Ưu tiên AGY Claude / Gemini Flash để bảo vệ quota Claude Code CLI.
-3. **Lineage Honesty**: Ghi đúng provider/model vào ledger; không ngụy tạo tên route.
+4. **Lineage Honesty**: Ghi đúng provider/model vào ledger; không ngụy tạo tên route.
 
 ## Provider install plan/apply
 

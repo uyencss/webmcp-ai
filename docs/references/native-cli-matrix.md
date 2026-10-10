@@ -13,7 +13,7 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
 | **Claude Code** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude` | `-p --output-format json --restricted` | `< prompt.txt` (stdin) | Thuộc tính `.result` trong stdout JSON | **BẮT BUỘC** `-p` để tránh mở UI TUI interactive. `--restricted` tắt tools can thiệp shell/code. |
 | **Claude Code (Remote M1)** | `claude-opus-5-5`<br>`claude-sonnet-4-6` | `claude` (remote) | Qua SSH worker: `WEBMCP_AI_CLAUDE_HOST=m1` | Stdin `< prompt.txt` (qua JSON payload) | Thuộc tính `.result` trong response JSON | **Fail-closed**: Không fallback về local; git fingerprint verification trước khi spawn; không chuyển giao credentials. |
 | **OpenCode (v2)** | `opencode-go/deepseek-v4.1-flash`<br>`opencode-go/muse-spark-1.3-contributor` | `opencode` | `run --standalone` | Đối số chuỗi hoặc stdin `< prompt.txt` | Text trực tiếp trên stdout hoặc parse NDJSON | **KHÔNG** ép biến `OPENCODE_DB` sang file DB rỗng/chưa sync vì sẽ mất quyền subscription Go models. |
-| **Antigravity** | `gemini-3.8-flash-high`<br>`claude-opus-4-6-thinking` | `agy` (hoặc wrapper) | `--agent-mode plan` (khi qua wrapper) | `-p "..."` hoặc stdin | `response.text` (hoặc brain artifact .md) | `claude-opus-4-6-thinking` **KHÔNG** hỗ trợ `--effort` (sẽ lỗi exit 1). Gemini Flash hỗ trợ `--effort high`. |
+| **Antigravity** | `gemini-3.8-flash-high`<br>`claude-sonnet-5-5-medium`<br>`claude-opus-5-5-medium` | `agy` (hoặc wrapper) | `--agent-mode plan` (khi qua wrapper) | `-p "..."` hoặc stdin | `response.text` (hoặc brain artifact .md) | Claude Sonnet/Opus 5.5 hỗ trợ `--effort` (hoặc suffix `-low|-medium|-high`). **Dynamic model**: cần check `agy models` trước khi dispatch (wrapper tự validate). |
 | **WebMCP AI** | Mọi model trên | `webmcp-ai` | `generate --json` | `--prompt "..."` hoặc `--prompt-file <path>` | Chuẩn JSON `{ ok: true, response: { text } }` | Wrapper thống nhất tự động cô lập workspace, chuẩn hóa mã lỗi `error.code`. |
 
 ---
@@ -130,19 +130,28 @@ Mục tiêu: Cung cấp lệnh headless 1-shot đã được kiểm chứng cho 
     --effort high \
     --prompt-file "/path/to/prompt.txt" \
     --json > out.json
+
+  # 5. Gọi Claude Sonnet 5.5 / Opus 5.5 qua AGY (tự động check availability):
+  node "$AI_CLI" generate \
+    --provider agy \
+    --model claude-sonnet-5-5-medium \
+    --prompt-file "/path/to/prompt.txt" \
+    --json > out.json
   ```
 - **Quy tắc trích xuất**:
   - Kiểm tra `ok: true` $\rightarrow$ lấy nội dung tại `response.text`.
   - Nếu fork thành công, `session` chứa `{ id, resumable: true, forkedFrom }`.
-  - Nếu `ok: false` $\rightarrow$ đọc mã lỗi tại `error.code` (ví dụ: `PROVIDER_AUTH_FAILED`, `PROVIDER_NO_ROUTE`, `RATE_LIMIT_EXCEEDED`, `UNSUPPORTED_CAPABILITY`).
+  - Nếu `ok: false` $\rightarrow$ đọc mã lỗi tại `error.code` (ví dụ: `PROVIDER_AUTH_FAILED`, `PROVIDER_NO_ROUTE`, `RATE_LIMIT_EXCEEDED`, `MODEL_UNAVAILABLE`, `UNSUPPORTED_CAPABILITY`).
 
 ---
 
 ## 3. Checklist Preflight Cho Agent Trước Khi Dispatch Lệnh
 1. **Kiểm tra Quota**:
    - `node /Users/ttcenter/Desktop/VIBE_CODE/.agents/skills/ai-cli-usage/scripts/get-quotas.mjs --all --json`
-2. **Quy tắc Fallback Model**:
+2. **Kiểm tra Dynamic Models (AGY Claude 5.5)**:
+   - Trước khi dispatch `claude-sonnet-5-5` hoặc `claude-opus-5-5`, verify availability bằng `webmcp-ai models list --provider agy` hoặc `agy models`. Model có thể tạm thời không khả dụng tùy backend Google/Antigravity.
+3. **Quy tắc Fallback Model**:
    - Codex 5h window = 0% $\rightarrow$ Route sang Mac M1 (SSH alias do operator tự khai báo, ví dụ `ssh mac-m1`; wrapper dùng alias khai báo `mac-pro14` cho host `m1`) hoặc chuyển Reviewer L2 sang Claude Opus 5.5 / DeepSeek v4.1 Flash.
    - Claude Weekly < 20% $\rightarrow$ Ưu tiên dùng AGY Claude hoặc AGY Gemini Flash để bảo vệ hạn ngạch Claude Code CLI.
-3. **Lineage Honesty**:
+4. **Lineage Honesty**:
    - Ghi nhận đúng provider và model trong nhật ký / ledger; không ngụy tạo model hoặc đổi tên route.

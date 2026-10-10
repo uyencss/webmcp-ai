@@ -51,6 +51,56 @@ const MODEL_OVERRIDES = Object.freeze({
   },
   'agy:claude-sonnet-4-6': { supportsEffort: false, effortValues: [] },
   'agy:gemini-3.8-flash-high': { supportsEffort: true, effortValues: ['low', 'medium', 'high'] },
+  'agy:claude-opus-5-5': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high'],
+    requiresEffort: true,
+    dynamicAvailability: true,
+    note: 'AGY Claude Opus 5.5 requires --effort (low|medium|high). Dynamic model; check availability via agy models before dispatch',
+  },
+  'agy:claude-opus-5-5-low': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high', 'max'],
+    dynamicAvailability: true,
+    note: 'AGY Claude Opus 5.5 (Low). Dynamic model; check availability via agy models before dispatch',
+  },
+  'agy:claude-opus-5-5-medium': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high', 'max'],
+    dynamicAvailability: true,
+    note: 'AGY Claude Opus 5.5 (Medium). Dynamic model; check availability via agy models before dispatch',
+  },
+  'agy:claude-opus-5-5-high': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high', 'max'],
+    dynamicAvailability: true,
+    note: 'AGY Claude Opus 5.5 (High). Dynamic model; check availability via agy models before dispatch',
+  },
+  'agy:claude-sonnet-5-5': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high'],
+    requiresEffort: true,
+    dynamicAvailability: true,
+    note: 'AGY Claude Sonnet 5.5 requires --effort (low|medium|high). Dynamic model; check availability via agy models before dispatch',
+  },
+  'agy:claude-sonnet-5-5-low': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high', 'max'],
+    dynamicAvailability: true,
+    note: 'AGY Claude Sonnet 5.5 (Low). Dynamic model; check availability via agy models before dispatch',
+  },
+  'agy:claude-sonnet-5-5-medium': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high', 'max'],
+    dynamicAvailability: true,
+    note: 'AGY Claude Sonnet 5.5 (Medium). Dynamic model; check availability via agy models before dispatch',
+  },
+  'agy:claude-sonnet-5-5-high': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high', 'max'],
+    dynamicAvailability: true,
+    note: 'AGY Claude Sonnet 5.5 (High). Dynamic model; check availability via agy models before dispatch',
+  },
   'opencode:opencode-go/muse-spark-1.3-contributor': {
     supportsEffort: true,
     effortValues: ['low', 'medium', 'high', 'xhigh'],
@@ -123,6 +173,8 @@ export function describeModel(providerId, modelId) {
     supportsEffort: override?.supportsEffort ?? null,
     effortValues: override?.effortValues ?? null,
     defaultEffort: override?.defaultEffort ?? null,
+    requiresEffort: override?.requiresEffort ?? false,
+    dynamicAvailability: override?.dynamicAvailability ?? false,
     maxPromptBytes: surface.maxPromptBytes,
     artifacts: surface.artifacts,
     note: override?.note ?? null,
@@ -142,8 +194,17 @@ export function describeModel(providerId, modelId) {
  * Returns null for an unknown model/allowed value.
  */
 export function effortRejection({ providerId, modelId, effort }) {
-  if (effort === undefined || effort === null || effort === '') return null;
   const described = describeModel(providerId, modelId);
+  if (effort === undefined || effort === null || effort === '') {
+    if (described && described.requiresEffort) {
+      return {
+        missingEffort: true,
+        allowedEfforts: described.effortValues ?? [],
+        note: described.note,
+      };
+    }
+    return null;
+  }
   if (described && described.supportsEffort === false) {
     return { allowedEfforts: described.effortValues ?? [], note: described.note };
   }

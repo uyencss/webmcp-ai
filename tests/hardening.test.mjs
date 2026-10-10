@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { resolveAgyArtifacts } from '../src/artifacts.mjs';
-import { describeGenerateDryRun } from '../src/client.mjs';
+import { describeGenerateDryRun, ensureAgyModelAvailable, resetAgyModelsCache } from '../src/client.mjs';
 import { describeModel, describeProviderEffort, effortRejection } from '../src/model-capabilities.mjs';
 import { withV2Db } from './fixtures/opencode-v2-db.mjs';
 
@@ -387,4 +387,110 @@ test('opencode lock retry can be disabled', () => {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(locked.dir, { recursive: true, force: true });
   }
+});
+
+test('AGY Claude 5.5 models: describeModel, effort requirements, and dry-run validation', () => {
+  const sonnetMedium = describeModel('agy', 'claude-sonnet-5-5-medium');
+  assert.equal(sonnetMedium.known, true);
+  assert.equal(sonnetMedium.supportsEffort, true);
+  assert.equal(sonnetMedium.requiresEffort, false);
+  assert.equal(sonnetMedium.dynamicAvailability, true);
+
+  const sonnetBase = describeModel('agy', 'claude-sonnet-5-5');
+  assert.equal(sonnetBase.known, true);
+  assert.equal(sonnetBase.supportsEffort, true);
+  assert.equal(sonnetBase.requiresEffort, true);
+  assert.deepEqual(sonnetBase.effortValues, ['low', 'medium', 'high']);
+  assert.equal(sonnetBase.dynamicAvailability, true);
+
+  const opusHigh = describeModel('agy', 'claude-opus-5-5-high');
+  assert.equal(opusHigh.known, true);
+  assert.equal(opusHigh.supportsEffort, true);
+  assert.equal(opusHigh.requiresEffort, false);
+  assert.equal(opusHigh.dynamicAvailability, true);
+
+  const opusBase = describeModel('agy', 'claude-opus-5-5');
+  assert.equal(opusBase.known, true);
+  assert.equal(opusBase.supportsEffort, true);
+  assert.equal(opusBase.requiresEffort, true);
+  assert.deepEqual(opusBase.effortValues, ['low', 'medium', 'high']);
+  assert.equal(opusBase.dynamicAvailability, true);
+
+  // Missing effort on base model triggers missingEffort
+  const missingEffortReject = effortRejection({ providerId: 'agy', modelId: 'claude-sonnet-5-5', effort: null });
+  assert.equal(missingEffortReject.missingEffort, true);
+  assert.deepEqual(missingEffortReject.allowedEfforts, ['low', 'medium', 'high']);
+
+  // Valid effort on base model passes
+  assert.equal(effortRejection({ providerId: 'agy', modelId: 'claude-sonnet-5-5', effort: 'medium' }), null);
+
+  // Model with suffix does not require effort flag
+  assert.equal(effortRejection({ providerId: 'agy', modelId: 'claude-sonnet-5-5-medium', effort: null }), null);
+
+  // Dry-run enforces required effort on base model
+  const workspace = mkdtempSync(join(tmpdir(), 'webmcp-ai-sonnet-'));
+  try {
+    assert.throws(
+      () => describeGenerateDryRun({
+        provider: 'agy', prompt: 'x', model: 'claude-sonnet-5-5', workspace, env: {},
+      }),
+      (err) => err.code === 'UNSUPPORTED_EFFORT' && err.message.includes('requires --effort'),
+    );
+    const okBase = describeGenerateDryRun({
+      provider: 'agy', prompt: 'x', model: 'claude-sonnet-5-5', effort: 'medium', workspace, env: {},
+    });
+    assert.equal(okBase.dryRun, true);
+
+    const okSuffixed = describeGenerateDryRun({
+      provider: 'agy', prompt: 'x', model: 'claude-sonnet-5-5-medium', workspace, env: {},
+    });
+    assert.equal(okSuffixed.dryRun, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('ensureAgyModelAvailable validates model availability against agy models', async () => {
+  resetAgyModelsCache();
+  const fakeEnv = {
+    ...process.env,
+    AGY_BIN: fakeBin,
+    FAKE_MODELS: 'gemini-3.8-flash-high\nclaude-sonnet-5-5-medium\nclaude-opus-5-5-high',
+  };
+
+  // Direct available match
+  await assert.doesNotReject(async () => {
+    await ensureAgyModelAvailable({
+      provider: { id: 'agy' },
+      model: 'claude-sonnet-5-5-medium',
+      env: fakeEnv,
+    });
+  });
+
+  // Base alias match (claude-opus-5-5 matches claude-opus-5-5-high)
+  await assert.doesNotReject(async () => {
+    await ensureAgyModelAvailable({
+      provider: { id: 'agy' },
+      model: 'claude-opus-5-5',
+      env: fakeEnv,
+    });
+  });
+
+  // Unavailable model rejects MODEL_UNAVAILABLE
+  resetAgyModelsCache();
+  const unavailableEnv = {
+    ...process.env,
+    AGY_BIN: fakeBin,
+    FAKE_MODELS: 'gemini-3.8-flash-high\ngemini-3.7-flash-high',
+  };
+  await assert.rejects(
+    async () => {
+      await ensureAgyModelAvailable({
+        provider: { id: 'agy' },
+        model: 'claude-sonnet-5-5-medium',
+        env: unavailableEnv,
+      });
+    },
+    (err) => err.code === 'MODEL_UNAVAILABLE' && err.message.includes('currently unavailable'),
+  );
 });

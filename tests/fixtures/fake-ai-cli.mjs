@@ -42,7 +42,11 @@ if (args.includes('--help')) {
 }
 
 if (args[0] === 'models') {
-  process.stdout.write('model-one\nmodel-two\n');
+  if (process.env.FAKE_MODELS) {
+    process.stdout.write(`${process.env.FAKE_MODELS}\n`);
+  } else {
+    process.stdout.write('model-one\nmodel-two\n');
+  }
   process.exit(0);
 }
 

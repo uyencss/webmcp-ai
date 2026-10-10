@@ -4,6 +4,11 @@ All notable changes to `@gyga-browser/webmcp-ai` are documented here.
 
 ## Unreleased
 
+- AGY Claude Opus 5.5 and Sonnet 5.5 model support and dynamic availability validation:
+  - **Model overrides & effort requirements (`src/model-capabilities.mjs`)**: added entries for `agy:claude-opus-5-5[-low|-medium|-high]` and `agy:claude-sonnet-5-5[-low|-medium|-high]`. Base aliases (`claude-opus-5-5`, `claude-sonnet-5-5`) enforce `requiresEffort: true` (`low`, `medium`, `high`) matching native AGY requirements; suffixed variants support effort levels `['low', 'medium', 'high', 'max']`.
+  - **Dynamic model availability checking (`src/client.mjs`)**: because Claude 5.5 models on Google Antigravity backend are dynamic and quota/region-dependent, added `ensureAgyModelAvailable` with 60s caching. Before spawning AGY with a dynamic model, `generate` automatically validates against `agy models`. Unavailable models fail fast with typed `MODEL_UNAVAILABLE` before spawning.
+  - **Documentation & skills**: updated `skills/webmcp-ai-cli/SKILL.md`, `skills/ai-role-dispatch/SKILL.md`, and `docs/references/native-cli-matrix.md` with invocation commands, fallback rules, and preflight checklist.
+
 - `npm run install:agent` now also installs the companion skill for OpenCode
   (`~/.config/opencode/skills/webmcp-ai-cli`) alongside codex/gemini/claude.
 
