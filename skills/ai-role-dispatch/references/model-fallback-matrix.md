@@ -4,40 +4,31 @@ Tài liệu tham chiếu chi tiết về luồng rẽ nhánh và kích hoạt Fa
 
 ---
 
-## 1. Sơ đồ luồng rẽ nhánh Reviewer Lớp 2 (Reviewer chính / Final Acceptance Gate)
+## 1. Sơ đồ luồng rẽ nhánh Reviewer Lớp 2 (Task/Milestone/Phase Preview & Final Plan Review)
 
 ```
-[Bắt đầu Review Lớp 2 - Reviewer chính]
+[Bắt đầu Review Lớp 2]
          |
-         v
-+-------------------------------+
-| Kiểm tra Quota ATLAS Sol 5h    |
-+-------------------------------+
-         |
-    (5h > 0% & Quota OK) ----> [Dispatch Native Codex Sol (gpt-6.1-sol) trên ATLAS]
-         |
-         v (5h = 0% hoặc Route Blocked)
-+-------------------------------+
-| Probe node ORBIT (Mac M1)     |
-+-------------------------------+
-         |
-    (ORBIT Sol OK) ------------> [Dispatch gpt-6.1-sol qua Tailscale SSH mac-m1]
-         |
-         v (ORBIT không khả dụng hoặc hết quota)
-+-------------------------------+
-| Kiểm tra Quota Claude Code CLI|
-+-------------------------------+
-         |
-    (Weekly >= 20%) -----------> [Dispatch Claude Code CLI Opus 5.5 (claude-opus-5-5 / opus)]
-         |
-         v (Weekly < 20% hoặc cạn)
-+-------------------------------+
-| KÍCH HOẠT DỰ PHÒNG KHẨN CẤP  |
-| OpenCode DeepSeek v4.1 Flash  |
-+-------------------------------+
-         |
-         +--> [BẮT BUỘC: opencode-go/deepseek-v4.1-flash]
-              (TUYỆT ĐỐI CẤM deepseek-v4-flash)
+         +-------------------------------------------------------+
+         |                                                       |
+         v (Task / Milestone / Phase Preview)                    v (Final Review Toàn Plan)
++------------------------------------+                 +------------------------------------+
+| Kiểm tra Quota AGY Gemini 4 Argon  |                 | Kiểm tra Quota Claude Code CLI     |
++------------------------------------+                 +------------------------------------+
+         |                                                       |
+    (Quota OK) --> [Dispatch AGY Gemini 4 Argon High]       (Weekly >= 20%) --> [Dispatch Claude Code CLI Opus 5.5]
+         |                                                       |
+         v (Hết Quota / Route Blocked hoặc Operator chọn)         v (Weekly < 20% hoặc cạn)
++------------------------------------+                 +------------------------------------+
+| Lựa chọn Song Song / Dự Phòng:     |                 | Fallback 1: AGY Claude Opus 5.5    |
+| OpenCode DeepSeek v4.1 Flash       |                 | (dùng quota Antigravity độc lập)   |
++------------------------------------+                 +------------------------------------+
+         |                                                       |
+         +--> [BẮT BUỘC: opencode-go/deepseek-v4.1-flash]        v (Toàn bộ Claude cạn)
+              (TUYỆT ĐỐI CẤM deepseek-v4-flash)        +------------------------------------+
+                                                       | Emergency Fallback:                |
+                                                       | AGY Gemini 4 Argon Medium          |
+                                                       +------------------------------------+
 ```
 
 ---
@@ -47,29 +38,34 @@ Tài liệu tham chiếu chi tiết về luồng rẽ nhánh và kích hoạt Fa
 ```
 [Lựa chọn Writer Chính]
          |
-         +--> [Primary: OpenCode Muse Contributor (xhigh)]
+         +--> [Primary: AGY Gemini 3.8 Flash High (effort high)]
          |
-    (Nếu lỗi/hết quota) ---------> [Fallback: AGY Gemini 3.8 Flash High]
+    (Nếu cạn quota / escalation) ---> [Fallback 1: Claude Sonnet 5.5 / 4.6 (direct/escalation)]
+         |
+    (Nếu AGY unavailable) ----------> [Fallback 2: OpenCode Muse 1.3 Contributor (xhigh)]
          |
          v
 +-------------------------------------------------------------------------+
-| BẮT BUỘC ĐỔI LINEAGE CHO REVIEWER LỚP 1 (PRE-ACCEPTANCE / REVIEW PHỤ)   |
+| BẮT BUỘC ĐỔI LINEAGE CHO REVIEWER LỚP 1 (PREVIEW PRE-ACCEPTANCE / TESTS)|
 +-------------------------------------------------------------------------+
          |
-         +--> Nếu Writer là Muse Contributor:
-         |    Reviewer L1 (Review nhanh) = Claude Code Sonnet 5.5 High
-         |    Fallback = AGY Gemini Flash High / Claude Sonnet 4.6
-         |    (Sonnet chỉ làm L1, không làm final gate)
+         +--> Nếu Writer là AGY Gemini Flash 3.8:
+         |    Reviewer L1 Preview Preaccept = OpenCode Muse 1.3 Contributor (xhigh)
+         |    Fallback L1 = Claude Code Sonnet 5.5 High
+         |    (Đảm bảo ranh giới lineage độc lập tuyệt đối giữa AGY và OpenCode)
          |
-         +--> Nếu Writer là AGY hoặc Claude Code Sonnet 5.5:
-              Reviewer L1 = OpenCode Muse Contributor (hoặc Gemini khi Writer là Claude)
-              (TUYỆT ĐỐI CẤM tự review)
+         +--> Nếu Writer là Claude Sonnet 5.5 / 4.6:
+         |    Reviewer L1 Preview Preaccept = OpenCode Muse 1.3 hoặc AGY Gemini Flash 3.8
+         |
+         +--> Nếu Writer là OpenCode Muse 1.3 (fallback lane):
+              Reviewer L1 = Claude Code Sonnet 5.5 High hoặc AGY Gemini Flash 3.8
+              (TUYỆT ĐỐI CẤM tự review cùng lineage)
 ```
 
-Review L1 Sonnet 5.5 High chỉ đọc diff/scope rõ, kiểm tra test completeness, regression và API contract; không spawn agent hay tự sửa code. Logic phức tạp, architecture conflict, worker disagreement, root cause chưa rõ hoặc `retryCount >= 2` chuyển sang Sol High làm final arbiter L2.
+Review L1 Sonnet 5.5 High chỉ đọc diff/scope rõ, kiểm tra test completeness, regression và API contract; không spawn agent hay tự sửa code. Đánh giá preview task/milestone/phase thuộc về Gemini 4 Argon (hoặc DeepSeek v4.1 Flash); logic phức tạp, architecture conflict, worker disagreement, root cause chưa rõ hoặc `retryCount >= 2` và duyệt toàn bộ plan thuộc về Claude Opus 5.5 / Gemini 4 Argon làm final arbiter L2.
 
 > ⛔ **CẤM TUYỆT ĐỐI**:
-> 1. KHÔNG bao giờ dùng DeepSeek (kể cả `deepseek-v4.1-flash`) cho vai trò **Writer** dưới bất kỳ hình thức nào. DeepSeek CHỈ ĐƯỢC PHÉP dùng làm fallback khẩn cấp cho Orchestrator và Reviewer Lớp 2 khi các model chính cạn quota.
+> 1. KHÔNG bao giờ dùng DeepSeek (kể cả `deepseek-v4.1-flash`) cho vai trò **Writer** dưới bất kỳ hình thức nào. DeepSeek CHỈ ĐƯỢC PHÉP dùng làm preview task/milestone/phase (hoặc song song cùng Gemini 4 Argon) và fallback cho Orchestrator / Reviewer Lớp 2 khi các model chính cạn quota.
 > 2. TUYỆT ĐỐI KHÔNG dùng GLM (kể cả `9router/glm-5.3-flash`) làm fallback cho Writer hoặc các vai trò khác trong ma trận điều phối.
 
 ---
@@ -85,7 +81,7 @@ Review L1 Sonnet 5.5 High chỉ đọc diff/scope rõ, kiểm tra test completen
          |      -> Giao trực tiếp Sonnet 5.5, ghi lý do chọn
          |
          +--> Đơn giản/deterministic hoặc không đạt direct fit
-         |      -> Writer thường; tối đa 1 lần retry có giả thuyết sửa mới
+         |      -> Writer Gemini Flash 3.8; tối đa 1 lần retry có giả thuyết sửa mới
          |
          +--> Logic nghiệp vụ khó / integration nhiều thành phần /
          |    dependency khó, hoặc task không đơn giản với confidence < 0.65 có bằng chứng
@@ -93,7 +89,7 @@ Review L1 Sonnet 5.5 High chỉ đọc diff/scope rõ, kiểm tra test completen
          |
          +--> Cùng nguyên nhân thất bại 2 lần (retryCount >= 2)
                 -> Claude Code CLI Sonnet 5.5 làm final fixer
-                   -> Reviewer L1 khác lineage -> Reviewer L2 final gate
+                   -> Reviewer L1 khác lineage -> Reviewer L2 (Gemini 4 Argon / Claude Opus 5.5) acceptance
 ```
 
 Direct fit là tiêu chí chọn worker trước khi thử, không cần worker thường thất bại. Với kiến trúc còn mở, coordinator chốt plan và gate trước khi giao phần implementation đã scope. Nếu nhiều worker thất bại hoặc đưa ra diff mâu thuẫn, chuyển plan/diff/log/test cho Sonnet 5.5 để chẩn đoán và hợp nhất. Chỉ giao Sonnet 5.5 làm reviewer phụ L1 khi nó không viết diff đó. Lỗi mạng/quota/model ID là lỗi route: kiểm tra log và fallback theo provider, không tính như thất bại logic. Sau một lượt Sonnet không đạt acceptance criteria, dừng retry tự động và trả bằng chứng cho coordinator.
@@ -104,8 +100,10 @@ Direct fit là tiêu chí chọn worker trước khi thử, không cần worker 
 
 | Mã lỗi / Trạng thái | Nguyên nhân | Hành động ứng phó (Fallback Action) |
 |---|---|---|
-| `CODEX_QUOTA_EXHAUSTED` | Hết quota 5h trên máy local ATLAS | Chuyển sang ORBIT qua SSH `ssh mac-m1`. Nếu ORBIT cũng hết, chuyển sang Claude CLI hoặc DeepSeek v4.1 Flash. |
-| `CLAUDE_RATE_LIMITED` | Vượt rate limit hoặc weekly < 20% | Khóa direct Claude CLI, chuyển sang AGY Claude (quota độc lập) hoặc DeepSeek v4.1 Flash. |
+| `ARGON_QUOTA_EXHAUSTED` | Hết quota Gemini 4 Argon trên AGY | Chuyển sang OpenCode DeepSeek v4.1 Flash (`opencode-go/deepseek-v4.1-flash`, effort `high`) để preview task/milestone/phase. |
+| `GEMINI_FLASH_QUOTA_EXHAUSTED` | Hết quota Gemini 3.8 Flash làm Writer | Chuyển sang Claude Sonnet 5.5 / 4.6 hoặc OpenCode Muse 1.3 Contributor (`opencode-go/muse-spark-1.3-contributor`). |
+| `CODEX_QUOTA_EXHAUSTED` | Hết quota 5h Codex trên ATLAS | Chuyển Orchestrator sang OpenCode DeepSeek v4.1 Flash hoặc Interactive Coordinator mode. |
+| `CLAUDE_RATE_LIMITED` | Vượt rate limit hoặc weekly < 20% khi Final Plan Review | Chuyển sang AGY Claude Opus 5.5 (`claude-opus-5-5-high`) hoặc dùng Gemini 4 Argon làm arbiter. |
 | `PROVIDER_EXIT_ERROR` | Lỗi crash process hoặc model selection không hợp lệ | Đọc `stderr.log`. Nếu do cờ `--effort` (ví dụ AGY Claude không hỗ trợ `--effort`), bỏ cờ và retry; nếu sập route, nhảy sang fallback tiếp theo trong `roles.manifest.json`. |
 | `TASK_RETRY_ESCALATION` | `retryCount >= 2` với cùng nguyên nhân, hoặc nhiều worker sửa thất bại | Giao Sonnet 5.5 làm final fixer, kèm acceptance criteria, write-set, log/test và diff; giữ review độc lập. |
 | `TASK_DIRECT_SONNET55` | Task đã scope rõ, có acceptance criteria và một direct fit nêu ở trên | Coordinator giao thẳng Sonnet 5.5 ở `retryCount = 0`, ghi lý do chọn và giữ review độc lập. |
