@@ -51,6 +51,25 @@ test('generate dry-run redacts the AGY schema temp file path', () => {
   }
 });
 
+test('generate dry-run normalizes legacy claude opus models to claude-opus-5-5', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'webmcp-ai-claude-opus-dryrun-'));
+  try {
+    const preview = describeGenerateDryRun({
+      provider: 'claude',
+      prompt: 'preview',
+      model: 'claude-opus-4-6',
+      workspace,
+      env: {},
+    });
+    assert.equal(preview.model, 'claude-opus-5-5');
+    assert.ok(preview.args.includes('--model'));
+    const modelIdx = preview.args.indexOf('--model');
+    assert.equal(preview.args[modelIdx + 1], 'claude-opus-5-5');
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 function createFakeOpencode(t) {
   const dir = mkdtempSync(join(tmpdir(), 'webmcp-ai-task0-'));
   const bin = join(dir, 'fake-opencode.mjs');

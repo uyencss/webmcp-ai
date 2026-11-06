@@ -21,7 +21,7 @@ import { AiCliError } from './errors.mjs';
 import { runProcess } from './process-runner.mjs';
 import { getProvider, listProviders, resolveProviderBin } from './providers/index.mjs';
 import { validateAgyBoundedSupport } from './providers/agy.mjs';
-import { validateClaudeBoundedSupport, validateClaudeReviewSupport } from './providers/claude.mjs';
+import { normalizeClaudeModel, validateClaudeBoundedSupport, validateClaudeReviewSupport } from './providers/claude.mjs';
 import { resolveReviewTargetForRequest, validateCodexReviewSupport, validateCodexReviewTargetSupport } from './providers/codex.mjs';
 import {
   assertOpencodeV2DbReady,
@@ -99,16 +99,18 @@ async function runWithLockRetry(run, attempts, onRetry) {
 
 function normalizeRequest(input) {
   const provider = getProvider(input.provider);
-  const rejectedEffort = effortRejection({ providerId: provider.id, modelId: input.model, effort: input.effort });
+  const rawModel = typeof input.model === 'string' && input.model.trim() ? input.model.trim() : (input.model || null);
+  const model = provider.id === 'claude' ? normalizeClaudeModel(rawModel) : rawModel;
+  const rejectedEffort = effortRejection({ providerId: provider.id, modelId: model, effort: input.effort });
   if (rejectedEffort) {
     const message = rejectedEffort.missingEffort
-      ? `${provider.name} model ${input.model} requires --effort (${rejectedEffort.allowedEfforts.join(', ')})`
-      : `${provider.name} model ${input.model} does not accept --effort`;
+      ? `${provider.name} model ${model} requires --effort (${rejectedEffort.allowedEfforts.join(', ')})`
+      : `${provider.name} model ${model} does not accept --effort`;
     throw new AiCliError('UNSUPPORTED_EFFORT', message, {
       exitCode: 2,
       details: {
         provider: provider.id,
-        model: input.model,
+        model,
         effort: input.effort ?? null,
         allowedEfforts: rejectedEffort.allowedEfforts,
         note: rejectedEffort.note ?? null,
@@ -277,7 +279,7 @@ function normalizeRequest(input) {
     capability,
     request: {
       prompt,
-      model: input.model || null,
+      model: model || null,
       effort: input.effort || null,
       schema: input.schema || null,
       sessionId: input.sessionId || null,

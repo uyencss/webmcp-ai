@@ -9,6 +9,7 @@
  */
 
 import { MAX_STREAM_PROMPT_BYTES } from './providers/agy.mjs';
+import { normalizeClaudeModel } from './providers/claude.mjs';
 
 const PROVIDER_SURFACE = Object.freeze({
   // Above MAX_PROMPT_ARG_BYTES (128 KiB) AGY moves from the `-p` argv lane to
@@ -51,6 +52,11 @@ const MODEL_OVERRIDES = Object.freeze({
   },
   'agy:claude-sonnet-4-6': { supportsEffort: false, effortValues: [] },
   'agy:gemini-3.8-flash-high': { supportsEffort: true, effortValues: ['low', 'medium', 'high'] },
+  'claude:claude-opus-5-5': {
+    supportsEffort: true,
+    effortValues: ['low', 'medium', 'high', 'xhigh', 'max'],
+    note: 'Claude Code Claude Opus 5.5',
+  },
   'agy:claude-opus-5-5': {
     supportsEffort: true,
     effortValues: ['low', 'medium', 'high'],
@@ -162,7 +168,10 @@ const MODEL_OVERRIDES = Object.freeze({
 
 export function describeModel(providerId, modelId) {
   const provider = String(providerId || '').trim().toLowerCase();
-  const model = typeof modelId === 'string' && modelId.trim() ? modelId.trim() : null;
+  let model = typeof modelId === 'string' && modelId.trim() ? modelId.trim() : null;
+  if (provider === 'claude' && model) {
+    model = normalizeClaudeModel(model);
+  }
   const surface = PROVIDER_SURFACE[provider];
   if (!surface) return null;
   const override = model ? MODEL_OVERRIDES[`${provider}:${model}`] ?? null : null;

@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 
 import { AiCliError } from '../errors.mjs';
 import { agyProvider } from './agy.mjs';
-import { claudeProvider } from './claude.mjs';
+import { claudeProvider, normalizeClaudeModel } from './claude.mjs';
 import { codexProvider } from './codex.mjs';
 import {
   assertOpencodeV2DbReady,
@@ -11,7 +11,7 @@ import {
   resolveOpencodeCliDb,
 } from './opencode.mjs';
 
-export { assertOpencodeV2DbReady, inspectOpencodeDb, resolveOpencodeCliDb };
+export { assertOpencodeV2DbReady, inspectOpencodeDb, resolveOpencodeCliDb, normalizeClaudeModel };
 
 const providers = [agyProvider, claudeProvider, codexProvider, opencodeProvider];
 const byId = new Map(providers.map((provider) => [provider.id, provider]));

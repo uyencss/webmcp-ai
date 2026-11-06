@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import { resolveOpencodeCliDb } from '../src/providers/opencode.mjs';
-import { getProvider, listProviders } from '../src/providers/index.mjs';
+import { getProvider, listProviders, normalizeClaudeModel } from '../src/providers/index.mjs';
 import { MAX_PROMPT_ARG_BYTES, MAX_STREAM_PROMPT_BYTES } from '../src/providers/agy.mjs';
 import { isolateTmpdir } from './helpers/isolated-tmpdir.mjs';
 
@@ -654,5 +654,129 @@ test('AGY buildInvocation rejects sessionAction fork with typed UNSUPPORTED_CAPA
       sessionAction: 'fork',
     }),
     (error) => error.code === 'UNSUPPORTED_CAPABILITY' && error.details?.capability === 'explicitFork',
+  );
+});
+
+test('normalizeClaudeModel normalizes legacy and hallucinated Claude Opus models to claude-opus-5-5', () => {
+  const cases = [
+    // Opus 4.x legacy/hallucinated variants
+    ['claude-opus-4-6', 'claude-opus-5-5'],
+    ['claude-opus-4-7', 'claude-opus-5-5'],
+    ['claude-opus-4-8', 'claude-opus-5-5'],
+    ['claude-opus-4-5', 'claude-opus-5-5'],
+    ['claude-opus-4', 'claude-opus-5-5'],
+    ['claude-opus-4-0', 'claude-opus-5-5'],
+    ['claude-opus-4.6', 'claude-opus-5-5'],
+    ['claude-opus-4-20250514', 'claude-opus-5-5'],
+    ['claude-opus-4-6-thinking', 'claude-opus-5-5'],
+    ['opus-4-6', 'claude-opus-5-5'],
+    ['opus-4-7', 'claude-opus-5-5'],
+    ['opus-4-8', 'claude-opus-5-5'],
+    ['opus-4', 'claude-opus-5-5'],
+    ['opus', 'claude-opus-5-5'],
+    ['claude-opus', 'claude-opus-5-5'],
+    // With [1m] context suffix preserved
+    ['claude-opus-4-6[1m]', 'claude-opus-5-5[1m]'],
+    ['claude-opus-4-7[1m]', 'claude-opus-5-5[1m]'],
+    ['claude-opus-4-8[1m]', 'claude-opus-5-5[1m]'],
+    ['claude-opus-4-6[1M]', 'claude-opus-5-5[1m]'],
+    ['opus-4-6[1m]', 'claude-opus-5-5[1m]'],
+    ['opus[1m]', 'claude-opus-5-5[1m]'],
+    ['claude-opus[1m]', 'claude-opus-5-5[1m]'],
+    // Whitespace trimming
+    ['  claude-opus-4-6  ', 'claude-opus-5-5'],
+    ['  opus-4-7  ', 'claude-opus-5-5'],
+    // Canonical 5.5 and other models untouched
+    ['claude-opus-5-5', 'claude-opus-5-5'],
+    ['claude-opus-5-5[1m]', 'claude-opus-5-5[1m]'],
+    ['claude-sonnet-4-6', 'claude-sonnet-4-6'],
+    ['claude-sonnet-4-6-thinking', 'claude-sonnet-4-6-thinking'],
+    ['claude-sonnet-5-5', 'claude-sonnet-5-5'],
+    ['sonnet', 'sonnet'],
+    // Non-string / empty passthrough
+    [null, null],
+    [undefined, undefined],
+    ['', ''],
+    ['   ', ''],
+  ];
+
+  for (const [input, expected] of cases) {
+    assert.equal(
+      normalizeClaudeModel(input),
+      expected,
+      `normalizeClaudeModel(${JSON.stringify(input)}) should be ${JSON.stringify(expected)}`,
+    );
+  }
+});
+
+test('Claude buildInvocation automatically rewrites legacy opus-4.x model IDs to claude-opus-5-5', () => {
+  const legacyModels = [
+    'claude-opus-4-6',
+    'claude-opus-4-7',
+    'claude-opus-4-8',
+    'claude-opus-4-5',
+    'claude-opus-4-6-thinking',
+    'opus-4-6',
+    'opus-4-7',
+    'opus',
+    'claude-opus',
+  ];
+
+  for (const model of legacyModels) {
+    const invocation = getProvider('claude').buildInvocation({
+      prompt: 'test prompt',
+      model,
+      timeoutMs: 1000,
+    });
+    assert.ok(invocation.args.includes('--model'), `expected --model for model ${model}`);
+    const modelIdx = invocation.args.indexOf('--model');
+    assert.equal(
+      invocation.args[modelIdx + 1],
+      'claude-opus-5-5',
+      `expected --model claude-opus-5-5 for input ${model}`,
+    );
+  }
+
+  // With [1m] suffix
+  for (const model of ['claude-opus-4-6[1m]', 'claude-opus-4-7[1m]', 'claude-opus-4-8[1m]', 'opus-4-6[1m]']) {
+    const invocation = getProvider('claude').buildInvocation({
+      prompt: 'test prompt',
+      model,
+      timeoutMs: 1000,
+    });
+    const modelIdx = invocation.args.indexOf('--model');
+    assert.equal(
+      invocation.args[modelIdx + 1],
+      'claude-opus-5-5[1m]',
+      `expected --model claude-opus-5-5[1m] for input ${model}`,
+    );
+  }
+
+  // Review lane mapping
+  const reviewInvocation = getProvider('claude').buildInvocation({
+    prompt: 'review code',
+    model: 'claude-opus-4-6',
+    taskIntent: 'review',
+    accessProfile: 'review-readonly',
+    timeoutMs: 1000,
+  });
+  const reviewModelIdx = reviewInvocation.args.indexOf('--model');
+  assert.equal(
+    reviewInvocation.args[reviewModelIdx + 1],
+    'claude-opus-5-5',
+    'expected review lane to normalize claude-opus-4-6 to claude-opus-5-5',
+  );
+
+  // Non-opus model is preserved untouched
+  const sonnetInvocation = getProvider('claude').buildInvocation({
+    prompt: 'test prompt',
+    model: 'claude-sonnet-4-6',
+    timeoutMs: 1000,
+  });
+  const sonnetModelIdx = sonnetInvocation.args.indexOf('--model');
+  assert.equal(
+    sonnetInvocation.args[sonnetModelIdx + 1],
+    'claude-sonnet-4-6',
+    'expected non-opus model to be preserved',
   );
 });

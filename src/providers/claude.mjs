@@ -1,5 +1,30 @@
 import { AiCliError } from '../errors.mjs';
 
+/**
+ * Normalizes legacy or hallucinated Claude Opus 4.x model identifiers to the
+ * canonical Claude Opus 5.5 model ID (`claude-opus-5-5`). Preserves `[1m]` suffix
+ * if present. Also normalizes bare `opus` / `claude-opus` to `claude-opus-5-5`.
+ *
+ * @param {string|unknown} model
+ * @returns {string|unknown}
+ */
+export function normalizeClaudeModel(model) {
+  if (!model || typeof model !== 'string') return model;
+  const trimmed = model.trim();
+  if (!trimmed) return trimmed;
+  const opusMatch = /^(?:claude-)?opus(\[1m\])?$/i.exec(trimmed);
+  if (opusMatch) {
+    const suffix = opusMatch[1] ? '[1m]' : '';
+    return `claude-opus-5-5${suffix}`;
+  }
+  const match = /^(?:claude-)?opus-4(?:[-.]\d+)*(?:-\d{8})?(?:-thinking)?(\[1m\])?$/i.exec(trimmed);
+  if (match) {
+    const suffix = match[1] ? '[1m]' : '';
+    return `claude-opus-5-5${suffix}`;
+  }
+  return trimmed;
+}
+
 // Defence-in-depth reviewer flags. Read tools are allowlisted; writes are
 // explicitly denied; Chrome stays disabled; safe-mode stays on for bounded
 // reviewer sessions. The exact flag set is validated against `claude --help`
@@ -179,6 +204,7 @@ export const claudeProvider = {
       }
       // Fall through to full passthrough below.
     }
+    const effectiveModel = normalizeClaudeModel(request.model);
     const sessionArgs = request.sessionId
       ? (request.sessionAction === 'fork' ? ['--resume', request.sessionId, '--fork-session'] : ['--resume', request.sessionId])
       : ['--no-session-persistence'];
@@ -227,7 +253,7 @@ export const claudeProvider = {
         '--permission-prompts', CLAUDE_REVIEW_ARGS.permissionPrompts,
         ...(wantsEvents ? ['--output-format', 'stream-json', '--verbose'] : ['--output-format', 'json']),
         ...sessionArgs,
-        ...(request.model ? ['--model', request.model] : []),
+        ...(effectiveModel ? ['--model', effectiveModel] : []),
         ...(request.effort ? ['--effort', request.effort] : []),
         ...(request.schema ? ['--json-schema', JSON.stringify(request.schema)] : []),
       ];
@@ -245,7 +271,7 @@ export const claudeProvider = {
       '--no-chrome',
       ...(wantsStream ? ['--output-format', 'stream-json', '--verbose'] : ['--output-format', 'json']),
       ...sessionArgs,
-      ...(request.model ? ['--model', request.model] : []),
+      ...(effectiveModel ? ['--model', effectiveModel] : []),
       ...(request.effort ? ['--effort', request.effort] : []),
       ...(request.schema ? ['--json-schema', JSON.stringify(request.schema)] : []),
     ];
